@@ -261,25 +261,3 @@ function errorMessage(err: unknown): string {
     return "unknown error";
   }
 }
-
-r(): Error {
-  const e = new Error("aborted");
-  e.name = "AbortError";
-  return e;
-}
-
-function isAbort(err: unknown): boolean {
-  if (err instanceof Error) {
-    return err.name === "AbortError" || /aborted/i.test(err.message);
-  }
-  return false;
-}
-
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  try {
-    return String(err);
-  } catch {
-    return "unknown error";
-  }
-}

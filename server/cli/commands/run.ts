@@ -119,14 +119,3 @@ export async function runCommand(args: RunArgs): Promise<void> {
 
   process.exit(exitCode);
 }
-
-) {
-    formatter.onError(err);
-    exitCode = 1;
-  } finally {
-    process.off("SIGINT", onSigint);
-    ctx.shutdown();
-  }
-
-  process.exit(exitCode);
-}

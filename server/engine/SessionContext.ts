@@ -406,12 +406,3 @@ function isTokenUsage(v: unknown): v is TokenUsage {
     typeof o["totalTokens"] === "number"
   );
 }
-
-ject") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o["promptTokens"] === "number" &&
-    typeof o["completionTokens"] === "number" &&
-    typeof o["totalTokens"] === "number"
-  );
-}
