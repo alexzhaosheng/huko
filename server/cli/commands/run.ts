@@ -5,9 +5,10 @@
  *
  * Flow:
  *   1. Build formatter for chosen output format
- *   2. Bootstrap orchestrator (SqlitePersistence + migrations)
+ *   2. Bootstrap orchestrator (default: SqlitePersistence;
+ *      with `ephemeral: true`: MemoryPersistence seeded from SQLite)
  *   3. Verify a default model is configured
- *   4. Create an ephemeral chat session
+ *   4. Create a chat session (title derived from prompt unless overridden)
  *   5. Send the prompt; await completion
  *   6. Exit with status code derived from terminal task status
  *
@@ -24,11 +25,33 @@ import { makeFormatter, type FormatName } from "../formatters/index.js";
 export type RunArgs = {
   prompt: string;
   format: FormatName;
+  /** Override the session title. When omitted, derived from the prompt. */
+  title?: string;
+  /** When true, run with MemoryPersistence (no DB writes for this run). */
+  ephemeral?: boolean;
 };
+
+/**
+ * Build a sensible default chat-session title from the prompt.
+ *
+ * Strategy: collapse all whitespace to single spaces, trim, take the
+ * first `max` characters. If we had to clip, append an ellipsis. Empty
+ * / whitespace-only prompts fall back to a timestamped name so the
+ * sessions list stays parseable.
+ */
+function deriveTitleFromPrompt(prompt: string, max: number = 40): string {
+  const oneLine = prompt.replace(/\s+/g, " ").trim();
+  if (oneLine.length === 0) {
+    return `cli ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+  }
+  return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + "…";
+}
 
 export async function runCommand(args: RunArgs): Promise<void> {
   const formatter = makeFormatter(args.format);
-  const ctx = bootstrap(formatter);
+  const ctx = await bootstrap(formatter, {
+    ...(args.ephemeral ? { ephemeral: true } : {}),
+  });
 
   // Default model check — without one we can't proceed.
   const defaultId = await ctx.persistence.config.getDefaultModelId();
@@ -42,11 +65,11 @@ export async function runCommand(args: RunArgs): Promise<void> {
     process.exit(3);
   }
 
-  // SIGINT during run → stop the task (graceful) instead of yanking the process.
+  // SIGINT during run -> stop the task (graceful) instead of yanking the process.
   let stopRequested = false;
   const onSigint = (): void => {
     if (stopRequested) {
-      // Second Ctrl+C → exit hard.
+      // Second Ctrl+C -> exit hard.
       process.stderr.write("\nhuko: forced exit\n");
       process.exit(130);
     }
@@ -70,9 +93,8 @@ export async function runCommand(args: RunArgs): Promise<void> {
 
   let exitCode = 0;
   try {
-    const sessionId = await ctx.orchestrator.createChatSession(
-      `cli ${new Date().toISOString().slice(0, 16).replace("T", " ")}`,
-    );
+    const sessionTitle = args.title ?? deriveTitleFromPrompt(args.prompt);
+    const sessionId = await ctx.orchestrator.createChatSession(sessionTitle);
     const result = await ctx.orchestrator.sendUserMessage({
       chatSessionId: sessionId,
       content: args.prompt,

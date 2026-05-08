@@ -4,22 +4,20 @@
  * Daemon-mode entry point.
  *
  * Boots:
- *   1. DB migrations (idempotent, SQLite persistence)
- *   2. SqlitePersistence — the daemon-mode persistence backend
- *   3. Express + plain HTTP server (so Socket.IO can attach)
- *   4. Socket.IO gateway → emitterFactory
- *   5. TaskOrchestrator wired up with persistence + gateway
- *   6. tRPC adapter at /api/trpc
- *   7. Health endpoint
- *   8. Listen
+ *   1. SqlitePersistence — its constructor migrates idempotently
+ *   2. Express + plain HTTP server (so Socket.IO can attach)
+ *   3. Socket.IO gateway -> emitterFactory
+ *   4. TaskOrchestrator wired up with persistence + gateway
+ *   5. tRPC adapter at /api/trpc
+ *   6. Health endpoint
+ *   7. Listen
  *
  * This is one of huko's frontends — the "long-running daemon" one.
  * It exposes the kernel over HTTP + WebSocket so external clients
  * (CLI in daemon mode, future plugins, IDE extensions) can drive it.
  *
- * Other frontends (CLI one-shot, future) wire the kernel directly with
- * a different Persistence (typically MemoryPersistence) and no HTTP
- * surface at all.
+ * Other frontends (CLI one-shot) wire the kernel directly with whatever
+ * Persistence they want and no HTTP surface at all.
  *
  * Graceful shutdown closes Socket.IO, the HTTP server, and the
  * persistence backend in order.
@@ -29,7 +27,6 @@ import { createServer } from "node:http";
 import express from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 
-import { runMigrations } from "../db/index.js";
 import { SqlitePersistence } from "../persistence/index.js";
 import { createGateway } from "../gateway.js";
 import { TaskOrchestrator } from "../services/index.js";
@@ -40,39 +37,31 @@ import { appRouter } from "../routers/index.js";
 const PORT = Number(process.env["PORT"] ?? 3000);
 const HOST = process.env["HOST"] ?? "127.0.0.1";
 
-// ─── 1. Migrate ──────────────────────────────────────────────────────────────
+// ─── 1. Persistence ──────────────────────────────────────────────────────────
 
-const migrationResult = runMigrations();
-if (migrationResult.applied.length > 0) {
-  console.log(
-    `db: applied ${migrationResult.applied.length} migration(s):`,
-    migrationResult.applied.join(", "),
-  );
-}
-
-// ─── 2. Persistence ──────────────────────────────────────────────────────────
-
+// SqlitePersistence's constructor runs migrations idempotently — schema
+// management is its own concern, the daemon doesn't need to know.
 const persistence = new SqlitePersistence();
 
-// ─── 3. Express + HTTP ───────────────────────────────────────────────────────
+// ─── 2. Express + HTTP ───────────────────────────────────────────────────────
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 const httpServer = createServer(app);
 
-// ─── 4. Gateway (Socket.IO) ──────────────────────────────────────────────────
+// ─── 3. Gateway (Socket.IO) ──────────────────────────────────────────────────
 
 const gateway = createGateway(httpServer);
 
-// ─── 5. Orchestrator ─────────────────────────────────────────────────────────
+// ─── 4. Orchestrator ─────────────────────────────────────────────────────────
 
 const orchestrator = new TaskOrchestrator({
   persistence,
   emitterFactory: gateway.emitterFactory,
 });
 
-// ─── 6. tRPC ─────────────────────────────────────────────────────────────────
+// ─── 5. tRPC ─────────────────────────────────────────────────────────────────
 
 app.use(
   "/api/trpc",
@@ -85,15 +74,10 @@ app.use(
   }),
 );
 
-// ─── 7. Health / landing ─────────────────────────────────────────────────────
+// ─── 6. Health / landing ─────────────────────────────────────────────────────
 
 app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "huko",
-    migrationsApplied: migrationResult.applied,
-    migrationsSkipped: migrationResult.skipped,
-  });
+  res.json({ ok: true, service: "huko" });
 });
 
 app.get("/", (_req, res) => {
@@ -101,16 +85,16 @@ app.get("/", (_req, res) => {
     [
       "huko daemon",
       "",
-      "  GET  /health      → liveness",
-      "  POST /api/trpc/*  → tRPC procedures",
-      "  WS   /socket.io   → event stream",
+      "  GET  /health      -> liveness",
+      "  POST /api/trpc/*  -> tRPC procedures",
+      "  WS   /socket.io   -> event stream",
       "",
       "Drive me from a client (CLI or external UI). I have no UI of my own.",
     ].join("\n"),
   );
 });
 
-// ─── 8. Listen ───────────────────────────────────────────────────────────────
+// ─── 7. Listen ───────────────────────────────────────────────────────────────
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`huko daemon listening on http://${HOST}:${PORT}`);
@@ -130,7 +114,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   httpServer.close(() => {
     try {
-      persistence.close?.();
+      void persistence.close();
     } catch {
       /* already closed */
     }
@@ -141,3 +125,4 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+

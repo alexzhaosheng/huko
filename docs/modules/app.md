@@ -17,17 +17,17 @@ server/core/app.ts        Express + http.Server + Socket.IO + tRPC 装配
 ## Boot 顺序
 
 ```
-1. runMigrations()                                   DB schema 准备好（幂等）
+1. const persistence = new SqlitePersistence()       constructor 自己 migrate（幂等）
 2. const app = express(); app.use(express.json())    Express + body parser
 3. const httpServer = http.createServer(app)         Socket.IO 要挂到 plain http server
 4. const gateway = createGateway(httpServer)         Socket.IO + emitterFactory
 5. const orchestrator = new TaskOrchestrator({       engine 装配点
-     db,
+     persistence,
      emitterFactory: gateway.emitterFactory,
    })
 6. app.use("/api/trpc", createExpressMiddleware({    tRPC mount
      router: appRouter,
-     createContext: () => ({ db, orchestrator }),
+     createContext: () => ({ persistence, orchestrator }),
    }))
 7. app.get("/health"), app.get("/")                  健康检查 + landing
 8. httpServer.listen(PORT, HOST)                     起飞
@@ -35,8 +35,10 @@ server/core/app.ts        Express + http.Server + Socket.IO + tRPC 装配
 
 **顺序不能乱**：
 
-- migration 必须在所有 DB 操作前
 - gateway 要在 orchestrator 前（orchestrator 构造函数吃 emitterFactory）
+
+**注意**：app.ts **不直接调** `runMigrations()`。schema 管理是 SqlitePersistence
+的内部职责，藏在它的 constructor 里——daemon 不需要知道 backend 的实现细节。
 - tRPC 在 gateway 之后（route handler 闭包里用 orchestrator）
 - listen 最后
 

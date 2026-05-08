@@ -7,12 +7,17 @@
  * used to live scattered across the orchestrator and tRPC routers are
  * consolidated here — the rest of the kernel speaks `Persistence`.
  *
+ * Schema management is internal: the constructor runs migrations
+ * idempotently (the migration runner exits in O(1) when nothing's to
+ * apply). Callers shouldn't have to know "this backend needs a migration
+ * step" — that's a leaky abstraction.
+ *
  * Underneath better-sqlite3 is synchronous; these methods are typed
  * `Promise<T>` to match the interface but resolve immediately.
  *
  * Construction:
- *   new SqlitePersistence()                  // uses the singleton db
- *   new SqlitePersistence({ db, sqlite })    // inject explicitly (tests)
+ *   new SqlitePersistence()                  // default singleton db, auto-migrates
+ *   new SqlitePersistence({ db, sqlite })    // inject explicitly (tests own schema)
  */
 
 import { eq, and, asc, desc } from "drizzle-orm";
@@ -35,6 +40,7 @@ import {
   makeUpdateEntry,
   loadSessionLLMContext,
 } from "../db/adapter.js";
+import { runMigrations } from "../db/migrate.js";
 import type {
   ChatSessionRow,
   ConfigRow,
@@ -73,6 +79,13 @@ export class SqlitePersistence implements Persistence {
   constructor(opts: SqlitePersistenceOptions = {}) {
     this.db = opts.db ?? defaultDb;
     this.sqlite = opts.sqlite ?? defaultSqlite;
+
+    // Tests that pass an explicit `db` instance manage their own schema,
+    // so we only auto-migrate on the default path.
+    if (!opts.db && !opts.sqlite) {
+      runMigrations();
+    }
+
     const db = this.db;
 
     // ── entries (Tier 1) ────────────────────────────────────────────────────

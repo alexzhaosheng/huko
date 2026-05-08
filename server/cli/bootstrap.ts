@@ -3,25 +3,37 @@
  *
  * Shared CLI orchestrator setup.
  *
- * Builds:
- *   - SqlitePersistence (with migrations applied) — the daemon-shared store
- *   - TaskOrchestrator — wired with persistence + the formatter's emitter
+ * Bootstrap deals in Persistence abstractions. It does NOT know about
+ * migrations, file paths, schema, or any other backend implementation
+ * detail — those are each backend's own concern (e.g. SqlitePersistence
+ * runs its own migrations from its constructor).
  *
- * Returns a small handle so the command can teardown cleanly.
+ * Two modes:
  *
- * Why share the same SQLite file as the daemon: lets `huko run` "see"
- * the providers/models the user already configured via the daemon, and
- * lets the daemon "see" sessions created by the CLI. Single source of
- * truth, no separate config to manage.
+ *   1. Default (persistent):
+ *        - SqlitePersistence
+ *        - sessions / tasks / entries land in huko.db
  *
- * Future: a `--memory` flag will swap in MemoryPersistence for fully
- * ephemeral runs (no DB writes, can't reuse daemon-side config).
+ *   2. Ephemeral (`{ ephemeral: true }`, surfaced as `--memory` on the CLI):
+ *        - MemoryPersistence
+ *        - sessions / tasks / entries are in-memory only — vanish on exit
+ *        - providers / models / default_model_id are SEEDED from a
+ *          short-lived SqlitePersistence at startup so the user's saved
+ *          config still applies; that connection is then closed
  */
 
-import { runMigrations } from "../db/migrate.js";
-import { SqlitePersistence, type Persistence } from "../persistence/index.js";
+import {
+  MemoryPersistence,
+  SqlitePersistence,
+  type Persistence,
+} from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
 import type { Formatter } from "./formatters/index.js";
+
+export type BootstrapOptions = {
+  /** When true, use MemoryPersistence seeded from SQLite for config. */
+  ephemeral?: boolean;
+};
 
 export type CliBootstrap = {
   persistence: Persistence;
@@ -29,9 +41,13 @@ export type CliBootstrap = {
   shutdown(): void;
 };
 
-export function bootstrap(formatter: Formatter): CliBootstrap {
-  runMigrations();
-  const persistence = new SqlitePersistence();
+export async function bootstrap(
+  formatter: Formatter,
+  options: BootstrapOptions = {},
+): Promise<CliBootstrap> {
+  const persistence = options.ephemeral
+    ? await buildEphemeralPersistence()
+    : new SqlitePersistence();
 
   // Single formatter for the whole process — the CLI is one task at a time,
   // so we don't need per-room emitters. The factory ignores the room arg.
@@ -45,10 +61,78 @@ export function bootstrap(formatter: Formatter): CliBootstrap {
     orchestrator,
     shutdown() {
       try {
-        (persistence as unknown as { close?: () => void }).close?.();
+        void persistence.close();
       } catch {
         /* already closed */
       }
     },
   };
+}
+
+// ─── Ephemeral mode ──────────────────────────────────────────────────────────
+
+/**
+ * Build a MemoryPersistence pre-seeded with providers / models / default
+ * model from the on-disk SQLite. The SQLite connection is opened just
+ * long enough to copy these rows, then closed — no writes hit the disk.
+ */
+async function buildEphemeralPersistence(): Promise<Persistence> {
+  const sqlite = new SqlitePersistence();
+  const memory = new MemoryPersistence();
+  try {
+    await seedFromSource(memory, sqlite);
+  } finally {
+    try {
+      void sqlite.close();
+    } catch {
+      /* already closed */
+    }
+  }
+  return memory;
+}
+
+/**
+ * Copy providers, models and default_model_id from `source` into
+ * `target`, preserving the foreign-key relationships.
+ *
+ * Ids may be reassigned by the target — `seedFromSource` keeps id maps
+ * locally so model.providerId and the default_model_id config value
+ * point to the right new rows after the copy.
+ */
+async function seedFromSource(target: Persistence, source: Persistence): Promise<void> {
+  const sourceProviders = await source.providers.list();
+  const providerIdMap = new Map<number, number>();
+  for (const p of sourceProviders) {
+    const newId = await target.providers.create({
+      name: p.name,
+      protocol: p.protocol,
+      baseUrl: p.baseUrl,
+      apiKey: p.apiKey,
+      defaultHeaders: p.defaultHeaders ?? null,
+    });
+    providerIdMap.set(p.id, newId);
+  }
+
+  const sourceModels = await source.models.list();
+  const modelIdMap = new Map<number, number>();
+  for (const m of sourceModels) {
+    const newProviderId = providerIdMap.get(m.providerId);
+    if (newProviderId === undefined) continue;
+    const newId = await target.models.create({
+      providerId: newProviderId,
+      modelId: m.modelId,
+      displayName: m.displayName,
+      defaultThinkLevel: m.defaultThinkLevel,
+      defaultToolCallMode: m.defaultToolCallMode,
+    });
+    modelIdMap.set(m.id, newId);
+  }
+
+  const oldDefault = await source.config.getDefaultModelId();
+  if (oldDefault !== null) {
+    const newDefault = modelIdMap.get(oldDefault);
+    if (newDefault !== undefined) {
+      await target.config.setDefaultModelId(newDefault);
+    }
+  }
 }

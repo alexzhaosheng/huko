@@ -58,7 +58,6 @@ export class MemoryPersistence implements Persistence {
     const allocId = (): number => this.nextId++;
     const now = (): number => Date.now();
 
-    // ── entries ────────────────────────────────────────────────────────────
     this.entries = {
       persist: async (entry) => {
         const id = allocId();
@@ -106,7 +105,6 @@ export class MemoryPersistence implements Persistence {
       },
     };
 
-    // ── sessions ───────────────────────────────────────────────────────────
     this.sessions = {
       create: async (input: CreateChatSessionInput) => {
         const id = allocId();
@@ -125,7 +123,6 @@ export class MemoryPersistence implements Persistence {
       get: async (id) => this._sessions.get(id) ?? null,
       delete: async (id) => {
         this._sessions.delete(id);
-        // Cascade: drop tasks owned by this session, then entries owned by those tasks.
         const droppedTaskIds = new Set<number>();
         for (const [tid, t] of this._tasks) {
           if (t.chatSessionId === id || t.agentSessionId === id) {
@@ -139,7 +136,6 @@ export class MemoryPersistence implements Persistence {
       },
     };
 
-    // ── tasks ──────────────────────────────────────────────────────────────
     this.tasks = {
       create: async (input: CreateTaskInput) => {
         const id = allocId();
@@ -181,7 +177,6 @@ export class MemoryPersistence implements Persistence {
       get: async (id) => this._tasks.get(id) ?? null,
     };
 
-    // ── providers ──────────────────────────────────────────────────────────
     this.providers = {
       list: async () => [...this._providers.values()],
       create: async (input: CreateProviderInput) => {
@@ -210,14 +205,12 @@ export class MemoryPersistence implements Persistence {
       },
       delete: async (id) => {
         this._providers.delete(id);
-        // Cascade: drop models referencing this provider.
         for (const [mid, m] of this._models) {
           if (m.providerId === id) this._models.delete(mid);
         }
       },
     };
 
-    // ── models ─────────────────────────────────────────────────────────────
     this.models = {
       list: async (): Promise<ModelRowJoined[]> => {
         const out: ModelRowJoined[] = [];
@@ -265,7 +258,6 @@ export class MemoryPersistence implements Persistence {
       },
     };
 
-    // ── config ─────────────────────────────────────────────────────────────
     this.config = {
       get: async (key) => this._config.get(key)?.value ?? null,
       set: async (key, value) => {
@@ -286,7 +278,6 @@ export class MemoryPersistence implements Persistence {
     };
   }
 
-  // Helper: ordered entries for a session.
   private entriesForSession(sessionId: number, type: SessionType): EntryRow[] {
     const out: EntryRow[] = [];
     for (const r of this._entries.values()) {
@@ -294,11 +285,16 @@ export class MemoryPersistence implements Persistence {
     }
     return out.sort((a, b) => a.id - b.id);
   }
+
+  // No-op — there's nothing to flush or close. Implemented to satisfy the
+  // Persistence interface so callers can `persistence.close()` uniformly.
+  close(): void {
+    /* nothing to do */
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Mirror of `dbEntryToLLMMessage` — DB row → LLMMessage. */
 function projectToLLMMessage(r: EntryRow): LLMMessage | null {
   if (!isLLMVisible(r.kind as EntryKind)) return null;
   const meta = r.metadata as Record<string, unknown> | null;

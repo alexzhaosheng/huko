@@ -3,20 +3,18 @@
  *
  * End-to-end smoke test for orchestrator + Persistence + HukoEvent.
  *
- *   1. Run migrations (idempotent)
- *   2. Build SqlitePersistence
- *   3. Seed an OpenRouter provider + model + default (idempotent)
- *   4. Build orchestrator with a console-backed HukoEvent emitter
- *   5. Create a chat session
- *   6. Send a user message
- *   7. Watch the typed event stream, await completion, print summary
+ *   1. Build SqlitePersistence (its constructor migrates idempotently)
+ *   2. Seed an OpenRouter provider + model + default (idempotent)
+ *   3. Build orchestrator with a console-backed HukoEvent emitter
+ *   4. Create a chat session
+ *   5. Send a user message
+ *   6. Watch the typed event stream, await completion, print summary
  *
  * Usage:
  *   OPENROUTER_API_KEY=sk-or-... npx tsx scripts/orchestrator-demo.ts
  *   OPENROUTER_API_KEY=sk-or-... MODEL=openai/gpt-4o-mini npx tsx scripts/orchestrator-demo.ts
  */
 
-import { runMigrations } from "../server/db/migrate.js";
 import { SqlitePersistence } from "../server/persistence/index.js";
 import { TaskOrchestrator } from "../server/services/index.js";
 import type { HukoEvent } from "../shared/events.js";
@@ -35,14 +33,8 @@ if (!apiKey) {
 }
 const modelIdString = process.env["MODEL"] ?? "anthropic/claude-3.5-haiku";
 
-// ─── Migrate + persistence ──────────────────────────────────────────────────
-
-const migration = runMigrations();
-if (migration.applied.length > 0) {
-  console.log(`migrated: applied ${migration.applied.length}, skipped ${migration.skipped.length}`);
-}
-
 // const persistence = new SqlitePersistence();
+// (SqlitePersistence's constructor migrates idempotently if used.)
 
 // ─── Seed: provider + model + default ───────────────────────────────────────
 
@@ -180,4 +172,4 @@ console.log("\n" + dim("-".repeat(60)));
 console.log("summary:", summary);
 console.log(dim("-".repeat(60)));
 
-persistence.close?.();
+persistence.close();

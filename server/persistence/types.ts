@@ -5,10 +5,8 @@
  * any storage backend (in-memory, SQLite, Postgres, log services, ...).
  *
  * Backed by:
- *   - MemoryPersistence  — full impl, in-memory, lost on exit (for one-shot
- *                          CLI runs, tests, ephemeral sandboxes)
+ *   - MemoryPersistence  — full impl, in-memory, lost on exit
  *   - SqlitePersistence  — full impl backed by better-sqlite3 + Drizzle
- *                          (the daemon-mode default)
  *   - external packages  — `huko-persistence-postgres` etc.
  *
  * Two tiers:
@@ -92,13 +90,11 @@ export type ModelRow = {
   createdAt: number;
 };
 
-/** A model row joined with its provider's name + protocol — what UIs need to render. */
 export type ModelRowJoined = ModelRow & {
   providerName: string;
   providerProtocol: Protocol;
 };
 
-/** Everything pipeline needs to make an LLM call — assembled from models ⨝ providers. */
 export type ResolvedModelConfig = {
   modelId: string;
   protocol: Protocol;
@@ -115,7 +111,7 @@ export type ConfigRow = {
   updatedAt: number;
 };
 
-// ─── Inputs (what callers pass when creating/updating) ───────────────────────
+// ─── Inputs ──────────────────────────────────────────────────────────────────
 
 export type CreateChatSessionInput = {
   title?: string;
@@ -168,36 +164,17 @@ export type CreateModelInput = {
 // ─── The interface ───────────────────────────────────────────────────────────
 
 export interface Persistence {
-  /**
-   * Tier 1 — kernel needs these. Implementations MUST provide them.
-   */
   readonly entries: {
-    /** Insert a new task_context entry. Returns the new row id. */
     persist: PersistFn;
-    /** Patch an existing entry (content / metadata). */
     update: UpdateFn;
-    /**
-     * Replay a session's history into LLMMessages, ready to seed a
-     * fresh SessionContext. Filters out non-LLM-visible entries.
-     */
     loadLLMContext(sessionId: number, type: SessionType): Promise<LLMMessage[]>;
-    /**
-     * List all entries for a session (LLM-visible or not). Used by
-     * the chat detail view to render full history including status notices.
-     */
     listForSession(sessionId: number, type: SessionType): Promise<EntryRow[]>;
   };
 
-  /**
-   * Tier 2 — needed for daemon mode + multi-session features. Backends
-   * that don't support these can throw `PersistenceUnsupportedError`,
-   * but `MemoryPersistence` and `SqlitePersistence` implement everything.
-   */
   readonly sessions: {
     create(input: CreateChatSessionInput): Promise<number>;
     list(): Promise<ChatSessionRow[]>;
     get(id: number): Promise<ChatSessionRow | null>;
-    /** Cascade-deletes tasks and entries owned by this session. */
     delete(id: number): Promise<void>;
   };
 
@@ -218,10 +195,6 @@ export interface Persistence {
     list(): Promise<ModelRowJoined[]>;
     create(input: CreateModelInput): Promise<number>;
     delete(id: number): Promise<void>;
-    /**
-     * Aggregate query — model row joined with its provider's connection
-     * info. Returns null if the model is not found.
-     */
     resolveConfig(modelId: number): Promise<ResolvedModelConfig | null>;
   };
 
@@ -229,23 +202,21 @@ export interface Persistence {
     get(key: string): Promise<unknown>;
     set(key: string, value: unknown): Promise<void>;
     list(): Promise<ConfigRow[]>;
-    /** Convenience for the most-used key. */
     getDefaultModelId(): Promise<number | null>;
     setDefaultModelId(modelId: number): Promise<void>;
   };
 
-  /** Optional graceful shutdown — close connections, flush WAL, etc. */
-  close?(): Promise<void> | void;
+  /**
+   * Graceful shutdown — close connections, flush WAL, etc.
+   * Required: every backend implements this even if it's a no-op
+   * (MemoryPersistence). Making it part of the interface lets callers
+   * do `persistence.close()` without duck-typing.
+   */
+  close(): Promise<void> | void;
 }
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
-/**
- * Thrown by Tier 2 methods on backends that don't support them.
- * Most code should never see this — the daemon expects full Tier 2 — but
- * a caller deliberately mixing a Tier-1-only backend with daemon code
- * should fail loudly here.
- */
 export class PersistenceUnsupportedError extends Error {
   constructor(operation: string) {
     super(`Persistence backend does not support: ${operation}`);
