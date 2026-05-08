@@ -41,6 +41,7 @@ import {
   loadSessionLLMContext,
 } from "../db/adapter.js";
 import { runMigrations } from "../db/migrate.js";
+import { collectElidedEntryIds } from "./memory.js";
 import type {
   ChatSessionRow,
   ConfigRow,
@@ -92,8 +93,21 @@ export class SqlitePersistence implements Persistence {
     this.entries = {
       persist: makePersistEntry(db),
       update: makeUpdateEntry(db),
-      loadLLMContext: (sessionId: number, type: SessionType): Promise<LLMMessage[]> =>
-        loadSessionLLMContext(db, sessionId, type),
+      loadLLMContext: async (sessionId: number, type: SessionType): Promise<LLMMessage[]> => {
+        const messages = await loadSessionLLMContext(db, sessionId, type);
+        // Drop entries that previous compactions elided. See
+        // pipeline/context-manage.ts and the TODO on this method
+        // in persistence/types.ts.
+        const allRows = await db
+          .select()
+          .from(taskContext)
+          .where(and(eq(taskContext.sessionId, sessionId), eq(taskContext.sessionType, type)))
+          .orderBy(asc(taskContext.id))
+          .all();
+        const elided = collectElidedEntryIds(allRows.map(toEntryRow));
+        if (elided.size === 0) return messages;
+        return messages.filter((m) => m._entryId === undefined || !elided.has(m._entryId));
+      },
       listForSession: async (sessionId, type): Promise<EntryRow[]> => {
         const rows = await db
           .select()
@@ -164,6 +178,12 @@ export class SqlitePersistence implements Persistence {
       get: async (id: number): Promise<TaskRow | null> => {
         const row = await db.select().from(tasks).where(eq(tasks.id, id)).get();
         return row ? toTaskRow(row) : null;
+      },
+      listNonTerminal: async (): Promise<TaskRow[]> => {
+        const rows = await db.select().from(tasks).all();
+        return rows
+          .filter((r) => r.status !== "done" && r.status !== "failed" && r.status !== "stopped")
+          .map(toTaskRow);
       },
     };
 

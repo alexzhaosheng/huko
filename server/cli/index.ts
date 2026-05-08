@@ -32,6 +32,7 @@ import {
   sessionsDeleteCommand,
   type OutputFormat,
 } from "./commands/sessions.js";
+import { configShowCommand } from "./commands/config.js";
 import type { FormatName } from "./formatters/index.js";
 
 function usage(exitCode: number = 3): never {
@@ -53,6 +54,9 @@ function usage(exitCode: number = 3): never {
       "  --memory                  Run ephemerally — session/messages are NOT",
       "                            written to disk. Provider/model config is",
       "                            still read from huko.db at startup.",
+      "  --role=<name>             Role / persona (default: coding). Looks up",
+      "                            <project>/.huko/roles/<name>.md, then",
+      "                            ~/.huko/roles/<name>.md, then built-in.",
       "  -h, --help                Show this help",
       "",
       "Options for `sessions list`:",
@@ -137,6 +141,7 @@ async function dispatchRun(rest: string[]): Promise<void> {
   // parseFormatFlags rejects unknown --xxx flags loudly.
   let title: string | undefined;
   let ephemeral = false;
+  let role: string | undefined;
   const filtered: string[] = [];
   for (const arg of rest) {
     if (arg.startsWith("--title=")) {
@@ -145,6 +150,10 @@ async function dispatchRun(rest: string[]): Promise<void> {
     }
     if (arg === "--memory") {
       ephemeral = true;
+      continue;
+    }
+    if (arg.startsWith("--role=")) {
+      role = arg.slice("--role=".length);
       continue;
     }
     filtered.push(arg);
@@ -167,6 +176,7 @@ async function dispatchRun(rest: string[]): Promise<void> {
     format,
     ...(title !== undefined ? { title } : {}),
     ...(ephemeral ? { ephemeral: true } : {}),
+    ...(role !== undefined ? { role } : {}),
   });
 }
 
@@ -246,6 +256,16 @@ async function main(): Promise<void> {
   if (cmd === "sessions") {
     await dispatchSessions(rest);
     return;
+  }
+
+  if (cmd === "config") {
+    const verb = rest[0];
+    if (verb === "show" || verb === undefined) {
+      await configShowCommand();
+      return;
+    }
+    process.stderr.write(`huko config: unknown verb: ${verb} (try: show)\n`);
+    usage();
   }
 
   process.stderr.write(`huko: unknown command: ${cmd}\n`);

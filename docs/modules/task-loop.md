@@ -132,3 +132,5 @@ OPENROUTER_API_KEY=sk-or-... npx tsx scripts/engine-demo.ts
 - [engine.md](./engine.md) —— TaskContext / SessionContext 的契约
 - [pipeline.md](./pipeline.md) —— TaskLoop 委托给 pipeline 的具体步骤
 - [tools.md](./tools.md) —— `result.toolCalls` 怎么路由
+
+

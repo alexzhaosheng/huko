@@ -34,15 +34,13 @@ import type { TaskContext } from "../engine/TaskContext.js";
 import { callLLM } from "./pipeline/llm-call.js";
 import { executeAndPersist } from "./pipeline/tool-execute.js";
 import { manageContext } from "./pipeline/context-manage.js";
+import { getConfig } from "../config/index.js";
 
 // ─── Tunables ─────────────────────────────────────────────────────────────────
-
-/** Hard cap on LLM iterations per task. Defensive — runaway protection. */
-const MAX_ITERATIONS = 200;
-/** Hard cap on tool executions per task. */
-const MAX_TOOL_CALLS = 200;
-/** Bounded retries when the LLM emits empty content with no tool calls. */
-const MAX_EMPTY_RETRIES = 3;
+//
+// All three budgets come from `config.task.*`. Defaults live in
+// `server/config/types.ts:DEFAULT_CONFIG`; operators override via
+// ~/.huko/config.json or <project>/.huko/config.json. See docs/modules/config.md.
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -77,6 +75,12 @@ export class TaskLoop {
 
     const ctx = this.ctx;
     let consecutiveEmpty = 0;
+
+    // Snapshot at task start — config doesn't hot-reload mid-task.
+    const cfg = getConfig().task;
+    const MAX_ITERATIONS = cfg.maxIterations;
+    const MAX_TOOL_CALLS = cfg.maxToolCalls;
+    const MAX_EMPTY_RETRIES = cfg.maxEmptyRetries;
 
     try {
       while (true) {
@@ -174,10 +178,9 @@ export class TaskLoop {
           ctx.taskFailed = true;
           break;
         }
-        await ctx.sessionContext.append({
+        await ctx.sessionContext.appendReminder({
           taskId: ctx.taskId,
-          kind: EntryKind.SystemReminder,
-          role: "user",
+          reason: "empty_turn",
           content:
             "Your previous turn was empty. Either call a tool or reply to the user with a final answer.",
         });

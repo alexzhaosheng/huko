@@ -22,6 +22,7 @@
  */
 
 import { openrouter } from "../server/core/llm/index.js";
+import { estimateContextWindow } from "../server/core/llm/model-context-window.js";
 import { SessionContext } from "../server/engine/SessionContext.js";
 import { TaskContext } from "../server/engine/TaskContext.js";
 import { TaskLoop } from "../server/task/task-loop.js";
@@ -192,6 +193,7 @@ const taskContext = new TaskContext({
   apiKey,
   toolCallMode: "native",
   thinkLevel: "off",
+  contextWindow: estimateContextWindow(model),
   headers: openrouter.defaultHeaders ?? {},
   tools: [
     {
@@ -218,6 +220,12 @@ const summary = await loop.run();
 console.log("\n");
 console.log(dim("─".repeat(60)));
 console.log("summary:");
+console.log(summary);
+console.log(dim("─".repeat(60)));
+console.log("final result:");
+console.log(taskContext.finalResult);
+
+");
 console.log(summary);
 console.log(dim("─".repeat(60)));
 console.log("final result:");

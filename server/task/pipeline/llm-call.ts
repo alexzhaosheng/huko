@@ -11,10 +11,11 @@
  *   4. Invoke the LLM with `onPartial`. Each delta is emitted DIRECTLY
  *      as a `HukoEvent` (`assistant_content_delta` / `assistant_thinking_delta`)
  *      via `sessionContext.emit(...)`. The DB row is throttled-synced.
- *   5. After the call returns, write the final state via `update({final:true})`
+ *   5. Drain any in-flight partial flush (race-safe even on async backends).
+ *   6. After the call returns, write the final state via `update({final:true})`
  *      — that triggers `assistant_complete` emit.
- *   6. `commitToContext` — push to LLM context for next turn.
- *   7. Token bookkeeping.
+ *   7. `commitToContext` — push to LLM context for next turn.
+ *   8. Token bookkeeping.
  *
  * Aborts: an `AbortError` becomes `{kind:"aborted", reason:"stopped"|"interjected"}`.
  * The TaskLoop decides what that means.
@@ -71,12 +72,21 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
   let dbDirty = false;
   let lastDbFlush = 0;
   let pendingDbFlush: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The most recent in-flight partial flush. We await this before the
+   * final update so an async-DB backend (e.g. Postgres over TCP) can
+   * never reorder a stale partial write AFTER the authoritative final
+   * write. With today's synchronous backends (Memory / SqlitePersistence
+   * via better-sqlite3) the work is already done by the time this
+   * promise is created, so the await is a no-op fast path.
+   */
+  let inflightFlush: Promise<void> | null = null;
 
   const flushDb = (): void => {
     if (!dbDirty) return;
     dbDirty = false;
     lastDbFlush = Date.now();
-    sc
+    inflightFlush = sc
       .update({
         entryId,
         taskId: ctx.taskId,
@@ -112,7 +122,6 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     }
     dbDirty = true;
 
-    // Throttle DB writes so SQLite doesn't flood. Wire emit is unthrottled.
     const now = Date.now();
     if (now - lastDbFlush >= DB_FLUSH_MS) {
       flushDb();
@@ -147,6 +156,12 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     ctx.masterAbort.signal.removeEventListener("abort", onMasterAbort);
     ctx.currentLlmAbort = null;
 
+    // Drain in-flight partial flush; flushDb already .catch()es so this can't reject.
+    if (inflightFlush) {
+      await inflightFlush;
+      inflightFlush = null;
+    }
+
     if (isAbort(err)) {
       if (ctx.masterAbort.signal.aborted) {
         return { kind: "aborted", reason: "stopped" };
@@ -160,6 +175,15 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
   ctx.masterAbort.signal.removeEventListener("abort", onMasterAbort);
   ctx.currentLlmAbort = null;
 
+  // Drain the most recent in-flight partial flush BEFORE the final write.
+  // Synchronous backends already settled this; an async backend would
+  // otherwise risk a stale partial landing AFTER the final and clobbering
+  // it. See `inflightFlush` declaration for full rationale.
+  if (inflightFlush) {
+    await inflightFlush;
+    inflightFlush = null;
+  }
+
   // ── 6. Final flush — DB authoritative + assistant_complete emit ──────────
   const finalMetadata: Record<string, unknown> = {};
   if (result.thinking) finalMetadata["thinking"] = result.thinking;
@@ -172,7 +196,7 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     content: result.content,
     metadata: finalMetadata,
     mergeMetadata: true,
-    final: true, // ← triggers assistant_complete HukoEvent
+    final: true,
   });
 
   // ── 7. Commit to LLM context ─────────────────────────────────────────────

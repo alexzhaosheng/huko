@@ -18,9 +18,10 @@
  */
 
 import { registerServerTool, type ToolHandlerResult } from "../registry.js";
+import { getConfig } from "../../../config/index.js";
 
-const MAX_BYTES = 1 * 1024 * 1024; // 1 MiB
-const TIMEOUT_MS = 20_000;
+// Defaults from `config.tools.webFetch.*` — operators tune via
+// ~/.huko/config.json or <project>/.huko/config.json.
 
 const WEB_FETCH_DESCRIPTION =
   "Fetch the contents of a single URL via HTTP GET.\n\n" +
@@ -56,13 +57,6 @@ registerServerTool(
       required: ["url"],
     },
     dangerLevel: "safe",
-    display: {
-      compactTemplate: '<web_fetch mode="{mode}">{url}</web_fetch>',
-      extractParams: (args) => ({
-        url: String(args["url"] ?? "").slice(0, 120),
-        mode: String(args["mode"] ?? "text"),
-      }),
-    },
   },
   async (args): Promise<ToolHandlerResult> => {
     const url = String(args["url"] ?? "").trim();
@@ -80,6 +74,10 @@ registerServerTool(
         error: "invalid scheme",
       };
     }
+
+    const cfg = getConfig().tools.webFetch;
+    const MAX_BYTES = cfg.maxBytes;
+    const TIMEOUT_MS = cfg.timeoutMs;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);

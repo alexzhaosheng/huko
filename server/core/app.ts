@@ -31,11 +31,17 @@ import { SqlitePersistence } from "../persistence/index.js";
 import { createGateway } from "../gateway.js";
 import { TaskOrchestrator } from "../services/index.js";
 import { appRouter } from "../routers/index.js";
+import { loadConfig, getConfig } from "../config/index.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT = Number(process.env["PORT"] ?? 3000);
-const HOST = process.env["HOST"] ?? "127.0.0.1";
+// Load config FIRST. PORT/HOST come from config.daemon.* (with env vars
+// taking precedence — keeping the existing PORT=, HOST= behaviour).
+loadConfig({ cwd: process.cwd() });
+
+const cfg = getConfig().daemon;
+const PORT = Number(process.env["PORT"] ?? cfg.port);
+const HOST = process.env["HOST"] ?? cfg.host;
 
 // ─── 1. Persistence ──────────────────────────────────────────────────────────
 
@@ -60,6 +66,22 @@ const orchestrator = new TaskOrchestrator({
   persistence,
   emitterFactory: gateway.emitterFactory,
 });
+
+// Recover orphans from any previous crashed run. Pairs synthetic
+// tool_results onto dangling tool_calls so subsequent conversations on
+// the same session don't 400. Top-level await is fine — Node ESM.
+{
+  const report = await orchestrator.recoverOrphans();
+  if (report.healed > 0) {
+    console.log(
+      `recovered ${report.healed} orphan task(s):`,
+      `${report.byKind.danglingTools} mid-tool,`,
+      `${report.byKind.waitingForReply} ask,`,
+      `${report.byKind.waitingForApproval} approval,`,
+      `${report.byKind.other} other`,
+    );
+  }
+}
 
 // ─── 5. tRPC ─────────────────────────────────────────────────────────────────
 
@@ -125,4 +147,3 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
-

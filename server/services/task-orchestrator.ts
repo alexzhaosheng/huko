@@ -25,7 +25,7 @@ import "../task/tools/index.js";
 import { SessionContext, type Emitter } from "../engine/SessionContext.js";
 import { TaskContext } from "../engine/TaskContext.js";
 import { TaskLoop, type TaskRunSummary } from "../task/task-loop.js";
-import { getToolsForLLM } from "../task/tools/registry.js";
+import { getToolsForLLM, type ToolFilterContext } from "../task/tools/registry.js";
 import {
   EntryKind,
   type SessionType,
@@ -34,6 +34,11 @@ import {
 } from "../../shared/types.js";
 import type { Persistence, ResolvedModelConfig, TaskRow } from "../persistence/index.js";
 import type { TaskSummary } from "../../shared/events.js";
+import { loadRole } from "../roles/index.js";
+import { getConfig } from "../config/index.js";
+import { buildSystemPrompt } from "./build-system-prompt.js";
+import { recoverOrphans, type RecoveryReport } from "../task/resume.js";
+import { estimateContextWindow } from "../core/llm/model-context-window.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -43,7 +48,6 @@ export type EmitterFactory = (room: string) => Emitter;
 export type OrchestratorOptions = {
   persistence: Persistence;
   emitterFactory: EmitterFactory;
-  defaultSystemPrompt?: string;
 };
 
 export type SendMessageInput = {
@@ -51,6 +55,10 @@ export type SendMessageInput = {
   content: string;
   attachments?: UserAttachment[];
   modelId?: number;
+  /** Role name (loaded from server/roles/ etc.). Defaults to `coding`. */
+  role?: string;
+  /** Working directory for this task — used to resolve project CLAUDE.md. */
+  cwd?: string;
 };
 
 export type SendMessageResult = {
@@ -59,17 +67,11 @@ export type SendMessageResult = {
   completion: Promise<TaskRunSummary>;
 };
 
-// ─── Default system prompt ────────────────────────────────────────────────────
-
-const DEFAULT_SYSTEM_PROMPT =
-  "You are huko, a helpful assistant. Be concise and accurate. Use tools when available rather than guessing.";
-
 // ─── TaskOrchestrator ─────────────────────────────────────────────────────────
 
 export class TaskOrchestrator {
   private readonly persistence: Persistence;
   private readonly emitterFactory: EmitterFactory;
-  private readonly defaultSystemPrompt: string;
 
   private readonly liveSessions = new Map<string, SessionContext>();
   private readonly liveSessionEmitters = new Map<string, Emitter>();
@@ -80,10 +82,22 @@ export class TaskOrchestrator {
   constructor(opts: OrchestratorOptions) {
     this.persistence = opts.persistence;
     this.emitterFactory = opts.emitterFactory;
-    this.defaultSystemPrompt = opts.defaultSystemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   }
 
   // ─── Public entry points ───────────────────────────────────────────────────
+
+  /**
+   * Scan for orphan tasks (non-terminal status from a crashed previous
+   * process) and heal them — inject synthetic tool_results for dangling
+   * tool_calls, mark the tasks as `failed`. Idempotent.
+   *
+   * Should be called once at startup, before any sendUserMessage. CLI
+   * bootstrap and daemon entry both call this. Safe to skip in
+   * `--memory` ephemeral mode (memory backend has no orphans to find).
+   */
+  async recoverOrphans(): Promise<RecoveryReport> {
+    return recoverOrphans(this.persistence);
+  }
 
   async createChatSession(title: string = ""): Promise<number> {
     return this.persistence.sessions.create({ title });
@@ -100,6 +114,15 @@ export class TaskOrchestrator {
     if (liveTaskId !== undefined) {
       const loop = this.liveLoops.get(liveTaskId);
       if (loop) {
+        // Anthropic pairing constraint: assistant(tool_use) → tool(result)
+        // must be adjacent. If a tool is in flight when the user interjects,
+        // wait for it to complete (and its tool_result to land via
+        // tool-execute) before appending the user message. Otherwise the
+        // next LLM call would see assistant(tc) → user → tool(result)
+        // which provider validators reject.
+        if (loop.ctx.currentToolPromise) {
+          await loop.ctx.currentToolPromise;
+        }
         await sessionContext.append({
           taskId: liveTaskId,
           kind: EntryKind.UserMessage,
@@ -193,6 +216,40 @@ export class TaskOrchestrator {
         ? ({ sessionType: "chat", chatSessionId: sessionId } as const)
         : ({ sessionType: "agent", agentSessionId: sessionId } as const);
 
+    // Role-driven system prompt. `--role` flag (CLI) → input.role.
+    // Defaults to `coding`. `cwd` selects the project root for CLAUDE.md
+    // discovery; falls back to process.cwd() so non-CLI callers don't
+    // have to pass anything.
+    const roleName = input.role ?? getConfig().role.default;
+    const cwd = input.cwd ?? process.cwd();
+    const role = await loadRole(roleName, cwd);
+    const systemPrompt = await buildSystemPrompt({ role, cwd });
+
+    // TODO(role-model): if `role.frontmatter.model` is set, prefer it
+    // over `input.modelId` / app_config.default_model_id. Needs a
+    // `persistence.models.findByLogicalId(string): Promise<number|null>`
+    // method first — the orchestrator can't go from "claude-sonnet-4"
+    // to a numeric models.id without that. Until then we silently
+    // ignore `role.frontmatter.model`.
+
+    // Per-role tool gating from frontmatter. The current shape is the
+    // single composition layer; future per-user / per-task toggles will
+    // merge into the same ToolFilterContext (intersect allow, union
+    // deny) BEFORE the call. See registry.ts ToolFilterContext docstring.
+    const toolFilter: ToolFilterContext = {};
+    if (role.frontmatter.tools?.allow !== undefined) {
+      toolFilter.allowedTools = role.frontmatter.tools.allow;
+    }
+    if (role.frontmatter.tools?.deny !== undefined) {
+      toolFilter.deniedTools = role.frontmatter.tools.deny;
+    }
+
+    // Context window: prefer the value carried by ResolvedModelConfig
+    // (which a future `models.context_window` column would supply);
+    // fall back to a string-pattern heuristic on the model id.
+    const contextWindow =
+      config.contextWindow ?? estimateContextWindow(config.modelId);
+
     const taskContext = new TaskContext({
       taskId,
       ...sessionOwnership,
@@ -202,9 +259,10 @@ export class TaskOrchestrator {
       apiKey: config.apiKey,
       toolCallMode: config.toolCallMode,
       thinkLevel: config.thinkLevel,
+      contextWindow,
       ...(config.defaultHeaders ? { headers: config.defaultHeaders } : {}),
-      tools: getToolsForLLM(),
-      systemPrompt: this.defaultSystemPrompt,
+      tools: getToolsForLLM(toolFilter),
+      systemPrompt,
       sessionContext,
     });
 

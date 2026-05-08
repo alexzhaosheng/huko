@@ -41,6 +41,7 @@ import {
   readFileSync,
 } from "node:fs";
 import { isLLMVisible } from "../../shared/types.js";
+import { collectElidedEntryIds } from "./memory.js";
 import type {
   Protocol,
   ThinkLevel,
@@ -240,8 +241,10 @@ export class FilePersistence implements Persistence {
       },
       loadLLMContext: async (sessionId, type) => {
         const rows = this.entriesForSession(sessionId, type);
+        const dropped = collectElidedEntryIds(rows);
         const out: LLMMessage[] = [];
         for (const r of rows) {
+          if (dropped.has(r.id)) continue;
           const m = projectToLLMMessage(r);
           if (m) out.push(m);
         }
@@ -305,6 +308,15 @@ export class FilePersistence implements Persistence {
         writeOp(op);
       },
       get: async (id) => this._tasks.get(id) ?? null,
+      listNonTerminal: async () => {
+        const out: TaskRow[] = [];
+        for (const t of this._tasks.values()) {
+          if (t.status !== "done" && t.status !== "failed" && t.status !== "stopped") {
+            out.push(t);
+          }
+        }
+        return out;
+      },
     };
 
     // ── providers ──────────────────────────────────────────────────────────

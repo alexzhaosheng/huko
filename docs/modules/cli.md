@@ -290,3 +290,5 @@ npm run huko -- run --json "What is 2 + 2?"
 - [orchestrator.md](./orchestrator.md) — `sendUserMessage` 的契约
 - [persistence.md](./persistence.md) — SqlitePersistence 与 daemon 的共享语义
 - HukoEvent 协议（`shared/events.ts`）— formatter 消费的事件 schema
+
+

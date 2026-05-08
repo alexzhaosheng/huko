@@ -79,12 +79,22 @@ export async function executeAndPersist(
   const coercedCall: ToolCall = { ...call, arguments: coerced };
 
   // ── 3. Execute (race against masterAbort) ────────────────────────────────
+  // Track the in-flight tool promise on TaskContext so the orchestrator's
+  // interject path can await it before appending user_message — preserves
+  // assistant(tool_use) → tool(result) adjacency required by Anthropic.
   let outcome: Normalised;
+  const racePromise = raceAbort(ctx, () => runTool(ctx, coercedCall, tool));
+  ctx.currentToolPromise = racePromise.catch(() => undefined);
   try {
-    outcome = await raceAbort(ctx, () => runTool(ctx, coercedCall, tool));
+    outcome = await racePromise;
   } catch (err: unknown) {
-    if (isAbort(err)) return { kind: "aborted" };
+    if (isAbort(err)) {
+      ctx.currentToolPromise = null;
+      return { kind: "aborted" };
+    }
     outcome = { result: "", error: errorMessage(err) };
+  } finally {
+    ctx.currentToolPromise = null;
   }
 
   if (ctx.isAborted) return { kind: "aborted" };
@@ -231,6 +241,28 @@ function raceAbort<T>(ctx: TaskContext, fn: () => Promise<T>): Promise<T> {
 }
 
 function makeAbortError(): Error {
+  const e = new Error("aborted");
+  e.name = "AbortError";
+  return e;
+}
+
+function isAbort(err: unknown): boolean {
+  if (err instanceof Error) {
+    return err.name === "AbortError" || /aborted/i.test(err.message);
+  }
+  return false;
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return String(err);
+  } catch {
+    return "unknown error";
+  }
+}
+
+r(): Error {
   const e = new Error("aborted");
   e.name = "AbortError";
   return e;

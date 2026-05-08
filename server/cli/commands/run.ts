@@ -29,6 +29,8 @@ export type RunArgs = {
   title?: string;
   /** When true, run with MemoryPersistence (no DB writes for this run). */
   ephemeral?: boolean;
+  /** Role name (loaded from server/roles/ etc.). Defaults to "coding". */
+  role?: string;
 };
 
 /**
@@ -98,6 +100,7 @@ export async function runCommand(args: RunArgs): Promise<void> {
     const result = await ctx.orchestrator.sendUserMessage({
       chatSessionId: sessionId,
       content: args.prompt,
+      ...(args.role !== undefined ? { role: args.role } : {}),
     });
     runtime.activeTaskId = result.taskId;
     formatter.onTaskStarted?.(result.taskId);
@@ -107,6 +110,17 @@ export async function runCommand(args: RunArgs): Promise<void> {
     exitCode =
       summary.status === "done" ? 0 : summary.status === "stopped" ? 2 : 1;
   } catch (err) {
+    formatter.onError(err);
+    exitCode = 1;
+  } finally {
+    process.off("SIGINT", onSigint);
+    ctx.shutdown();
+  }
+
+  process.exit(exitCode);
+}
+
+) {
     formatter.onError(err);
     exitCode = 1;
   } finally {

@@ -271,3 +271,5 @@ HTTP GET 单个 URL，参数 `{ url, mode?: "text" | "html" }`。
 - [llm.md](./llm.md) —— `Tool` / `ToolCall` 类型定义
 - [task-loop.md](./task-loop.md) —— TaskLoop 怎么把 result.toolCalls 路由到 executeAndPersist，
   以及 `shouldBreak` 怎么影响循环退出
+
+

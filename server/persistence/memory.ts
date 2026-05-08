@@ -93,8 +93,14 @@ export class MemoryPersistence implements Persistence {
       },
       loadLLMContext: async (sessionId, type) => {
         const rows = this.entriesForSession(sessionId, type);
+        // Drop entries that previous compactions elided. Their IDs live
+        // in any `compaction_done` reminder's metadata.elidedEntryIds.
+        // (See pipeline/context-manage.ts and the TODO on this method
+        // in persistence/types.ts.)
+        const dropped = collectElidedEntryIds(rows);
         const out: LLMMessage[] = [];
         for (const r of rows) {
+          if (dropped.has(r.id)) continue;
           const m = projectToLLMMessage(r);
           if (m) out.push(m);
         }
@@ -175,6 +181,15 @@ export class MemoryPersistence implements Persistence {
         this._tasks.set(id, next);
       },
       get: async (id) => this._tasks.get(id) ?? null,
+      listNonTerminal: async () => {
+        const out: TaskRow[] = [];
+        for (const t of this._tasks.values()) {
+          if (t.status !== "done" && t.status !== "failed" && t.status !== "stopped") {
+            out.push(t);
+          }
+        }
+        return out;
+      },
     };
 
     this.providers = {
@@ -307,4 +322,29 @@ function projectToLLMMessage(r: EntryRow): LLMMessage | null {
     ...(r.thinking ? { thinking: r.thinking } : {}),
     _entryId: r.id,
   };
+}
+
+/**
+ * Walk all SystemReminder entries with reason=compaction_done, gather
+ * their `metadata.elidedEntryIds` arrays. Returns the union — IDs to
+ * drop on context replay.
+ *
+ * Used by both MemoryPersistence and SqlitePersistence in their
+ * loadLLMContext path. Lifted into shared util so both backends reach
+ * the same conclusion.
+ */
+export function collectElidedEntryIds(rows: EntryRow[]): Set<number> {
+  const out = new Set<number>();
+  for (const r of rows) {
+    if (r.kind !== "system_reminder") continue;
+    const meta = r.metadata as Record<string, unknown> | null;
+    if (!meta || meta["reminderReason"] !== "compaction_done") continue;
+    const ids = meta["elidedEntryIds"];
+    if (Array.isArray(ids)) {
+      for (const id of ids) {
+        if (typeof id === "number") out.add(id);
+      }
+    }
+  }
+  return out;
 }

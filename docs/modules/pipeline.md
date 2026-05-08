@@ -12,7 +12,7 @@
 server/task/pipeline/
   llm-call.ts         一次 LLM 调用：streaming flush + abort + token 计数
   tool-execute.ts     工具执行 + Promise.race(masterAbort) + 持久化
-  context-manage.ts   ⏳ stub —— compaction / digests
+  context-manage.ts   Turn-atomic compaction（token 阈值 + reminder 注入）
 ```
 
 每个文件单一职责，TaskLoop 只编排，不动逻辑。文件超过 ~300 行就该再拆。
@@ -93,13 +93,61 @@ type ToolExecOutcome =
 
 ---
 
-## context-manage.ts（⏳ stub）
+## context-manage.ts —— Turn-atomic compaction
 
-当前 no-op。未来在每轮迭代末尾被调用，承担：
+每轮迭代末尾跑一次。当前实现：**token 阈值 + turn-atomic 丢弃 + reminder 注入**。
 
-- **Compaction**：context 超过阈值时摘要旧 turn，`purgeMessages` 评出，注入合成 summary entry
-- **文件浏览摘要**：把长串 file 读取折叠成结构化摘要 entry
-- **System reminder 注入**：例如长时静默时提示 LLM 完成任务
+### 核心 invariant：Turn 永不可拆
+
+一个 "turn" 是一组**必须整体进出**的 LLMMessage：
+
+```
+user(text)
+  → assistant(content + maybe toolCalls)
+  → tool(result for tc1)
+  → tool(result for tc2)
+  → ...
+```
+
+**违反后果**：
+
+- **Anthropic 400** —— "tool_use ids in the assistant turn must each have a matching tool_result block"
+- **OpenAI 400** —— "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'"
+- **Gemini 400** —— 同类配对错（这是 WeavesAI 当年踩过的坑，[agent-design-notes.md](../agent-design-notes.md) 有记录）
+
+所以 huko 的 compactor **只在 turn 边界丢弃**，永不切半个 turn。
+
+### 触发与算法
+
+```
+threshold = 70_000 tokens（≈ 100k 模型窗口的 70%）
+target    = 50_000 tokens（压缩后目标）
+
+if 总量 < threshold: 不动
+if turns.length <= 2: 不动（safe 没东西丢）
+
+否则：
+  保留 turns[0]（原始用户请求 — 锚点）
+  从尾部往前贪心，把 turn 塞进 tail，直到加下一个会超 target
+  把中间剩的全部丢
+  appendReminder(reason="compaction_done", content="N earlier turns elided ...")
+  replaceContext([first_turn, reminder, ...tail])
+```
+
+被丢的内容**只从内存 llmContext 移除**——DB 行（`task_context`）保持不动，replay
+能完整看到。
+
+### Token 估算
+
+字符 / 4 + 8 字节 per-message overhead。粗糙但足够触发——稍微早一点压缩比晚一点
+吃 400 强多了。真正 tokenizer 等以后再说。
+
+### 不做的事
+
+- **LLM 摘要替代**——丢的内容不会被 light-LLM 总结成一句话（WeavesAI 的高级
+  路径）。简单一条 reminder 说 "elided" 在 v1 已经够。看 [agent-design-notes §3](../agent-design-notes.md)
+- **文件浏览摘要 / digest**
+- **per-model token 配额**（动态读 model 的 contextWindow 字段）
 
 注意：deferred 队列是 TaskLoop 在迭代**头部**做的，不归这里管。这模块只做对已持久化历史的形变。
 
@@ -120,3 +168,5 @@ type ToolExecOutcome =
 - [task-loop.md](./task-loop.md) —— pipeline 的调用方
 - [tools.md](./tools.md) —— `getTool()` 的实现
 - [engine.md](./engine.md) —— SessionContext 的写入入口
+
+

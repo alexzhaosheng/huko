@@ -67,14 +67,6 @@ registerServerTool(
       required: ["type", "text"],
     },
     dangerLevel: "safe",
-    display: {
-      compactTemplate: '<message type="{msgType}">{textShort}</message>',
-      extractParams: (args) => {
-        const msgType = String(args.type ?? "info");
-        const text = String(args.text ?? "");
-        return { msgType, text, textShort: text.slice(0, 80) };
-      },
-    },
   },
   async (args): Promise<ToolHandlerResult> => {
     const rawType = String(args["type"] ?? "info");

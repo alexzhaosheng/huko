@@ -25,8 +25,8 @@
  *   - `setToolPolicy(name, meta)` / `getToolPolicy(name)` — danger-level
  *       and admin metadata, used by the pipeline for filtering and
  *       (later) approval.
- *   - `ServerToolDefinition` — extends Tool with optional display +
- *       platformNotes + dangerLevel, again following WeavesAI.
+ *   - `ServerToolDefinition` — extends Tool with optional platformNotes
+ *       + dangerLevel, again following WeavesAI.
  */
 
 import type { Tool, ToolParameterSchema } from "../../core/llm/types.js";
@@ -93,17 +93,9 @@ export type ServerToolResult = {
   metadata?: Record<string, unknown>;
 };
 
-// ─── Display template ─────────────────────────────────────────────────────────
-
-export type ToolDisplayTemplate = {
-  compactTemplate: string;
-  extractParams: (args: Record<string, unknown>) => Record<string, string>;
-};
-
 // ─── Tool definition (v2) ────────────────────────────────────────────────────
 
 export type ServerToolDefinition = Tool & {
-  display?: ToolDisplayTemplate;
   /** Per-platform instruction blocks appended to `description` at filter time. */
   platformNotes?: Partial<Record<NodeJS.Platform, string>>;
   dangerLevel?: ToolDangerLevel;
@@ -181,11 +173,30 @@ export function isWorkstationTool(name: string): boolean {
 
 // ─── Building the tool list for the LLM ──────────────────────────────────────
 
+/**
+ * Filter passed to `getToolsForLLM`. Multiple sources of restriction —
+ * role frontmatter today, future per-user toggles tomorrow, future
+ * per-task overrides further out — compose by merging fields BEFORE
+ * the call:
+ *
+ *   - `allowedTools`: intersect across layers (each layer narrows further).
+ *     `undefined` means "this layer doesn't restrict"; an empty array
+ *     means "this layer allows nothing".
+ *   - `deniedTools` : union across layers (any layer can ban a tool).
+ *   - `predicate`   : compose by `&&` (`a(name,k) && b(name,k)`).
+ *
+ * The merger isn't built yet — wire one when the second layer lands.
+ * For now the orchestrator only constructs this from `role.frontmatter.tools`.
+ */
 export type ToolFilterContext = {
+  /**
+   * If set, ONLY these tool names pass. Empty array → no tools visible.
+   * Omit to leave tool visibility untouched by this layer.
+   */
+  allowedTools?: string[];
+  /** Tools that always fail. Wins ties against `allowedTools`. */
   deniedTools?: string[];
-  browserActive?: boolean;
-  workflowActive?: boolean;
-  /** Custom predicate — final word, applied AFTER the standard filters. */
+  /** Custom predicate — final word, applied AFTER allow/deny. */
   predicate?: (name: string, kind: "server" | "workstation") => boolean;
 };
 
@@ -195,6 +206,7 @@ export function getToolsForLLM(filter?: ToolFilter | ToolFilterContext): Tool[] 
   const ctx = normaliseFilter(filter);
   const out: Tool[] = [];
   for (const [name, t] of registry) {
+    if (ctx.allowedTools !== undefined && !ctx.allowedTools.includes(name)) continue;
     if (ctx.deniedTools?.includes(name)) continue;
     if (ctx.predicate && !ctx.predicate(name, t.kind)) continue;
     out.push(materialise(t.definition));
@@ -225,12 +237,6 @@ function materialise(def: ServerToolDefinition): Tool {
 /** All registered tool names. Useful for diagnostics. */
 export function listToolNames(): string[] {
   return [...registry.keys()];
-}
-
-/** Look up the display template for a tool — for UI compact rendering. */
-export function getToolDisplay(name: string): ToolDisplayTemplate | undefined {
-  const t = registry.get(name);
-  return t?.definition.display;
 }
 
 // ─── coerceArgs ───────────────────────────────────────────────────────────────

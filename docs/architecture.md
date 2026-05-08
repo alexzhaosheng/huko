@@ -120,7 +120,9 @@ huko 的形态是 **kernel + 可插拔扩展**：
 | Task Loop | `server/task/task-loop.ts` | [task-loop](./modules/task-loop.md) | 主状态机 + interject + stop | ✅ |
 | Pipeline | `server/task/pipeline/` | [pipeline](./modules/pipeline.md) | llm-call + tool-execute + context-manage | ✅ + ⏳ stub |
 | Tools | `server/task/tools/` | [tools](./modules/tools.md) | 双注册 + ToolHandlerResult + coerceArgs + 策略；内置 message + web_fetch | ✅ |
-| Resume | `server/task/resume.ts` | [task-loop](./modules/task-loop.md) | orphan 恢复 | ⏳ stub |
+| Roles | `server/roles/` + `server/services/build-system-prompt.ts` | [roles](./modules/roles.md) | 角色/persona 系统：markdown role + buildSystemPrompt + CLAUDE.md 注入；默认 `coding` | ✅ |
+| Config | `server/config/` | [config](./modules/config.md) | 单一 config 子系统：DEFAULT_CONFIG + ~/.huko/config.json + project + env。所有 hardcoded tunable 收口于此 | ✅ |
+| Resume | `server/task/resume.ts` | [resume](./modules/resume.md) | orphan 恢复：mark failed + 合成 tool_result 保配对 + elided entries 过滤 | ✅ |
 | Persistence | `server/persistence/` | [persistence](./modules/persistence.md) | Persistence 接口 + memory + file (JSONL) + sqlite | ✅ |
 | DB schema | `server/db/` | [db](./modules/db.md) | SQLite schema + migrations（被 SqlitePersistence 包装） | ✅ |
 | Orchestrator | `server/services/` | [orchestrator](./modules/orchestrator.md) | 内核装配总枢（已接 Persistence） | ✅ |
@@ -174,9 +176,11 @@ huko 的形态是 **kernel + 可插拔扩展**：
 - SQLite 持久化（待抽象成 Persistence 接口的一种实现）
 - Daemon HTTP/WS 装配（暂用，待按 HukoEvent 协议升级）
 
-**🔧 进行中**
+**🔧 进行中（当前迭代——参考 [agent-design-notes.md](./agent-design-notes.md)）**
 
-- 更多内置 server tools（`fs_read` / `fs_write` / `search` 等）—— 让 LLM "做事"
+按依赖顺序：
+
+**✅ 当前迭代全部完成**：Promise.race 审计、SystemReminder collector、配对约束、Role 系统、Compaction Turn-atomic、Resume 三种 checkpoint
 
 **✅ 近期完成**
 
@@ -186,14 +190,23 @@ huko 的形态是 **kernel + 可插拔扩展**：
 - ~~HukoEvent 语义事件协议正式化~~
 - ~~CLI 一次性模式 `huko run` (text / jsonl / json formatter)~~
 - ~~FilePersistence (JSONL append-only event-sourced)~~
-- ~~Tool 系统 v2：ToolHandlerResult / coerceArgs / display / dangerLevel / platformNotes~~（本轮）
-- ~~首批内置 server tools：`message`（info+result）、`web_fetch`~~（本轮）
+- ~~Tool 系统 v2：ToolHandlerResult / coerceArgs / display / dangerLevel / platformNotes~~
+- ~~首批内置 server tools：`message`（info+result）、`web_fetch`~~
+- ~~CLI `sessions list/delete`、`--memory`、`--title`~~
+- ~~`runMigrations()` 移进 SqlitePersistence constructor（架构清理）~~
+- ~~`Persistence.close()` 必选化（架构清理）~~
+- ~~CLAUDE.md 立"从根本解决"原则~~
+- ~~WeavesAI 设计研究 doc（[agent-design-notes.md](./agent-design-notes.md)）~~
 
-**⏳ 待建**
+**⏳ 后续待建**
 
+- 更多内置 server tools（`fs_read` / `fs_write` / `search` 等）
 - CLI 后台模式（`huko start` 起 detached daemon, `huko send` 走 tRPC client）
 - CLI 交互模式（`huko chat`：readline + send 循环）
 - Tool 插件加载机制（npm convention + ad-hoc 注入）
-- Skills 系统
-- Resume 实际实现
+- Skills 系统（LLM 自主激活的场景化指令包）
 - Workstation 集成
+
+
+
+

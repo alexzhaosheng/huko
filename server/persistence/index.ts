@@ -32,7 +32,6 @@ export type {
   UpdateProviderPatch,
   CreateModelInput,
 } from "./types.js";
-export { PersistenceUnsupportedError } from "./types.js";
 
 export { SqlitePersistence, type SqlitePersistenceOptions } from "./sqlite.js";
 export { MemoryPersistence } from "./memory.js";

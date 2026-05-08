@@ -10,18 +10,10 @@
  *   3. Emit `HukoEvent`s for all entry creation / finalization
  *   4. Support streaming updates (patch an existing entry's content/metadata)
  *
- * Event protocol: every emit goes through `this.emitter.emit(event)` —
- * which the gateway / CLI / test harness wraps to forward the typed
- * `HukoEvent` to wherever it needs to go (Socket.IO room, stdout, in-memory
- * collector, ...). See `shared/events.ts`.
- *
- * Streaming deltas (`assistant_content_delta` / `assistant_thinking_delta`)
- * are emitted by the pipeline DIRECTLY via `sessionContext.emit(...)`,
- * not via append/update — the delta is a chunk, not an entry mutation.
- *
  * Design rules:
  *   - `append()` is the ONLY way to add finalized entries. No back-doors.
  *   - `appendDraft()` opens a streaming entry; `update(...{final:true})` closes it.
+ *   - `appendReminder()` is the single seam for `<system_reminder>` injection.
  *   - The LLM context array is never written from outside this class.
  *   - SessionContext does not know about Socket.IO / DB / orchestrator.
  */
@@ -34,10 +26,6 @@ import type { HukoEvent } from "../../shared/events.js";
 
 // ─── External Dependencies (injected, not imported directly) ──────────────────
 
-/**
- * Minimal interface for persisting an entry to the database.
- * Injected at construction — SessionContext never imports db directly.
- */
 export type PersistFn = (entry: {
   taskId: number;
   sessionId: number;
@@ -56,10 +44,6 @@ export type UpdateFn = (entryId: number, patch: {
   mergeMetadata?: boolean;
 }) => Promise<void>;
 
-/**
- * Outbound event channel. Implementations: Socket.IO room emit (daemon),
- * stdout JSON line (CLI), in-memory collector (tests).
- */
 export type Emitter = {
   emit: (event: HukoEvent) => void;
 };
@@ -82,14 +66,8 @@ export type UpdatePayload = {
   taskId: number;
   content?: string;
   metadata?: Record<string, unknown>;
-  /** Shallow-merge `metadata` over existing instead of replacing. */
   mergeMetadata?: boolean;
-  /**
-   * True at the end of an assistant streaming turn — triggers an
-   * `assistant_complete` HukoEvent emit. False / absent during streaming
-   * partials (those are silent on the wire here; the pipeline already
-   * sent `assistant_content_delta` events directly).
-   */
+  /** True at the end of an assistant streaming turn — triggers `assistant_complete`. */
   final?: boolean;
 };
 
@@ -127,25 +105,22 @@ export class SessionContext {
     return this.llmContext.length;
   }
 
-  /** Snapshot copy of the LLM context for the next model call. */
   getMessages(): LLMMessage[] {
     return [...this.llmContext];
   }
 
-  // ─── emit() — shared HukoEvent emit point ──────────────────────────────────
+  // ─── emit() ────────────────────────────────────────────────────────────────
 
   /**
-   * Emit a `HukoEvent` to the configured emitter. Used by the pipeline
-   * to send streaming deltas; also called internally by append/update.
-   *
-   * This is the single chokepoint for all kernel-emitted events — any
-   * event going to a frontend goes through here.
+   * @internal — direct event emit, used by the pipeline for streaming
+   * deltas. External code should use `append` / `appendDraft` /
+   * `update` / `appendReminder`, which auto-emit the right event.
    */
   emit(event: HukoEvent): void {
     this.emitter.emit(event);
   }
 
-  // ─── append() — finalized entry write ──────────────────────────────────────
+  // ─── append() ──────────────────────────────────────────────────────────────
 
   async append(payload: AppendPayload): Promise<number> {
     const entryId = await this.persistEntry(payload);
@@ -157,7 +132,7 @@ export class SessionContext {
     return entryId;
   }
 
-  // ─── appendDraft() — streaming entry start ─────────────────────────────────
+  // ─── appendDraft() ─────────────────────────────────────────────────────────
 
   async appendDraft(payload: AppendPayload): Promise<number> {
     const entryId = await this.persistEntry(payload);
@@ -166,14 +141,8 @@ export class SessionContext {
     return entryId;
   }
 
-  // ─── commitToContext() — push streamed entry into LLM context ──────────────
+  // ─── commitToContext() ─────────────────────────────────────────────────────
 
-  /**
-   * Push a draft entry into the LLM context with its final content.
-   * Pairs with `appendDraft()` + final `update(...)`. Pure in-memory —
-   * no DB write, no event emit (the assistant_complete event already fired
-   * during the final update).
-   */
   commitToContext(payload: {
     entryId: number;
     kind: EntryKind;
@@ -187,21 +156,61 @@ export class SessionContext {
     this.llmContext.push(toMessage(payload, payload.entryId));
   }
 
-  // ─── update() — patch existing entry ───────────────────────────────────────
+  // ─── appendReminder() — single seam for system_reminder injection ─────────
+
+  /**
+   * Inject a system reminder into the conversation. THIS IS THE ONLY
+   * supported way to surface a reminder to the LLM — never inline
+   * reminder text into a tool_result content field, never write a
+   * `<system_reminder>` tag manually anywhere else.
+   *
+   * Why a dedicated method instead of `append({kind: SystemReminder})`:
+   *   1. Wraps content in `<system_reminder reason="...">...</system_reminder>`
+   *      consistently — the LLM gets a uniform tag shape.
+   *   2. Enforces `role: "user"` — Anthropic / OpenAI both accept reminders
+   *      as if a user said them; assistant-side or tool-side reminders
+   *      confuse the model.
+   *   3. Persists the `reason` (machine identifier) in metadata so we can
+   *      query "did we already nudge this task about empty turns?" without
+   *      string-matching content.
+   *   4. Future compaction can spot reminder rows by kind and decide
+   *      whether to keep or drop them.
+   *
+   * `reason` is a short stable identifier (`empty_turn` / `compaction_done`
+   * / `language_drift` / `water_level` / ...). Free-form prose goes in
+   * `content`.
+   */
+  async appendReminder(opts: {
+    taskId: number;
+    reason: string;
+    content: string;
+    extraMetadata?: Record<string, unknown>;
+  }): Promise<number> {
+    const wrapped = `<system_reminder reason="${escapeAttr(opts.reason)}">${opts.content}</system_reminder>`;
+    const metadata: Record<string, unknown> = {
+      reminderReason: opts.reason,
+      ...(opts.extraMetadata ?? {}),
+    };
+    return this.append({
+      taskId: opts.taskId,
+      kind: EK.SystemReminder,
+      role: "user",
+      content: wrapped,
+      metadata,
+    });
+  }
+
+  // ─── update() ──────────────────────────────────────────────────────────────
 
   async update(payload: UpdatePayload): Promise<void> {
     const { entryId, taskId, content, metadata, mergeMetadata, final } = payload;
 
-    // 1. DB write
     await this.updateDb(entryId, {
       ...(content !== undefined ? { content } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
       ...(mergeMetadata !== undefined ? { mergeMetadata } : {}),
     });
 
-    // 2. Emit assistant_complete on final flush; otherwise stay silent.
-    //    (Streaming partials are emitted directly by the pipeline via
-    //    `emit({ type: "assistant_content_delta", ... })`.)
     if (final) {
       const meta = (metadata ?? {}) as Record<string, unknown>;
       const thinking = meta["thinking"];
@@ -271,7 +280,6 @@ export class SessionContext {
     });
   }
 
-  /** AppendPayload → HukoEvent translation. Returns null for kinds with no event. */
   private entryToEvent(
     entryId: number,
     payload: AppendPayload,
@@ -297,17 +305,12 @@ export class SessionContext {
       }
 
       case EK.AiMessage:
-        // Only `appendDraft` emits assistant_started; finalisation is
-        // emitted by `update({final: true})`. A bare `append()` of an
-        // AiMessage is unsupported in our model — return null.
         return started ? { type: "assistant_started", ...base } : null;
 
       case EK.ToolResult: {
         const meta = (payload.metadata ?? {}) as Record<string, unknown>;
         const toolName = typeof meta["toolName"] === "string" ? (meta["toolName"] as string) : "unknown";
         const error = typeof meta["error"] === "string" ? (meta["error"] as string) : null;
-        // Strip top-level fields out of the surfaced metadata to avoid
-        // duplication; UI consumers can see toolName/error/callId directly.
         const { toolName: _t, error: _e, arguments: _a, ...rest } = meta;
         const extraMeta = Object.keys(rest).length > 0 ? rest : undefined;
         return {
@@ -368,6 +371,12 @@ function toMessage(
   };
 }
 
+function escapeAttr(s: string): string {
+  // Strict: only allow [a-z0-9_-] in reason. Anything else collapses to "_"
+  // so the tag shape is never broken by user-provided text.
+  return s.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
 function stripVolatileFields(
   metadata: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | null {
@@ -390,6 +399,15 @@ function stripVolatileFields(
 
 function isTokenUsage(v: unknown): v is TokenUsage {
   if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o["promptTokens"] === "number" &&
+    typeof o["completionTokens"] === "number" &&
+    typeof o["totalTokens"] === "number"
+  );
+}
+
+ject") return false;
   const o = v as Record<string, unknown>;
   return (
     typeof o["promptTokens"] === "number" &&

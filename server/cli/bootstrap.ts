@@ -28,6 +28,7 @@ import {
   type Persistence,
 } from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
+import { loadConfig } from "../config/index.js";
 import type { Formatter } from "./formatters/index.js";
 
 export type BootstrapOptions = {
@@ -45,6 +46,11 @@ export async function bootstrap(
   formatter: Formatter,
   options: BootstrapOptions = {},
 ): Promise<CliBootstrap> {
+  // Load config FIRST — kernel modules read it via getConfig() at task
+  // start. Layered: defaults < ~/.huko/config.json < <cwd>/.huko/config.json
+  // < HUKO_CONFIG env. See docs/modules/config.md.
+  loadConfig({ cwd: process.cwd() });
+
   const persistence = options.ephemeral
     ? await buildEphemeralPersistence()
     : new SqlitePersistence();
@@ -55,6 +61,22 @@ export async function bootstrap(
     persistence,
     emitterFactory: (_room: string) => formatter.emitter,
   });
+
+  // Heal any orphan tasks left over from a crashed previous process —
+  // mark them failed, inject synthetic tool_results to keep history valid
+  // for any future continue-conversation. Skipped in ephemeral mode (the
+  // memory backend has nothing to find).
+  if (!options.ephemeral) {
+    const report = await orchestrator.recoverOrphans();
+    if (report.healed > 0) {
+      process.stderr.write(
+        `huko: recovered ${report.healed} orphan task(s) ` +
+          `(${report.byKind.danglingTools} mid-tool, ` +
+          `${report.byKind.waitingForReply} ask, ` +
+          `${report.byKind.waitingForApproval} approval)\n`,
+      );
+    }
+  }
 
   return {
     persistence,

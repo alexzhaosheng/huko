@@ -103,6 +103,14 @@ export type ResolvedModelConfig = {
   toolCallMode: ToolCallMode;
   thinkLevel: ThinkLevel;
   defaultHeaders: Record<string, string> | null;
+  /**
+   * Model context window in tokens. Optional in storage (we don't
+   * have a `models.context_window` column yet); orchestrator fills it
+   * via `estimateContextWindow(modelId)` when the persistence-side
+   * value is absent. Compaction uses this to scale its thresholds —
+   * see `pipeline/context-manage.ts`.
+   */
+  contextWindow?: number;
 };
 
 export type ConfigRow = {
@@ -167,6 +175,19 @@ export interface Persistence {
   readonly entries: {
     persist: PersistFn;
     update: UpdateFn;
+    /**
+     * Replay the LLM-visible history of a session into LLMMessages.
+     * Used by resume / "continue conversation" flows.
+     *
+     * TODO(continue-conversation): when resume / `huko run --session=N`
+     * lands, this method must filter out entries whose ids appear in
+     * any `<system_reminder reason="compaction_done">`'s
+     * `metadata.elidedEntryIds`. Otherwise the loaded context contains
+     * BOTH the elision marker AND the elided entries — self-contradictory
+     * and re-blows the context window. The compactor records those IDs
+     * on the write side already (see `pipeline/context-manage.ts`); only
+     * the read-side filter is missing.
+     */
     loadLLMContext(sessionId: number, type: SessionType): Promise<LLMMessage[]>;
     listForSession(sessionId: number, type: SessionType): Promise<EntryRow[]>;
   };
@@ -182,6 +203,12 @@ export interface Persistence {
     create(input: CreateTaskInput): Promise<number>;
     update(id: number, patch: UpdateTaskPatch): Promise<void>;
     get(id: number): Promise<TaskRow | null>;
+    /**
+     * List every task whose status is NOT terminal (i.e. not `done` /
+     * `failed` / `stopped`). Used by resume / orphan recovery at startup.
+     * Implementations return [] when there are none.
+     */
+    listNonTerminal(): Promise<TaskRow[]>;
   };
 
   readonly providers: {
@@ -215,11 +242,4 @@ export interface Persistence {
   close(): Promise<void> | void;
 }
 
-// ─── Errors ──────────────────────────────────────────────────────────────────
-
-export class PersistenceUnsupportedError extends Error {
-  constructor(operation: string) {
-    super(`Persistence backend does not support: ${operation}`);
-    this.name = "PersistenceUnsupportedError";
-  }
-}
+// ─── Errors (none currently — backends throw standard Error if needed) ──────

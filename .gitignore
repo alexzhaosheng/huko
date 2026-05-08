@@ -6,6 +6,9 @@ dist/
 *.db-wal
 
 docs/info.md
+doc/agent-design-notes.md
+docs/agent-design-notes.md
+docs/audit-2026-05.md
 
 .DS_Store
 Thumbs.db
