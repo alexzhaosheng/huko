@@ -1,11 +1,12 @@
 /**
  * scripts/engine-demo.ts
  *
- * End-to-end smoke test for the task engine.
+ * End-to-end smoke test for the engine — bypasses the daemon stack.
  *
- * Boots an in-memory persistence layer, a console-printing emitter,
- * registers one toy server tool (`add`), wires up a SessionContext +
- * TaskContext, and runs a TaskLoop with a real LLM call to OpenRouter.
+ * Boots an in-memory persistence layer (just two function stubs that
+ * SessionContext needs), a console emitter consuming HukoEvent, registers
+ * one toy server tool (`add`), wires up a SessionContext + TaskContext,
+ * and runs a TaskLoop with a real LLM call to OpenRouter.
  *
  * If you see:
  *   - streamed assistant tokens (gray when thinking, white when reply)
@@ -28,9 +29,10 @@ import {
   registerServerTool,
   _resetRegistryForTests,
 } from "../server/task/tools/registry.js";
-import { EntryKind, type TaskEntryPayload, type TaskEntryUpdatePayload } from "../shared/types.js";
+import { EntryKind } from "../shared/types.js";
+import type { HukoEvent } from "../shared/events.js";
 
-// ─── Sanity checks ───────────────────────────────────────────────────────────
+// ─── Sanity ──────────────────────────────────────────────────────────────────
 
 const apiKey = process.env["OPENROUTER_API_KEY"];
 if (!apiKey) {
@@ -39,7 +41,7 @@ if (!apiKey) {
 }
 const model = process.env["MODEL"] ?? "anthropic/claude-3.5-haiku";
 
-// ─── In-memory storage ───────────────────────────────────────────────────────
+// ─── In-memory persist / update stubs (just enough for SessionContext) ──────
 
 type StoredEntry = {
   id: number;
@@ -76,7 +78,7 @@ const updateDb = async (
   }
 };
 
-// ─── Console emitter ─────────────────────────────────────────────────────────
+// ─── Console emitter consumes HukoEvent ─────────────────────────────────────
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
@@ -85,63 +87,61 @@ const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const magenta = (s: string) => `\x1b[35m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
 
-let lastStreamedEntryId: number | null = null;
-let lastStreamedLen = 0;
+let inAssistantStream = false;
 const printedCallsFor = new Set<number>();
 
 const emitter = {
-  emit(event: string, data: unknown) {
-    if (event === "task:entry") {
-      const p = data as TaskEntryPayload;
-      const colour =
-        p.kind === EntryKind.UserMessage
-          ? cyan
-          : p.kind === EntryKind.AiMessage
-            ? green
-            : p.kind === EntryKind.ToolResult
-              ? yellow
-              : p.kind === EntryKind.SystemReminder
-                ? magenta
-                : p.kind === EntryKind.StatusNotice
-                  ? red
-                  : dim;
-      const tag = `[${p.kind}/${p.role}]`;
-      if (p.kind === EntryKind.AiMessage && p.content === "") {
-        // Streaming draft begun — start a fresh line, don't print yet.
-        process.stdout.write(`\n${colour(tag)} `);
-        lastStreamedEntryId = p.id;
-        lastStreamedLen = 0;
-        return;
-      }
-      const preview = p.content.length > 200 ? p.content.slice(0, 200) + "…" : p.content;
-      console.log(`\n${colour(tag)} ${preview}`);
-    } else if (event === "task:entry_update") {
-      const p = data as TaskEntryUpdatePayload;
-      // Stream content deltas for the active draft entry.
-      if (p.id === lastStreamedEntryId && p.content !== undefined) {
-        const newPart = p.content.slice(lastStreamedLen);
-        lastStreamedLen = p.content.length;
-        if (newPart) process.stdout.write(newPart);
-      }
-      // Print tool calls when they land (final flush of an assistant turn).
-      const meta = p.metadata as Record<string, unknown> | undefined;
-      const calls = meta?.["toolCalls"] as
-        | Array<{ name: string; arguments: unknown }>
-        | undefined;
-      if (calls && calls.length > 0 && !printedCallsFor.has(p.id)) {
-        printedCallsFor.add(p.id);
-        process.stdout.write("\n");
-        for (const c of calls) {
-          console.log(dim(`  → call ${c.name}(${JSON.stringify(c.arguments)})`));
+  emit(event: HukoEvent): void {
+    switch (event.type) {
+      case "user_message":
+        console.log(`\n${cyan("[you]")} ${event.content}`);
+        break;
+      case "assistant_started":
+        process.stdout.write(`\n${green("[huko]")} `);
+        inAssistantStream = true;
+        break;
+      case "assistant_content_delta":
+        if (inAssistantStream) process.stdout.write(event.delta);
+        break;
+      case "assistant_thinking_delta":
+        if (inAssistantStream) process.stdout.write(dim(event.delta));
+        break;
+      case "assistant_complete":
+        inAssistantStream = false;
+        if (event.toolCalls && event.toolCalls.length > 0 && !printedCallsFor.has(event.entryId)) {
+          printedCallsFor.add(event.entryId);
+          process.stdout.write("\n");
+          for (const c of event.toolCalls) {
+            console.log(dim(`  → call ${c.name}(${JSON.stringify(c.arguments)})`));
+          }
         }
+        break;
+      case "tool_result": {
+        const tag = `[tool/${event.toolName}]`;
+        const colour = event.error ? red : yellow;
+        const preview = event.content.length > 200 ? event.content.slice(0, 200) + "…" : event.content;
+        console.log(`\n${colour(tag)} ${event.error ? `error: ${event.error}` : preview}`);
+        break;
       }
+      case "system_reminder":
+        console.log(`\n${magenta("[reminder]")} ${event.content}`);
+        break;
+      case "system_notice":
+        console.log(`\n${red("[notice/" + event.severity + "]")} ${event.content}`);
+        break;
+      case "task_terminated":
+        console.log(dim(`\n[task] terminated status=${event.status}`));
+        break;
+      case "task_error":
+        console.log(red(`\n[task] error: ${event.error}`));
+        break;
     }
   },
 };
 
 // ─── Register a toy tool ─────────────────────────────────────────────────────
 
-_resetRegistryForTests(); // idempotent — supports re-runs in REPL
+_resetRegistryForTests();
 registerServerTool(
   {
     name: "add",
@@ -165,7 +165,7 @@ registerServerTool(
   },
 );
 
-// ─── Wire it all up ──────────────────────────────────────────────────────────
+// ─── Wire up the engine ──────────────────────────────────────────────────────
 
 const sessionContext = new SessionContext({
   sessionId: 1,

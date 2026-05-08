@@ -1,28 +1,36 @@
 /**
  * server/engine/SessionContext.ts
  *
- * Session-scoped data bus. One instance per chat/agent session, shared across
- * all tasks that run within that session.
+ * Session-scoped data bus. One instance per chat/agent session, shared
+ * across all tasks that run within that session.
  *
  * Responsibilities:
  *   1. Own the in-memory LLM context array (the messages sent to the model)
- *   2. Dispatch every new entry to three consumers simultaneously:
- *        a. DB persistence  — durable record
- *        b. WebSocket push  — real-time UI update
- *        c. LLM context     — in-memory array for next LLM call
- *   3. Support streaming updates (patch an existing entry's content/metadata)
- *   4. Expose read helpers used by the pipeline (contextLength, purge, etc.)
+ *   2. Persist new entries via the injected Persistence functions
+ *   3. Emit `HukoEvent`s for all entry creation / finalization
+ *   4. Support streaming updates (patch an existing entry's content/metadata)
+ *
+ * Event protocol: every emit goes through `this.emitter.emit(event)` —
+ * which the gateway / CLI / test harness wraps to forward the typed
+ * `HukoEvent` to wherever it needs to go (Socket.IO room, stdout, in-memory
+ * collector, ...). See `shared/events.ts`.
+ *
+ * Streaming deltas (`assistant_content_delta` / `assistant_thinking_delta`)
+ * are emitted by the pipeline DIRECTLY via `sessionContext.emit(...)`,
+ * not via append/update — the delta is a chunk, not an entry mutation.
  *
  * Design rules:
- *   - `append()` is the ONLY way to add entries. No caller bypasses it.
- *   - `update()` is the ONLY way to patch entries. Same discipline.
- *   - The LLM context array is never written to directly from outside.
- *   - SessionContext does not know about task logic — it is a pure data bus.
+ *   - `append()` is the ONLY way to add finalized entries. No back-doors.
+ *   - `appendDraft()` opens a streaming entry; `update(...{final:true})` closes it.
+ *   - The LLM context array is never written from outside this class.
+ *   - SessionContext does not know about Socket.IO / DB / orchestrator.
  */
 
-import type { LLMMessage, ToolCall } from "../core/llm/types.js";
-import type { EntryKind, SessionType, TaskEntryPayload, TaskEntryUpdatePayload } from "../../shared/types.js";
-import { isLLMVisible } from "../../shared/types.js";
+import type { LLMMessage } from "../core/llm/types.js";
+import type { ToolCall, TokenUsage } from "../../shared/llm-protocol.js";
+import type { EntryKind, SessionType, UserAttachment } from "../../shared/types.js";
+import { isLLMVisible, EntryKind as EK } from "../../shared/types.js";
+import type { HukoEvent } from "../../shared/events.js";
 
 // ─── External Dependencies (injected, not imported directly) ──────────────────
 
@@ -40,11 +48,8 @@ export type PersistFn = (entry: {
   toolCallId?: string | null;
   thinking?: string | null;
   metadata?: Record<string, unknown> | null;
-}) => Promise<number>; // returns the new entry's DB id
+}) => Promise<number>;
 
-/**
- * Minimal interface for patching an existing DB entry.
- */
 export type UpdateFn = (entryId: number, patch: {
   content?: string;
   metadata?: Record<string, unknown>;
@@ -52,49 +57,40 @@ export type UpdateFn = (entryId: number, patch: {
 }) => Promise<void>;
 
 /**
- * Minimal interface for pushing events over WebSocket.
- * Keeps SessionContext decoupled from Socket.IO specifics.
+ * Outbound event channel. Implementations: Socket.IO room emit (daemon),
+ * stdout JSON line (CLI), in-memory collector (tests).
  */
 export type Emitter = {
-  emit: (event: string, data: unknown) => void;
+  emit: (event: HukoEvent) => void;
 };
 
-// ─── Append Payload ───────────────────────────────────────────────────────────
+// ─── Append / Update payloads ─────────────────────────────────────────────────
 
-/**
- * Everything a caller provides when adding a new context entry.
- * `taskId` is required — entries always belong to a task.
- */
 export type AppendPayload = {
   taskId: number;
   kind: EntryKind;
   role: LLMMessage["role"];
   content: string;
-  /**
-   * Tool calls produced by an assistant turn (native mode). Stored in
-   * `metadata.toolCalls` for DB durability, and surfaced as a structured
-   * field on the resulting `LLMMessage` so the next LLM call serializes
-   * them through the protocol's native `tool_calls` array.
-   */
   toolCalls?: ToolCall[];
   toolCallId?: string | null;
   thinking?: string | null;
   metadata?: Record<string, unknown> | null;
 };
 
-// ─── Update Payload ───────────────────────────────────────────────────────────
-
 export type UpdatePayload = {
-  /** DB id of the entry to patch. */
   entryId: number;
   taskId: number;
   content?: string;
   metadata?: Record<string, unknown>;
-  /**
-   * When true, `metadata` is shallow-merged into the existing metadata
-   * rather than replacing it.
-   */
+  /** Shallow-merge `metadata` over existing instead of replacing. */
   mergeMetadata?: boolean;
+  /**
+   * True at the end of an assistant streaming turn — triggers an
+   * `assistant_complete` HukoEvent emit. False / absent during streaming
+   * partials (those are silent on the wire here; the pipeline already
+   * sent `assistant_content_delta` events directly).
+   */
+  final?: boolean;
 };
 
 // ─── SessionContext ───────────────────────────────────────────────────────────
@@ -103,17 +99,11 @@ export class SessionContext {
   private readonly sessionId: number;
   private readonly sessionType: SessionType;
 
-  /** In-memory LLM context — the messages array sent to the model. */
   private llmContext: LLMMessage[] = [];
 
-  /** Injected dependencies. */
   private readonly persist: PersistFn;
   private readonly updateDb: UpdateFn;
   private readonly emitter: Emitter;
-
-  /** Routing info attached to every WebSocket event. */
-  private readonly chatSessionId?: number;
-  private readonly agentSessionId?: number;
 
   constructor(opts: {
     sessionId: number;
@@ -121,7 +111,6 @@ export class SessionContext {
     persist: PersistFn;
     updateDb: UpdateFn;
     emitter: Emitter;
-    /** Initial LLM context, e.g. loaded from DB when resuming a session. */
     initialContext?: LLMMessage[];
   }) {
     this.sessionId = opts.sessionId;
@@ -130,80 +119,60 @@ export class SessionContext {
     this.updateDb = opts.updateDb;
     this.emitter = opts.emitter;
     this.llmContext = opts.initialContext ? [...opts.initialContext] : [];
-
-    if (opts.sessionType === "chat") {
-      this.chatSessionId = opts.sessionId;
-    } else {
-      this.agentSessionId = opts.sessionId;
-    }
   }
 
   // ─── Public Read API ───────────────────────────────────────────────────────
 
-  /** Number of messages currently in the LLM context. */
   get contextLength(): number {
     return this.llmContext.length;
   }
 
-  /**
-   * A snapshot of the LLM context for the next model call.
-   * Returns a shallow copy — callers must not mutate the array.
-   */
+  /** Snapshot copy of the LLM context for the next model call. */
   getMessages(): LLMMessage[] {
     return [...this.llmContext];
   }
 
-  // ─── append() — the single write entry point ───────────────────────────────
+  // ─── emit() — shared HukoEvent emit point ──────────────────────────────────
 
   /**
-   * Add a new finalized entry to the session.
+   * Emit a `HukoEvent` to the configured emitter. Used by the pipeline
+   * to send streaming deltas; also called internally by append/update.
    *
-   * Fires three side effects in order:
-   *   1. Persist to DB (async) — establishes the canonical entry id
-   *   2. Push to WebSocket (sync) — uses the id from step 1
-   *   3. Append to LLM context (sync) — only if `isLLMVisible(kind)`
-   *
-   * Returns the DB id of the new entry.
-   *
-   * Use this for entries whose final content is known up front (user
-   * messages, tool results, status notices). For streaming assistant
-   * turns, see `appendDraft()` + `commitToContext()`.
+   * This is the single chokepoint for all kernel-emitted events — any
+   * event going to a frontend goes through here.
    */
-  async append(payload: AppendPayload): Promise<number> {
-    const entryId = await this.persistAndEmit(payload);
+  emit(event: HukoEvent): void {
+    this.emitter.emit(event);
+  }
 
+  // ─── append() — finalized entry write ──────────────────────────────────────
+
+  async append(payload: AppendPayload): Promise<number> {
+    const entryId = await this.persistEntry(payload);
+    const event = this.entryToEvent(entryId, payload, /*started=*/ false);
+    if (event) this.emit(event);
     if (isLLMVisible(payload.kind)) {
       this.llmContext.push(toMessage(payload, entryId));
     }
     return entryId;
   }
 
-  // ─── appendDraft() / commitToContext() — streaming assistant turns ─────────
+  // ─── appendDraft() — streaming entry start ─────────────────────────────────
 
-  /**
-   * Persist + emit a new entry but DO NOT push it to the LLM context yet.
-   *
-   * Used to start a streaming assistant turn: the empty entry is created
-   * up front so we have an `entryId` to target with `update()` calls as
-   * tokens arrive, but the message stays out of the LLM context until
-   * the final content is known and `commitToContext()` is called.
-   *
-   * Rationale: pushing an empty `content: ""` message to the LLM context
-   * would be wrong — if any code path peeked at context before the
-   * stream finished, it would see a hollow turn.
-   */
   async appendDraft(payload: AppendPayload): Promise<number> {
-    return this.persistAndEmit(payload);
+    const entryId = await this.persistEntry(payload);
+    const event = this.entryToEvent(entryId, payload, /*started=*/ true);
+    if (event) this.emit(event);
+    return entryId;
   }
+
+  // ─── commitToContext() — push streamed entry into LLM context ──────────────
 
   /**
    * Push a draft entry into the LLM context with its final content.
-   *
-   * Pairs with `appendDraft()`. Does NOT touch the DB or WebSocket —
-   * those should already be in their final state via prior `update()`
-   * calls. This method is purely about the in-memory context array.
-   *
-   * No-op if `kind` is not LLM-visible.
+   * Pairs with `appendDraft()` + final `update(...)`. Pure in-memory —
+   * no DB write, no event emit (the assistant_complete event already fired
+   * during the final update).
    */
   commitToContext(payload: {
     entryId: number;
@@ -218,92 +187,45 @@ export class SessionContext {
     this.llmContext.push(toMessage(payload, payload.entryId));
   }
 
-  // ─── Internal: shared DB + WS dispatch ─────────────────────────────────────
+  // ─── update() — patch existing entry ───────────────────────────────────────
 
-  private async persistAndEmit(payload: AppendPayload): Promise<number> {
-    const { taskId, kind, role, content, toolCalls, toolCallId, thinking, metadata } = payload;
-
-    // Tool calls travel as part of metadata for DB durability. The LLM
-    // context gets them as a structured field via `toMessage()`.
-    const metadataWithCalls: Record<string, unknown> | null =
-      toolCalls && toolCalls.length > 0
-        ? { ...(metadata ?? {}), toolCalls }
-        : (metadata ?? null);
-
-    const entryId = await this.persist({
-      taskId,
-      sessionId: this.sessionId,
-      sessionType: this.sessionType,
-      kind,
-      role,
-      content,
-      toolCallId: toolCallId ?? null,
-      thinking: thinking ?? null,
-      metadata: stripVolatileFields(metadataWithCalls),
-    });
-
-    const wsPayload: TaskEntryPayload = {
-      id: entryId,
-      taskId,
-      sessionId: this.sessionId,
-      sessionType: this.sessionType,
-      kind,
-      role,
-      content,
-      toolCallId: toolCallId ?? null,
-      thinking: thinking ?? null,
-      // UI gets the unstripped metadata so it can render attachments
-      // (with imageDataUrl) inline on the first turn.
-      metadata: metadataWithCalls ?? null,
-      createdAt: new Date(),
-      ...(this.chatSessionId !== undefined ? { chatSessionId: this.chatSessionId } : {}),
-      ...(this.agentSessionId !== undefined ? { agentSessionId: this.agentSessionId } : {}),
-    };
-    this.emitter.emit("task:entry", wsPayload);
-
-    return entryId;
-  }
-
-  // ─── update() — patch an existing entry ───────────────────────────────────
-
-  /**
-   * Patch an existing entry's content and/or metadata.
-   * Used for streaming text updates and post-hoc metadata tagging.
-   *
-   * Fires two side effects:
-   *   1. Update DB row
-   *   2. Push `task:entry_update` to WebSocket
-   *
-   * Does NOT update the in-memory LLM context — the context array holds
-   * the original content and is append-only by design.
-   */
   async update(payload: UpdatePayload): Promise<void> {
-    const { entryId, taskId, content, metadata, mergeMetadata } = payload;
+    const { entryId, taskId, content, metadata, mergeMetadata, final } = payload;
 
-    // ── 1. Update DB ────────────────────────────────────────────────────────
+    // 1. DB write
     await this.updateDb(entryId, {
       ...(content !== undefined ? { content } : {}),
       ...(metadata !== undefined ? { metadata } : {}),
       ...(mergeMetadata !== undefined ? { mergeMetadata } : {}),
     });
 
-    // ── 2. WebSocket push ───────────────────────────────────────────────────
-    const wsPayload: TaskEntryUpdatePayload = {
-      id: entryId,
-      taskId,
-      ...(content !== undefined ? { content } : {}),
-      ...(metadata !== undefined ? { metadata } : {}),
-    };
-    this.emitter.emit("task:entry_update", wsPayload);
+    // 2. Emit assistant_complete on final flush; otherwise stay silent.
+    //    (Streaming partials are emitted directly by the pipeline via
+    //    `emit({ type: "assistant_content_delta", ... })`.)
+    if (final) {
+      const meta = (metadata ?? {}) as Record<string, unknown>;
+      const thinking = meta["thinking"];
+      const toolCalls = meta["toolCalls"];
+      const usage = meta["usage"];
+      this.emit({
+        type: "assistant_complete",
+        entryId,
+        taskId,
+        sessionId: this.sessionId,
+        sessionType: this.sessionType,
+        ts: Date.now(),
+        content: content ?? "",
+        ...(typeof thinking === "string" && thinking.length > 0 ? { thinking } : {}),
+        ...(Array.isArray(toolCalls) && toolCalls.length > 0
+          ? { toolCalls: toolCalls as ToolCall[] }
+          : {}),
+        usage: isTokenUsage(usage) ? usage : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      });
+    }
   }
 
   // ─── LLM Context Management ────────────────────────────────────────────────
 
-  /**
-   * Remove entries from the LLM context by their DB ids.
-   * Used by the compaction pipeline to evict old messages.
-   * Returns the number of messages actually removed.
-   */
   purgeMessages(entryIds: number[]): number {
     const idSet = new Set(entryIds);
     const before = this.llmContext.length;
@@ -311,19 +233,10 @@ export class SessionContext {
     return before - this.llmContext.length;
   }
 
-  /**
-   * Replace the entire LLM context.
-   * Used after a compaction pass that rewrites history (e.g. summary injection).
-   */
   replaceContext(messages: LLMMessage[]): void {
     this.llmContext = [...messages];
   }
 
-  /**
-   * Remove messages from the tail of the LLM context that match a predicate.
-   * Stops at the first message that does NOT match.
-   * Used to strip corrective messages before a retry.
-   */
   removeFromTail(predicate: (msg: LLMMessage) => boolean): number {
     let removed = 0;
     while (this.llmContext.length > 0) {
@@ -334,14 +247,107 @@ export class SessionContext {
     }
     return removed;
   }
+
+  // ─── Internals ─────────────────────────────────────────────────────────────
+
+  private async persistEntry(payload: AppendPayload): Promise<number> {
+    const { taskId, kind, role, content, toolCalls, toolCallId, thinking, metadata } = payload;
+
+    const metadataWithCalls: Record<string, unknown> | null =
+      toolCalls && toolCalls.length > 0
+        ? { ...(metadata ?? {}), toolCalls }
+        : (metadata ?? null);
+
+    return this.persist({
+      taskId,
+      sessionId: this.sessionId,
+      sessionType: this.sessionType,
+      kind,
+      role,
+      content,
+      toolCallId: toolCallId ?? null,
+      thinking: thinking ?? null,
+      metadata: stripVolatileFields(metadataWithCalls),
+    });
+  }
+
+  /** AppendPayload → HukoEvent translation. Returns null for kinds with no event. */
+  private entryToEvent(
+    entryId: number,
+    payload: AppendPayload,
+    started: boolean,
+  ): HukoEvent | null {
+    const base = {
+      entryId,
+      taskId: payload.taskId,
+      sessionId: this.sessionId,
+      sessionType: this.sessionType,
+      ts: Date.now(),
+    };
+
+    switch (payload.kind) {
+      case EK.UserMessage: {
+        const attachments = payload.metadata?.["attachments"] as UserAttachment[] | undefined;
+        return {
+          type: "user_message",
+          ...base,
+          content: payload.content,
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        };
+      }
+
+      case EK.AiMessage:
+        // Only `appendDraft` emits assistant_started; finalisation is
+        // emitted by `update({final: true})`. A bare `append()` of an
+        // AiMessage is unsupported in our model — return null.
+        return started ? { type: "assistant_started", ...base } : null;
+
+      case EK.ToolResult: {
+        const meta = (payload.metadata ?? {}) as Record<string, unknown>;
+        const toolName = typeof meta["toolName"] === "string" ? (meta["toolName"] as string) : "unknown";
+        const error = typeof meta["error"] === "string" ? (meta["error"] as string) : null;
+        // Strip top-level fields out of the surfaced metadata to avoid
+        // duplication; UI consumers can see toolName/error/callId directly.
+        const { toolName: _t, error: _e, arguments: _a, ...rest } = meta;
+        const extraMeta = Object.keys(rest).length > 0 ? rest : undefined;
+        return {
+          type: "tool_result",
+          ...base,
+          callId: payload.toolCallId ?? "",
+          toolName,
+          content: payload.content,
+          error,
+          ...(extraMeta ? { metadata: extraMeta } : {}),
+        };
+      }
+
+      case EK.SystemReminder:
+        return {
+          type: "system_reminder",
+          ...base,
+          content: payload.content,
+        };
+
+      case EK.StatusNotice: {
+        const meta = (payload.metadata ?? {}) as Record<string, unknown>;
+        const severity = meta["severity"];
+        return {
+          type: "system_notice",
+          ...base,
+          severity:
+            severity === "warning" || severity === "error" ? severity : "info",
+          content: payload.content,
+        };
+      }
+
+      default:
+        return null;
+    }
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Build an LLMMessage from an entry payload + entryId.
- * Thin projection — no logic about what's LLM-visible (that's `isLLMVisible`).
- */
 function toMessage(
   opts: {
     role: LLMMessage["role"];
@@ -362,24 +368,16 @@ function toMessage(
   };
 }
 
-/**
- * Remove fields that must not be persisted to the DB long-term.
- * Currently strips `imageDataUrl` from attachment metadata to avoid
- * ballooning the DB with base64 data.
- */
 function stripVolatileFields(
   metadata: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | null {
   if (!metadata) return metadata ?? null;
-
   const attachments = metadata["attachments"];
   if (!Array.isArray(attachments)) return metadata;
-
   const hasVolatile = attachments.some(
     (a) => a && typeof a === "object" && "imageDataUrl" in (a as object),
   );
   if (!hasVolatile) return metadata;
-
   return {
     ...metadata,
     attachments: attachments.map((a) => {
@@ -388,4 +386,14 @@ function stripVolatileFields(
       return rest;
     }),
   };
+}
+
+function isTokenUsage(v: unknown): v is TokenUsage {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o["promptTokens"] === "number" &&
+    typeof o["completionTokens"] === "number" &&
+    typeof o["totalTokens"] === "number"
+  );
 }

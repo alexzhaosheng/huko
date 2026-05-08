@@ -19,7 +19,7 @@
  *
  * Usage:
  *
- *     import { invoke, withOpenRouter } from "@/core/llm";
+ *     import { invoke, withOpenRouter } from "../../core/llm/index.js";
  *
  *     const result = await invoke(withOpenRouter({
  *       apiKey: process.env.OPENROUTER_API_KEY!,

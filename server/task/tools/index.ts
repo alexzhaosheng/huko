@@ -17,16 +17,31 @@ export {
   registerServerTool,
   registerWorkstationTool,
   getTool,
+  getToolDisplay,
+  getToolPolicy,
+  setToolPolicy,
   isWorkstationTool,
   getToolsForLLM,
   listToolNames,
+  coerceArgs,
+  isToolHandlerResult,
+  isLegacyServerToolResult,
+  type ServerToolDefinition,
+  type WorkstationToolDefinition,
   type ServerToolHandler,
   type ServerToolResult,
+  type ToolHandlerResult,
+  type ToolAttachment,
+  type ToolDisplayTemplate,
+  type ToolPolicyMeta,
+  type ToolDangerLevel,
   type ToolFilter,
+  type ToolFilterContext,
 } from "./registry.js";
 
 // ── Built-in tools — populated as tools land ─────────────────────────────────
-// import "./server/message.js";
-// import "./server/search.js";
-// import "./workstation/shell.js";
-// (none yet — tools are added in subsequent rounds)
+import "./server/message.js";
+import "./server/web-fetch.js";
+// Workstation tools land in subsequent rounds:
+//   import "./workstation/shell.js";
+//   import "./workstation/file.js";

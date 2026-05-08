@@ -5,19 +5,19 @@
  *
  * One loop iteration is roughly:
  *
- *   ┌────────────────────────────────────────────────────────────────────┐
- *   │ 1. abort / iteration-budget guards                                 │
- *   │ 2. drain one deferred tool call (single-step enforcement)          │
- *   │       └─ if drained: persist its result, continue to next iter     │
- *   │ 3. callLLM → LLMTurnResult                                         │
- *   │ 4. if turn has tool calls:                                         │
- *   │       execute first now, queue the rest into ctx.deferredCalls     │
- *   │    else if turn has content:                                       │
- *   │       record finalResult, exit loop (DONE)                         │
- *   │    else:                                                           │
- *   │       inject corrective system reminder, retry (bounded)           │
- *   │ 5. manageContext (compaction / digests, future)                    │
- *   └────────────────────────────────────────────────────────────────────┘
+ *   1. abort / iteration-budget guards
+ *   2. drain one deferred tool call (single-step enforcement)
+ *        - if drained: persist its result, continue to next iter
+ *        - if outcome.shouldBreak: clear deferred queue, break (DONE)
+ *   3. callLLM -> LLMTurnResult
+ *   4. if turn has tool calls:
+ *        execute first now, queue the rest into ctx.deferredCalls
+ *        - if outcome.shouldBreak: clear deferred queue, break (DONE)
+ *      else if turn has content:
+ *        record finalResult, exit loop (DONE)
+ *      else:
+ *        inject corrective system reminder, retry (bounded)
+ *   5. manageContext (compaction / digests, future)
  *
  * Why deferred calls are drained at the TOP of the iteration rather than
  * fired in a tight inner loop right after the LLM turn: each iteration
@@ -104,6 +104,13 @@ export class TaskLoop {
             ctx.taskStopped = true;
             break;
           }
+          if (outcome.kind === "ok" && outcome.shouldBreak) {
+            // Tool asked to terminate the task cleanly. Drop any
+            // remaining deferred calls — the model will not get a
+            // chance to react to them.
+            ctx.deferredCalls.length = 0;
+            break;
+          }
           await manageContext(ctx);
           continue;
         }
@@ -137,6 +144,13 @@ export class TaskLoop {
           const toolOutcome = await executeAndPersist(ctx, first!);
           if (toolOutcome.kind === "aborted") {
             ctx.taskStopped = true;
+            break;
+          }
+          if (toolOutcome.kind === "ok" && toolOutcome.shouldBreak) {
+            // Tool asked to terminate cleanly. Drop deferred calls
+            // (rest of this turn's tool calls) — they would be stale
+            // since the task is finishing.
+            ctx.deferredCalls.length = 0;
             break;
           }
           await manageContext(ctx);

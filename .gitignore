@@ -10,3 +10,4 @@ docs/info.md
 .DS_Store
 Thumbs.db
 npm-debug.log*
+huko.jsonl

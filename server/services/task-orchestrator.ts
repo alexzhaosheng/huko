@@ -1,44 +1,27 @@
 /**
  * server/services/task-orchestrator.ts
  *
- * Glue layer between HTTP/WS transport and the engine.
+ * Glue layer between transport (HTTP/WS, CLI) and the engine.
  *
- * The orchestrator is the seam where infrastructure (DB, emitter) meets
- * the engine (SessionContext, TaskContext, TaskLoop). It does NOT speak
- * HTTP or Socket.IO directly — those are abstracted away as injected
- * factories so the engine layer stays pure and the orchestrator stays
- * testable with stubs.
+ * The orchestrator speaks two interfaces:
  *
- * Responsibilities:
- *   - Cache live SessionContexts by (type, id) — sessions outlive tasks
- *   - Track running TaskLoops for stop/interject routing
- *   - Wire DI seams (PersistFn, UpdateFn, Emitter) at task spinup
- *   - Resolve model config via `models` ⨝ `providers` lookup
- *   - Manage task lifecycle (create → run → finalize → cleanup)
+ *   - `Persistence` for all state (sessions, tasks, entries, providers,
+ *     models, config). The actual backend is injected — orchestrator
+ *     never imports drizzle or sqlite directly.
+ *
+ *   - `EmitterFactory` for outgoing `HukoEvent`s. The factory hands back
+ *     an Emitter for a given room id; the orchestrator never knows
+ *     whether it's Socket.IO, an in-memory collector, or stdout.
  *
  * Out of scope:
  *   - Auth / users (huko is single-user)
- *   - Resume / orphan recovery (separate flow; see resume.ts)
- *   - Routing decisions ABOVE the engine (those live in tRPC routers)
+ *   - Resume / orphan recovery (separate flow)
+ *   - Routing decisions ABOVE the engine (those live in tRPC routers / CLI)
  */
 
 // Side-effect: register all built-in tools so getToolsForLLM() works.
 import "../task/tools/index.js";
 
-import { eq } from "drizzle-orm";
-import type { Db } from "../db/client.js";
-import {
-  chatSessions,
-  tasks,
-  providers,
-  models,
-  appConfig,
-} from "../db/schema.js";
-import {
-  makePersistEntry,
-  makeUpdateEntry,
-  loadSessionLLMContext,
-} from "../db/adapter.js";
 import { SessionContext, type Emitter } from "../engine/SessionContext.js";
 import { TaskContext } from "../engine/TaskContext.js";
 import { TaskLoop, type TaskRunSummary } from "../task/task-loop.js";
@@ -49,11 +32,8 @@ import {
   type TaskStatus,
   type UserAttachment,
 } from "../../shared/types.js";
-import type {
-  Protocol,
-  ThinkLevel,
-  ToolCallMode,
-} from "../core/llm/types.js";
+import type { Persistence, ResolvedModelConfig, TaskRow } from "../persistence/index.js";
+import type { TaskSummary } from "../../shared/events.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -61,9 +41,8 @@ import type {
 export type EmitterFactory = (room: string) => Emitter;
 
 export type OrchestratorOptions = {
-  db: Db;
+  persistence: Persistence;
   emitterFactory: EmitterFactory;
-  /** Default system prompt for chats with no override. */
   defaultSystemPrompt?: string;
 };
 
@@ -71,15 +50,12 @@ export type SendMessageInput = {
   chatSessionId: number;
   content: string;
   attachments?: UserAttachment[];
-  /** Optional override; defaults to app_config.default_model_id. */
   modelId?: number;
 };
 
 export type SendMessageResult = {
   taskId: number;
-  /** True if this message interjected an in-flight task; false for new tasks. */
   interjected: boolean;
-  /** Resolves when the relevant task reaches a terminal state. */
   completion: Promise<TaskRunSummary>;
 };
 
@@ -91,23 +67,18 @@ const DEFAULT_SYSTEM_PROMPT =
 // ─── TaskOrchestrator ─────────────────────────────────────────────────────────
 
 export class TaskOrchestrator {
-  private readonly db: Db;
+  private readonly persistence: Persistence;
   private readonly emitterFactory: EmitterFactory;
   private readonly defaultSystemPrompt: string;
 
-  /** Cached SessionContexts keyed by `${sessionType}:${sessionId}`. */
   private readonly liveSessions = new Map<string, SessionContext>();
-  /** Emitters tracked alongside SessionContexts for terminal-event push. */
   private readonly liveSessionEmitters = new Map<string, Emitter>();
-  /** Live TaskLoops keyed by taskId. */
   private readonly liveLoops = new Map<number, TaskLoop>();
-  /** Reverse index: sessionKey → taskId of the in-flight loop, if any. */
   private readonly sessionToLoop = new Map<string, number>();
-  /** Per-task completion promises. Cleared after `awaitTask` reads them. */
   private readonly taskCompletions = new Map<number, Promise<TaskRunSummary>>();
 
   constructor(opts: OrchestratorOptions) {
-    this.db = opts.db;
+    this.persistence = opts.persistence;
     this.emitterFactory = opts.emitterFactory;
     this.defaultSystemPrompt = opts.defaultSystemPrompt ?? DEFAULT_SYSTEM_PROMPT;
   }
@@ -115,22 +86,9 @@ export class TaskOrchestrator {
   // ─── Public entry points ───────────────────────────────────────────────────
 
   async createChatSession(title: string = ""): Promise<number> {
-    const row = await this.db
-      .insert(chatSessions)
-      .values({ title })
-      .returning({ id: chatSessions.id })
-      .get();
-    return row.id;
+    return this.persistence.sessions.create({ title });
   }
 
-  /**
-   * Process a user message.
-   *
-   *   - If there's a live task on the session: append the message and
-   *     interject the current LLM call. The task continues with the new
-   *     message in context.
-   *   - Otherwise: create a new task and start a TaskLoop.
-   */
   async sendUserMessage(input: SendMessageInput): Promise<SendMessageResult> {
     const sessionKey = sessionKeyOf("chat", input.chatSessionId);
     const sessionContext = await this.getOrCreateSessionContext(
@@ -142,8 +100,6 @@ export class TaskOrchestrator {
     if (liveTaskId !== undefined) {
       const loop = this.liveLoops.get(liveTaskId);
       if (loop) {
-        // Append BEFORE interjecting — the loop expects the new message
-        // to already be in context when it resumes the next iteration.
         await sessionContext.append({
           taskId: liveTaskId,
           kind: EntryKind.UserMessage,
@@ -158,14 +114,12 @@ export class TaskOrchestrator {
           this.taskCompletions.get(liveTaskId) ?? Promise.reject(new Error("missing"));
         return { taskId: liveTaskId, interjected: true, completion };
       }
-      // Stale entry — clean up and proceed with a new task.
       this.sessionToLoop.delete(sessionKey);
     }
 
     return this.startNewTask("chat", input.chatSessionId, sessionContext, input);
   }
 
-  /** Hard-stop a running task. Returns true if the task was actually live. */
   stop(taskId: number): boolean {
     const loop = this.liveLoops.get(taskId);
     if (!loop) return false;
@@ -173,20 +127,33 @@ export class TaskOrchestrator {
     return true;
   }
 
-  /**
-   * Wait for a task to finish. If it has already finished, the saved
-   * promise is still cached (until cleared) — otherwise we read the row
-   * from DB and synthesise a summary.
-   */
+  async deleteChatSession(sessionId: number): Promise<void> {
+    const sessionKey = sessionKeyOf("chat", sessionId);
+
+    const liveTaskId = this.sessionToLoop.get(sessionKey);
+    if (liveTaskId !== undefined) {
+      const loop = this.liveLoops.get(liveTaskId);
+      loop?.stop();
+      const completion = this.taskCompletions.get(liveTaskId);
+      if (completion) {
+        await completion.catch(() => {
+          /* swallow — we're tearing down */
+        });
+      }
+    }
+
+    await this.persistence.sessions.delete(sessionId);
+
+    this.liveSessions.delete(sessionKey);
+    this.liveSessionEmitters.delete(sessionKey);
+    this.sessionToLoop.delete(sessionKey);
+  }
+
   async awaitTask(taskId: number): Promise<TaskRunSummary> {
     const cached = this.taskCompletions.get(taskId);
     if (cached) return cached;
 
-    const row = await this.db
-      .select()
-      .from(tasks)
-      .where(eq(tasks.id, taskId))
-      .get();
+    const row = await this.persistence.tasks.get(taskId);
     if (!row) throw new Error(`Task ${taskId} not found.`);
 
     return summaryFromRow(row);
@@ -202,22 +169,15 @@ export class TaskOrchestrator {
   ): Promise<SendMessageResult> {
     const config = await this.resolveModelConfig(input.modelId);
 
-    // Insert task FIRST — every task_context entry needs a taskId FK.
-    const taskRow = await this.db
-      .insert(tasks)
-      .values({
-        chatSessionId: sessionType === "chat" ? sessionId : null,
-        agentSessionId: sessionType === "agent" ? sessionId : null,
-        status: "running",
-        modelId: config.modelId,
-        toolCallMode: config.toolCallMode,
-        thinkLevel: config.thinkLevel,
-      })
-      .returning({ id: tasks.id })
-      .get();
-    const taskId = taskRow.id;
+    const taskId = await this.persistence.tasks.create({
+      chatSessionId: sessionType === "chat" ? sessionId : null,
+      agentSessionId: sessionType === "agent" ? sessionId : null,
+      modelId: config.modelId,
+      toolCallMode: config.toolCallMode,
+      thinkLevel: config.thinkLevel,
+      status: "running",
+    });
 
-    // Append the user message AS PART OF THIS TASK.
     await sessionContext.append({
       taskId,
       kind: EntryKind.UserMessage,
@@ -228,7 +188,6 @@ export class TaskOrchestrator {
         : {}),
     });
 
-    // Build TaskContext and TaskLoop.
     const sessionOwnership =
       sessionType === "chat"
         ? ({ sessionType: "chat", chatSessionId: sessionId } as const)
@@ -254,8 +213,6 @@ export class TaskOrchestrator {
     this.liveLoops.set(taskId, loop);
     this.sessionToLoop.set(sessionKey, taskId);
 
-    // Wrap loop.run() so handlers run before the promise settles, and
-    // the awaitable surfaces the same summary to external callers.
     const completion = loop.run().then(
       async (summary) => {
         await this.handleTaskDone(taskId, sessionKey, summary);
@@ -276,25 +233,32 @@ export class TaskOrchestrator {
     sessionKey: string,
     summary: TaskRunSummary,
   ): Promise<void> {
-    await this.db
-      .update(tasks)
-      .set({
-        status: summary.status,
-        finalResult: summary.finalResult,
-        promptTokens: summary.promptTokens,
-        completionTokens: summary.completionTokens,
-        totalTokens: summary.totalTokens,
-        toolCallCount: summary.toolCallCount,
-        iterationCount: summary.iterationCount,
-        updatedAt: Date.now(),
-      })
-      .where(eq(tasks.id, taskId))
-      .run();
+    await this.persistence.tasks.update(taskId, {
+      status: summary.status,
+      finalResult: summary.finalResult,
+      promptTokens: summary.promptTokens,
+      completionTokens: summary.completionTokens,
+      totalTokens: summary.totalTokens,
+      toolCallCount: summary.toolCallCount,
+      iterationCount: summary.iterationCount,
+    });
 
     this.cleanupTask(taskId, sessionKey);
 
     const emitter = this.liveSessionEmitters.get(sessionKey);
-    emitter?.emit(`task:${summary.status}`, { taskId, summary });
+    if (!emitter) return;
+
+    const { sessionType, sessionId } = parseSessionKey(sessionKey);
+    const status = isTerminalForEvent(summary.status) ? summary.status : "failed";
+
+    emitter.emit({
+      type: "task_terminated",
+      taskId,
+      sessionId,
+      sessionType,
+      status,
+      summary: toTaskSummary(summary),
+    });
   }
 
   private async handleTaskCrash(
@@ -303,20 +267,24 @@ export class TaskOrchestrator {
     err: unknown,
   ): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
-    await this.db
-      .update(tasks)
-      .set({
-        status: "failed",
-        errorMessage: message,
-        updatedAt: Date.now(),
-      })
-      .where(eq(tasks.id, taskId))
-      .run();
+    await this.persistence.tasks.update(taskId, {
+      status: "failed",
+      errorMessage: message,
+    });
 
     this.cleanupTask(taskId, sessionKey);
 
     const emitter = this.liveSessionEmitters.get(sessionKey);
-    emitter?.emit("task:error", { taskId, error: message });
+    if (!emitter) return;
+
+    const { sessionType, sessionId } = parseSessionKey(sessionKey);
+    emitter.emit({
+      type: "task_error",
+      taskId,
+      sessionId,
+      sessionType,
+      error: message,
+    });
   }
 
   private cleanupTask(taskId: number, sessionKey: string): void {
@@ -324,8 +292,6 @@ export class TaskOrchestrator {
     if (this.sessionToLoop.get(sessionKey) === taskId) {
       this.sessionToLoop.delete(sessionKey);
     }
-    // Keep `taskCompletions` so a late `awaitTask()` still resolves.
-    // Cleared on next process restart; lightweight enough for single-user.
   }
 
   // ─── Internals: session context lookup ────────────────────────────────────
@@ -339,8 +305,7 @@ export class TaskOrchestrator {
     if (cached) return cached;
 
     const emitter = this.emitterFactory(key);
-    const initialContext = await loadSessionLLMContext(
-      this.db,
+    const initialContext = await this.persistence.entries.loadLLMContext(
       sessionId,
       sessionType,
     );
@@ -348,8 +313,8 @@ export class TaskOrchestrator {
     const sc = new SessionContext({
       sessionId,
       sessionType,
-      persist: makePersistEntry(this.db),
-      updateDb: makeUpdateEntry(this.db),
+      persist: this.persistence.entries.persist,
+      updateDb: this.persistence.entries.update,
       emitter,
       initialContext,
     });
@@ -366,46 +331,19 @@ export class TaskOrchestrator {
   ): Promise<ResolvedModelConfig> {
     let id = modelId;
     if (id == null) {
-      const cfg = await this.db
-        .select()
-        .from(appConfig)
-        .where(eq(appConfig.key, "default_model_id"))
-        .get();
-      const v = cfg?.value;
-      if (typeof v !== "number") {
+      const def = await this.persistence.config.getDefaultModelId();
+      if (def == null) {
         throw new Error(
           "No default model configured. Set app_config.default_model_id (number).",
         );
       }
-      id = v;
+      id = def;
     }
 
-    const row = await this.db
-      .select({
-        modelId: models.modelId,
-        defaultThinkLevel: models.defaultThinkLevel,
-        defaultToolCallMode: models.defaultToolCallMode,
-        protocol: providers.protocol,
-        baseUrl: providers.baseUrl,
-        apiKey: providers.apiKey,
-        defaultHeaders: providers.defaultHeaders,
-      })
-      .from(models)
-      .innerJoin(providers, eq(models.providerId, providers.id))
-      .where(eq(models.id, id))
-      .get();
+    const config = await this.persistence.models.resolveConfig(id);
+    if (!config) throw new Error(`Model id=${id} not found.`);
 
-    if (!row) throw new Error(`Model id=${id} not found.`);
-
-    return {
-      modelId: row.modelId,
-      protocol: row.protocol,
-      baseUrl: row.baseUrl,
-      apiKey: row.apiKey,
-      toolCallMode: row.defaultToolCallMode,
-      thinkLevel: row.defaultThinkLevel,
-      defaultHeaders: row.defaultHeaders ?? null,
-    };
+    return config;
   }
 }
 
@@ -415,10 +353,35 @@ function sessionKeyOf(type: SessionType, id: number): string {
   return `${type}:${id}`;
 }
 
-function summaryFromRow(row: typeof tasks.$inferSelect): TaskRunSummary {
-  const status: TaskStatus = ["done", "failed", "stopped"].includes(row.status)
-    ? row.status
-    : "failed"; // anything non-terminal at read time → treat as failed
+function parseSessionKey(key: string): { sessionType: SessionType; sessionId: number } {
+  const idx = key.indexOf(":");
+  const type = key.slice(0, idx);
+  const id = Number(key.slice(idx + 1));
+  return {
+    sessionType: type === "agent" ? "agent" : "chat",
+    sessionId: id,
+  };
+}
+
+function isTerminalForEvent(s: TaskStatus): s is "done" | "failed" | "stopped" {
+  return s === "done" || s === "failed" || s === "stopped";
+}
+
+function toTaskSummary(s: TaskRunSummary): TaskSummary {
+  return {
+    finalResult: s.finalResult,
+    hasExplicitResult: s.hasExplicitResult,
+    toolCallCount: s.toolCallCount,
+    iterationCount: s.iterationCount,
+    promptTokens: s.promptTokens,
+    completionTokens: s.completionTokens,
+    totalTokens: s.totalTokens,
+    elapsedMs: s.elapsedMs,
+  };
+}
+
+function summaryFromRow(row: TaskRow): TaskRunSummary {
+  const status: TaskStatus = isTerminalForEvent(row.status) ? row.status : "failed";
   return {
     status,
     finalResult: row.finalResult,
@@ -428,18 +391,6 @@ function summaryFromRow(row: typeof tasks.$inferSelect): TaskRunSummary {
     promptTokens: row.promptTokens,
     completionTokens: row.completionTokens,
     totalTokens: row.totalTokens,
-    elapsedMs: 0, // not tracked in DB at task-end resolution; fine for resumed lookups
+    elapsedMs: 0,
   };
 }
-
-// ─── Internal types ───────────────────────────────────────────────────────────
-
-type ResolvedModelConfig = {
-  modelId: string;
-  protocol: Protocol;
-  baseUrl: string;
-  apiKey: string;
-  toolCallMode: ToolCallMode;
-  thinkLevel: ThinkLevel;
-  defaultHeaders: Record<string, string> | null;
-};

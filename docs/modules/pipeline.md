@@ -58,7 +58,7 @@ catch 到 `AbortError` 时看 `ctx.masterAbort.signal.aborted`：
 function executeAndPersist(ctx: TaskContext, call: ToolCall): Promise<ToolExecOutcome>
 
 type ToolExecOutcome =
-  | { kind: "ok"; entryId: number; result: string }
+  | { kind: "ok"; entryId: number; result: string; shouldBreak?: boolean }
   | { kind: "error"; entryId: number; error: string }
   | { kind: "aborted" };
 ```
@@ -66,15 +66,30 @@ type ToolExecOutcome =
 ### 行为约定
 
 - **未注册的 tool**：直接 persist 一个 `ToolResult{error: "Tool ... not registered"}`，让 LLM 下一轮自己纠错。**不**抛异常，**不**让任务崩。
-- **Server tool**：`Promise.resolve(handler(args, ctx))`。Handler 可以返回 `string` 或 `{result, error?, metadata?}`。
+- **参数 coerce**：分发前调用 `coerceArgs(name, args)` —— LLM 把 boolean 写成 `"true"` 之类的常见小错就被吃掉。tool handler 看到的是矫正过的 args。
+- **Server tool**：`Promise.resolve(handler(args, ctx))`。Handler 可以返回 `string` / `ServerToolResult` / `ToolHandlerResult`。`tool-execute` 内部 normalise 成统一形状。
 - **Workstation tool**：`ctx.executeTool(name, args)` 走 Socket.IO 到本地机器（callback 在 TaskContext 上）。无 callback → 持久化 error。
 - 全程 `raceAbort(masterAbort, fn)` —— abort 触发时立即 reject，工具可能在后台跑完但我们不等。
+
+### ToolHandlerResult 的语义提升
+
+`ToolHandlerResult` 的字段会被 `tool-execute` 翻译成对 task 的副作用：
+
+| 字段          | 副作用                                                                |
+|---------------|-----------------------------------------------------------------------|
+| `content`     | 持久化为 `tool_result.content` —— LLM 看到的就是它                    |
+| `metadata`    | 合并进 `tool_result.metadata`                                          |
+| `summary`     | 写到 `metadata.summary`，UI 紧凑视图用                                |
+| `attachments` | 写到 `metadata.attachments`                                            |
+| `error`       | 非 null → outcome.kind = "error"，content 改写成 `Error: ...`         |
+| `finalResult` | 写入 `ctx.finalResult` + `ctx.hasExplicitResult = true`                |
+| `shouldBreak` | outcome 带 `shouldBreak: true`，TaskLoop 看到后干净结束（status=done）|
 
 ### 持久化的 ToolResult
 
 - `role: "tool"`
 - `toolCallId: call.id`（让 native 协议能配对）
-- `metadata: { toolName, arguments, error?, ...extras }`
+- `metadata: { toolName, arguments, error?, summary?, attachments?, ...extras }`
 
 ---
 

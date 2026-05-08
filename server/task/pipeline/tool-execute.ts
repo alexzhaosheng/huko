@@ -5,16 +5,20 @@
  *
  * Responsibilities:
  *   1. Look up the call's tool in the registry.
- *   2. Dispatch:
- *        - server tool      → in-process handler invocation
- *        - workstation tool → ctx.executeTool callback (Socket.IO route)
- *   3. Wrap with Promise.race against ctx.masterAbort so the loop can
+ *   2. Coerce arguments against the declared schema (best-effort).
+ *   3. Dispatch:
+ *        - server tool      -> in-process handler invocation
+ *        - workstation tool -> ctx.executeTool callback (Socket.IO route)
+ *   4. Wrap with Promise.race against ctx.masterAbort so the loop can
  *      cancel mid-tool. The tool may keep running in the background;
  *      we just stop awaiting it.
- *   4. Persist a `tool_result` entry through `sessionContext.append()`.
+ *   5. Persist a `tool_result` entry through `sessionContext.append()`.
  *      In native mode the LLM context auto-includes it because role is
  *      "tool" and toolCallId is set.
- *   5. Bump TaskContext.toolCallCount.
+ *   6. Bump TaskContext.toolCallCount.
+ *   7. Honor `ToolHandlerResult.finalResult` / `shouldBreak` / etc. by
+ *      lifting them onto the task outcome and surfacing a "break"
+ *      outcome to the loop.
  *
  * Errors are caught and surfaced as a tool-result entry with an
  * `error` flag — the LLM can react to them on the next turn rather
@@ -24,14 +28,34 @@
 import type { TaskContext } from "../../engine/TaskContext.js";
 import type { ToolCall } from "../../core/llm/types.js";
 import { EntryKind } from "../../../shared/types.js";
-import { getTool, type ServerToolResult } from "../tools/registry.js";
+import {
+  coerceArgs,
+  getTool,
+  isLegacyServerToolResult,
+  isToolHandlerResult,
+  type ServerToolResult,
+  type ToolAttachment,
+  type ToolHandlerResult,
+} from "../tools/registry.js";
 
 // ─── Result type ──────────────────────────────────────────────────────────────
 
 export type ToolExecOutcome =
-  | { kind: "ok"; entryId: number; result: string }
+  | { kind: "ok"; entryId: number; result: string; shouldBreak?: boolean }
   | { kind: "error"; entryId: number; error: string }
   | { kind: "aborted" };
+
+// ─── Internal normalised handler output ──────────────────────────────────────
+
+type Normalised = {
+  result: string;
+  error: string | null;
+  metadata?: Record<string, unknown>;
+  finalResult?: string;
+  shouldBreak?: boolean;
+  summary?: string;
+  attachments?: ToolAttachment[];
+};
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -50,10 +74,14 @@ export async function executeAndPersist(
     return { kind: "error", entryId, error };
   }
 
-  // ── 2. Execute (race against masterAbort) ────────────────────────────────
-  let outcome: { result: string; error: string | null; metadata?: Record<string, unknown> };
+  // ── 2. Coerce args (best-effort) ─────────────────────────────────────────
+  const coerced = coerceArgs(call.name, call.arguments);
+  const coercedCall: ToolCall = { ...call, arguments: coerced };
+
+  // ── 3. Execute (race against masterAbort) ────────────────────────────────
+  let outcome: Normalised;
   try {
-    outcome = await raceAbort(ctx, () => runTool(ctx, call, tool));
+    outcome = await raceAbort(ctx, () => runTool(ctx, coercedCall, tool));
   } catch (err: unknown) {
     if (isAbort(err)) return { kind: "aborted" };
     outcome = { result: "", error: errorMessage(err) };
@@ -61,16 +89,32 @@ export async function executeAndPersist(
 
   if (ctx.isAborted) return { kind: "aborted" };
 
-  // ── 3. Persist ───────────────────────────────────────────────────────────
-  const entryId = await persistResult(ctx, call, outcome.result, outcome.error, {
-    ...(outcome.metadata ?? {}),
-  });
+  // ── 4. Lift finalResult onto TaskContext ─────────────────────────────────
+  if (outcome.finalResult !== undefined && outcome.finalResult.length > 0) {
+    ctx.finalResult = outcome.finalResult;
+    ctx.hasExplicitResult = true;
+  }
+
+  // ── 5. Persist ───────────────────────────────────────────────────────────
+  const extraMeta: Record<string, unknown> = {};
+  if (outcome.metadata) Object.assign(extraMeta, outcome.metadata);
+  if (outcome.summary !== undefined) extraMeta["summary"] = outcome.summary;
+  if (outcome.attachments && outcome.attachments.length > 0) {
+    extraMeta["attachments"] = outcome.attachments;
+  }
+
+  const entryId = await persistResult(ctx, coercedCall, outcome.result, outcome.error, extraMeta);
 
   ctx.toolCallCount += 1;
 
-  return outcome.error
-    ? { kind: "error", entryId, error: outcome.error }
-    : { kind: "ok", entryId, result: outcome.result };
+  if (outcome.error) {
+    return { kind: "error", entryId, error: outcome.error };
+  }
+
+  if (outcome.shouldBreak) {
+    return { kind: "ok", entryId, result: outcome.result, shouldBreak: true };
+  }
+  return { kind: "ok", entryId, result: outcome.result };
 }
 
 // ─── Internal: dispatch ──────────────────────────────────────────────────────
@@ -79,7 +123,7 @@ async function runTool(
   ctx: TaskContext,
   call: ToolCall,
   tool: NonNullable<ReturnType<typeof getTool>>,
-): Promise<{ result: string; error: string | null; metadata?: Record<string, unknown> }> {
+): Promise<Normalised> {
   if (tool.kind === "workstation") {
     if (!ctx.executeTool) {
       return {
@@ -88,11 +132,12 @@ async function runTool(
       };
     }
     const r = await ctx.executeTool(call.name, call.arguments);
-    return {
+    const res: Normalised = {
       result: r.result,
       error: r.error,
-      ...(r.screenshot ? { metadata: { screenshot: r.screenshot } } : {}),
     };
+    if (r.screenshot) res.metadata = { screenshot: r.screenshot };
+    return res;
   }
 
   // server tool
@@ -101,14 +146,33 @@ async function runTool(
 }
 
 function normaliseHandlerOutput(
-  out: string | ServerToolResult,
-): { result: string; error: string | null; metadata?: Record<string, unknown> } {
-  if (typeof out === "string") return { result: out, error: null };
-  return {
-    result: out.result,
-    error: out.error ?? null,
-    ...(out.metadata ? { metadata: out.metadata } : {}),
-  };
+  out: string | ServerToolResult | ToolHandlerResult,
+): Normalised {
+  if (typeof out === "string") {
+    return { result: out, error: null };
+  }
+  if (isToolHandlerResult(out)) {
+    const n: Normalised = {
+      result: out.content,
+      error: out.error ?? null,
+    };
+    if (out.metadata) n.metadata = out.metadata;
+    if (out.finalResult !== undefined) n.finalResult = out.finalResult;
+    if (out.shouldBreak) n.shouldBreak = true;
+    if (out.summary !== undefined) n.summary = out.summary;
+    if (out.attachments) n.attachments = out.attachments;
+    return n;
+  }
+  if (isLegacyServerToolResult(out)) {
+    const n: Normalised = {
+      result: out.result,
+      error: out.error ?? null,
+    };
+    if (out.metadata) n.metadata = out.metadata;
+    return n;
+  }
+  // Should never happen — handler returned something exotic.
+  return { result: String(out), error: null };
 }
 
 // ─── Internal: persistence ───────────────────────────────────────────────────

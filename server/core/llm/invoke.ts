@@ -19,6 +19,11 @@
  * dispatch and tool-call-mode normalization meet, and nothing else.
  */
 
+// Side-effect: register all built-in adapters. Importing invoke() guarantees
+// adapter availability regardless of which import path the caller used —
+// pipeline modules import from invoke.js directly, not from index.js.
+import "./register.js";
+
 import { getAdapter } from "./protocol.js";
 import { injectToolsAsXml, parseXmlToolCalls } from "./xml-tools.js";
 import type { LLMCallOptions, LLMTurnResult } from "./types.js";

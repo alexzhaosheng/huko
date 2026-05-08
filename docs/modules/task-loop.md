@@ -27,7 +27,7 @@ server/task/
        interjected → continue（新用户消息已在 context，下一轮重新调 LLM）
 5. result.toolCalls 非空？
        [first, ...rest] → executeAndPersist(first) + deferredCalls.push(...rest)
-       continue
+       outcome.shouldBreak ? break (DONE，丢弃 deferred) : continue
 6. 否则：content 非空 → 设 finalResult, break (DONE)
        否则：注入纠正 SystemReminder，bounded 重试，超限 break (FAILED)
 7. manageContext(ctx)（目前 stub，见 [pipeline.md](./pipeline.md)）
@@ -43,6 +43,20 @@ server/task/
 | `stop()` | `masterAbort` | 当前 LLM 和当前 tool 都被 race 出来；循环退出，status="stopped" | 无 |
 
 **关键**：`interject()` 只**翻 flag + abort 当前 LLM**。它不持久化用户消息——那是 gateway / 调用方的责任。
+
+---
+
+## shouldBreak —— tool 主动结束 task
+
+server tool handler 返回 `ToolHandlerResult.shouldBreak = true` 时：
+
+1. tool result 正常持久化
+2. `outcome.shouldBreak = true` 流回 TaskLoop
+3. TaskLoop **清空** `deferredCalls`（这一轮其它 tool 调用不再有意义）
+4. 直接 break，`resolveStatus()` 返回 `done`
+
+典型用户：`message`（mode=result）—— 设 `finalResult` 同时 break。
+这条路径**不**额外调一次 LLM；用户看到的就是 tool 提供的 finalResult。
 
 ---
 
