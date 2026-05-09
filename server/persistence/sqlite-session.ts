@@ -35,6 +35,7 @@ import type {
   ChatSessionRow,
   CreateChatSessionInput,
   CreateTaskInput,
+  CreateTaskWithInitialEntryInput,
   EntryRow,
   SessionPersistence,
   TaskRow,
@@ -155,6 +156,48 @@ export class SqliteSessionPersistence implements SessionPersistence {
           .returning({ id: tasks.id })
           .get();
         return row.id;
+      },
+      createWithInitialEntry: async (
+        input: CreateTaskWithInitialEntryInput,
+      ): Promise<{ taskId: number; entryId: number }> => {
+        // better-sqlite3's transaction API takes a sync callback —
+        // we can't `await` inside it. That's fine: drizzle's better-sqlite3
+        // adapter is also sync under the hood, so .returning(...).get()
+        // resolves synchronously. We assert the shape with `unknown` to
+        // keep the type system honest about the sync-vs-async boundary.
+        const result = this.sqlite.transaction(() => {
+          const taskRow = db
+            .insert(tasks)
+            .values({
+              chatSessionId: input.task.chatSessionId,
+              agentSessionId: input.task.agentSessionId,
+              status: input.task.status ?? "running",
+              modelId: input.task.modelId,
+              toolCallMode: input.task.toolCallMode,
+              thinkLevel: input.task.thinkLevel,
+            })
+            .returning({ id: tasks.id })
+            .get() as unknown as { id: number };
+
+          const entryRow = db
+            .insert(taskContext)
+            .values({
+              taskId: taskRow.id,
+              sessionId: input.entry.sessionId,
+              sessionType: input.entry.sessionType,
+              kind: input.entry.kind,
+              role: input.entry.role,
+              content: input.entry.content,
+              toolCallId: input.entry.toolCallId ?? null,
+              thinking: input.entry.thinking ?? null,
+              metadata: input.entry.metadata ?? null,
+            })
+            .returning({ id: taskContext.id })
+            .get() as unknown as { id: number };
+
+          return { taskId: taskRow.id, entryId: entryRow.id };
+        })();
+        return result;
       },
       update: async (id: number, patch: UpdateTaskPatch): Promise<void> => {
         const set: Record<string, unknown> = { updatedAt: Date.now() };

@@ -4,9 +4,8 @@
  * `huko sessions <verb>` — argv parser + handoff to commands/sessions.
  *
  * Verbs: list / delete / current / switch / new.
- * Each verb has its own short flag/positional rules; this dispatcher
- * routes by verb name, validates argv, and calls the matching
- * `commands/sessions.ts` function.
+ * Returns the exit code from the underlying command. usage() throws
+ * CliExitError on bad input.
  */
 
 import {
@@ -19,7 +18,7 @@ import {
 } from "../commands/sessions.js";
 import { parseFormatFlags, usage } from "./shared.js";
 
-export async function dispatchSessions(rest: string[]): Promise<void> {
+export async function dispatchSessions(rest: string[]): Promise<number> {
   const verb = rest[0];
   if (verb === undefined || verb === "-h" || verb === "--help") {
     process.stderr.write(
@@ -42,8 +41,7 @@ export async function dispatchSessions(rest: string[]): Promise<void> {
       );
       usage();
     }
-    await sessionsListCommand({ format });
-    return;
+    return await sessionsListCommand({ format });
   }
 
   if (verb === "delete" || verb === "switch") {
@@ -67,11 +65,9 @@ export async function dispatchSessions(rest: string[]): Promise<void> {
       usage();
     }
     if (verb === "delete") {
-      await sessionsDeleteCommand({ id });
-    } else {
-      await sessionsSwitchCommand({ id });
+      return await sessionsDeleteCommand({ id });
     }
-    return;
+    return await sessionsSwitchCommand({ id });
   }
 
   if (verb === "current") {
@@ -80,8 +76,7 @@ export async function dispatchSessions(rest: string[]): Promise<void> {
       process.stderr.write(`huko sessions current: unexpected argument: ${arg}\n`);
       usage();
     }
-    await sessionsCurrentCommand();
-    return;
+    return await sessionsCurrentCommand();
   }
 
   if (verb === "new") {
@@ -95,8 +90,7 @@ export async function dispatchSessions(rest: string[]): Promise<void> {
       process.stderr.write(`huko sessions new: unexpected argument: ${arg}\n`);
       usage();
     }
-    await sessionsNewCommand({ ...(title !== undefined ? { title } : {}) });
-    return;
+    return await sessionsNewCommand({ ...(title !== undefined ? { title } : {}) });
   }
 
   process.stderr.write(`huko sessions: unknown verb: ${verb}\n`);

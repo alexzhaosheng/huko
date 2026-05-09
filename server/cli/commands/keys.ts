@@ -9,11 +9,13 @@
  *   - `list`                 show every provider ref + which layer
  *                            currently resolves it (NOT the value)
  *
+ * Each command returns `Promise<number>` (exit code). The single
+ * `process.exit()` site lives in `cli/index.ts`.
+ *
  * The actual key value is only printed by the user themselves (via
  * `cat .huko/keys.json` etc.) — these commands never write secrets to
  * stdout/stderr. The list view tells you whether a ref is resolvable
- * and which layer wins; spelling out the value would defeat the
- * "DB doesn't hold secrets" model.
+ * and which layer wins.
  *
  * Resolution order (highest first, set in `server/security/keys.ts`):
  *   1. <cwd>/.huko/keys.json
@@ -21,7 +23,7 @@
  *   3. <cwd>/.env
  *
  * Exit codes:
- *   0  ok    1  internal error    3  usage    4  not found (unset)
+ *   0  ok    1  internal error    4  not found (unset)
  */
 
 import {
@@ -41,41 +43,38 @@ export type KeysUnsetArgs = { ref: string };
 
 // ─── set ─────────────────────────────────────────────────────────────────────
 
-export async function keysSetCommand(args: KeysSetArgs): Promise<void> {
+export async function keysSetCommand(args: KeysSetArgs): Promise<number> {
   const cwd = process.cwd();
-  let exitCode = 0;
   try {
     setProjectKey(args.ref, args.value, { cwd });
     process.stderr.write(
       `huko: wrote key "${args.ref}" to ${cwd}/.huko/keys.json (chmod 600)\n`,
     );
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: keys set failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   }
-  process.exit(exitCode);
 }
 
 // ─── unset ───────────────────────────────────────────────────────────────────
 
-export async function keysUnsetCommand(args: KeysUnsetArgs): Promise<void> {
+export async function keysUnsetCommand(args: KeysUnsetArgs): Promise<number> {
   const cwd = process.cwd();
-  let exitCode = 0;
   try {
     const removed = unsetProjectKey(args.ref, { cwd });
     if (!removed) {
       process.stderr.write(
         `huko: key "${args.ref}" not present in ${cwd}/.huko/keys.json\n`,
       );
-      exitCode = 4;
-      return;
+      return 4;
     }
     process.stderr.write(`huko: removed key "${args.ref}" from project keys.json\n`);
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: keys unset failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   }
-  process.exit(exitCode);
 }
 
 // ─── list ────────────────────────────────────────────────────────────────────
@@ -86,10 +85,9 @@ export async function keysUnsetCommand(args: KeysUnsetArgs): Promise<void> {
  * each, report the layer the resolver would pick. NEVER prints the
  * actual key — only the layer name and the matching env-var name.
  */
-export async function keysListCommand(): Promise<void> {
+export async function keysListCommand(): Promise<number> {
   const cwd = process.cwd();
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
     const providers = await infra.providers.list();
@@ -134,7 +132,7 @@ export async function keysListCommand(): Promise<void> {
       process.stdout.write(
         "(no providers configured — add one with `huko provider add ...`)\n",
       );
-      return;
+      return 0;
     }
 
     const header = ["REF", "RESOLVES FROM", "ENV VAR", "USED BY"];
@@ -159,13 +157,13 @@ export async function keysListCommand(): Promise<void> {
           "  3. <cwd>/.env              (<REF_UPPER>_API_KEY=...)\n",
       );
     }
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: keys list failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -187,7 +185,6 @@ function pad(s: string, width: number): string {
   return s.length >= width ? s : s + " ".repeat(width - s.length);
 }
 
-// Re-export so `cli/index.ts` typo-detection sees it (otherwise tsc says
-// "envVarNameFor declared but never read"; we want the ref to keep the
-// security module aware that the CLI surface depends on the convention).
+// Re-export so cli/index.ts can pick it up if it wants to surface the
+// env-var convention alongside command help.
 export { envVarNameFor };

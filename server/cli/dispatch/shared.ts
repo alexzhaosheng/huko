@@ -2,8 +2,11 @@
  * server/cli/dispatch/shared.ts
  *
  * Shared bits used by multiple per-resource dispatchers:
- *   - `usage(exitCode)`: prints the global help text and exits.
- *     Centralised so help stays consistent across the whole CLI surface.
+ *   - `usage(exitCode)`: prints the global help text and **throws**
+ *     `CliExitError`. The single `process.exit()` site lives in
+ *     `index.ts`; everywhere else, "exit now" is a typed exception
+ *     so tests / embedders / future REPL composition aren't killed
+ *     by deep stack frames.
  *   - `parseFormatFlags<F>(argv, validFormats, defaultFormat)`: pulls
  *     the standard `--format / --json / --jsonl` set out of argv.
  *     Used by `run`, `sessions list`, `provider list`, `model list`.
@@ -12,8 +15,34 @@
  * files; index.ts keeps only the top-level routing table.
  */
 
+/**
+ * Thrown by `usage()` and similar "stop now with this exit code" sites.
+ *
+ * Caught at exactly one place — `index.ts:main()` — which maps it to
+ * the actual `process.exit(code)`. Anywhere else (tests, REPL host,
+ * tRPC adapter) catches it and decides what to do with the code
+ * without the process dying.
+ */
+export class CliExitError extends Error {
+  readonly code: number;
+  constructor(code: number, message?: string) {
+    super(message ?? `huko exited with code ${code}`);
+    this.code = code;
+    this.name = "CliExitError";
+  }
+}
+
+/**
+ * Print the global help text and abort with `CliExitError(exitCode)`.
+ *
+ * `exitCode === 0` (user asked for `-h`/`--help`) → help goes to
+ * **stdout** so it can be piped into `less`. Any other code is treated
+ * as a usage error → help goes to **stderr** so stdout stays usable
+ * for whatever the caller was trying to capture.
+ */
 export function usage(exitCode: number = 3): never {
-  process.stderr.write(
+  const out = exitCode === 0 ? process.stdout : process.stderr;
+  out.write(
     [
       "Usage: huko <command> [args] [options]",
       "",
@@ -85,7 +114,7 @@ export function usage(exitCode: number = 3): never {
       "",
     ].join("\n"),
   );
-  process.exit(exitCode);
+  throw new CliExitError(exitCode);
 }
 
 /**

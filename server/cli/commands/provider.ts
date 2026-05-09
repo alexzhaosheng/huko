@@ -9,23 +9,11 @@
  *   - `add <flags>`          create a provider
  *   - `remove <id|name>`     delete a provider (cascades to its models)
  *
- * Each operation opens its own SqliteInfraPersistence — no orchestrator,
- * no daemon round-trip. Providers added here are immediately visible to
- * future `huko run` invocations.
- *
- * `add` requires:
- *   --name=<text>            display name (any string)
- *   --protocol=<openai|anthropic>
- *   --base-url=<url>         http(s) endpoint
- *   --api-key-ref=<name>     logical key name (resolved at runtime via
- *                            <cwd>/.huko/keys.json / env / .env)
- *   --header=<K>=<V>         optional, repeatable — default-headers JSON
- *
- * The api_key VALUE is never asked for here. Set it separately with
- * `huko keys set <ref> <value>` or via the matching env var.
+ * Each function returns `Promise<number>` (exit code). The CLI's single
+ * `process.exit()` lives in `cli/index.ts`.
  *
  * Exit codes:
- *   0  ok    1  internal error    3  usage    4  not found (remove)
+ *   0  ok    1  internal error    4  not found (remove)
  */
 
 import {
@@ -52,9 +40,8 @@ export type ProviderRemoveArgs = { idOrName: string };
 
 // ─── list ────────────────────────────────────────────────────────────────────
 
-export async function providerListCommand(args: ProviderListArgs): Promise<void> {
+export async function providerListCommand(args: ProviderListArgs): Promise<number> {
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
     const rows = await infra.providers.list();
@@ -71,20 +58,19 @@ export async function providerListCommand(args: ProviderListArgs): Promise<void>
         printTable(rows);
         break;
     }
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: provider list failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── add ─────────────────────────────────────────────────────────────────────
 
-export async function providerAddCommand(args: ProviderAddArgs): Promise<void> {
+export async function providerAddCommand(args: ProviderAddArgs): Promise<number> {
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
 
@@ -109,20 +95,19 @@ export async function providerAddCommand(args: ProviderAddArgs): Promise<void> {
         `      ${layerNote}\n`,
     );
     process.stdout.write(String(id) + "\n");
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: provider add failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── remove ──────────────────────────────────────────────────────────────────
 
-export async function providerRemoveCommand(args: ProviderRemoveArgs): Promise<void> {
+export async function providerRemoveCommand(args: ProviderRemoveArgs): Promise<number> {
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
     const all = await infra.providers.list();
@@ -134,19 +119,18 @@ export async function providerRemoveCommand(args: ProviderRemoveArgs): Promise<v
 
     if (!target) {
       process.stderr.write(`huko: provider not found: ${args.idOrName}\n`);
-      exitCode = 4;
-      return;
+      return 4;
     }
 
     await infra.providers.delete(target.id);
     process.stderr.write(`huko: removed provider ${target.id} ("${target.name}")\n`);
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: provider remove failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

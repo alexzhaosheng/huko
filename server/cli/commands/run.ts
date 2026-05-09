@@ -5,7 +5,7 @@
  *
  * Session selection:
  *   1. `--session=<id>`   one-off send to that session; active pointer
- *                         is NOT touched. Errors if the id doesn't exist.
+ *                         is NOT touched. Returns 4 if the id doesn't exist.
  *   2. `--new`            force a fresh session and switch active to it.
  *   3. (default)          continue the cwd's active session if one
  *                         exists and is still in the DB; otherwise
@@ -14,22 +14,13 @@
  *                         session, state.json untouched, lock skipped.
  *
  * Concurrency: persistent runs acquire a per-cwd advisory lock at
- * `<cwd>/.huko/lock` before bootstrap. This protects against:
- *   - two processes running orphan recovery in parallel (would
- *     duplicate synthetic tool_results)
- *   - two processes interleaving messages on the same active session
+ * `<cwd>/.huko/lock` before bootstrap. 5-second wait, 30-second stale
+ * threshold; returns 5 on contention. `--memory` skips the lock.
  *
- * 5-second wait, 30-second stale-lock threshold. `--memory` skips the
- * lock entirely (ephemeral runs are independent).
- *
- * Flow:
- *   1. Build formatter for chosen output format
- *   2. (if persistent) Acquire per-cwd lock; on timeout, exit 5
- *   3. Bootstrap orchestrator (SQLite both, or Memory both for --memory)
- *   4. Verify a default model is configured
- *   5. Resolve which chatSessionId to use
- *   6. Send the prompt; await completion
- *   7. Exit with status code derived from terminal task status
+ * Returns an exit code; never calls `process.exit` directly. The single
+ * `process.exit()` site lives in `server/cli/index.ts`. Second-Ctrl+C
+ * is the only "kill the process now" path — it bypasses the return
+ * channel because there's no further work to do anyway.
  *
  * Exit codes:
  *   0  — task done
@@ -83,10 +74,10 @@ function deriveTitleFromPrompt(prompt: string, max: number = 40): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + "…";
 }
 
-export async function runCommand(args: RunArgs): Promise<void> {
+export async function runCommand(args: RunArgs): Promise<number> {
   if (args.newSession && args.sessionId !== undefined) {
     process.stderr.write("huko run: --new and --session=<id> are mutually exclusive\n");
-    process.exit(3);
+    return 3;
   }
 
   const cwd = process.cwd();
@@ -115,7 +106,7 @@ export async function runCommand(args: RunArgs): Promise<void> {
       process.stderr.write(
         `huko: ${who} is busy in ${cwd}. Try again in a moment, or use --memory if you don't need shared state.\n`,
       );
-      process.exit(5);
+      return 5;
     }
     lock = result.lock;
   }
@@ -128,8 +119,9 @@ export async function runCommand(args: RunArgs): Promise<void> {
   let ctx: Awaited<ReturnType<typeof bootstrap>> | null = null;
 
   // SIGINT during run -> stop the task (graceful) instead of yanking the process.
-  // Second Ctrl+C: hard exit but still release locks via the synchronous
-  // helper (the registered process.on('exit') hook also catches it).
+  // Second Ctrl+C is the ONE remaining hard-exit path: there's no useful work
+  // to do, the user wants out now. We still synchronously release locks via
+  // the `process.on("exit")` hook installed in lock.ts.
   let stopRequested = false;
   const onSigint = (): void => {
     if (stopRequested) {
@@ -168,8 +160,7 @@ export async function runCommand(args: RunArgs): Promise<void> {
           "  `huko model add ... --default`, or run `npx tsx scripts/orchestrator-demo.ts`\n" +
           "  once to seed an OpenRouter setup.\n",
       );
-      exitCode = 3;
-      return;
+      return 3;
     }
 
     // ── Resolve target chat session ───────────────────────────────────────
@@ -182,8 +173,7 @@ export async function runCommand(args: RunArgs): Promise<void> {
       const exists = await ctx.session.sessions.get(args.sessionId);
       if (!exists) {
         process.stderr.write(`huko run: session ${args.sessionId} not found\n`);
-        exitCode = 4;
-        return;
+        return 4;
       }
       chatSessionId = args.sessionId;
     } else if (args.newSession) {
@@ -235,5 +225,5 @@ export async function runCommand(args: RunArgs): Promise<void> {
     if (lock) lock.release();
   }
 
-  process.exit(exitCode);
+  return exitCode;
 }

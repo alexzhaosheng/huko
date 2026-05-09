@@ -122,8 +122,28 @@ export class SessionContext {
 
   // ─── append() ──────────────────────────────────────────────────────────────
 
-  async append(payload: AppendPayload): Promise<number> {
-    const entryId = await this.persistEntry(payload);
+  /**
+   * Persist (or accept already-persisted) an entry, emit the matching
+   * HukoEvent, and update the in-memory llmContext if the kind is
+   * LLM-visible.
+   *
+   * `opts.knownEntryId` lets the caller skip the persist step when the
+   * row was inserted out-of-band — currently only by
+   * `SessionPersistence.tasks.createWithInitialEntry`, which writes
+   * the task row + the initial entry in a single SQLite transaction
+   * (so we'd double-write if we let `append()` persist too). The seam
+   * stays single — every entry that enters the in-memory context still
+   * goes through this method — but the persist call is opt-out for
+   * atomic-create paths.
+   */
+  async append(
+    payload: AppendPayload,
+    opts?: { knownEntryId?: number },
+  ): Promise<number> {
+    const entryId =
+      opts?.knownEntryId !== undefined
+        ? opts.knownEntryId
+        : await this.persistEntry(payload);
     const event = this.entryToEvent(entryId, payload, /*started=*/ false);
     if (event) this.emit(event);
     if (isLLMVisible(payload.kind)) {

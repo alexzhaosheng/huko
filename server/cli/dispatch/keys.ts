@@ -3,8 +3,7 @@
  *
  * `huko keys <verb>` — argv parser + handoff to commands/keys.
  *
- * Verbs: set / unset / list. All have rigid positional shapes — flag
- * parsing is minimal here, mostly typo/help routing.
+ * Returns exit code; usage() throws CliExitError on bad input.
  */
 
 import {
@@ -14,7 +13,7 @@ import {
 } from "../commands/keys.js";
 import { usage } from "./shared.js";
 
-export async function dispatchKeys(rest: string[]): Promise<void> {
+export async function dispatchKeys(rest: string[]): Promise<number> {
   const verb = rest[0];
   if (verb === undefined || verb === "-h" || verb === "--help") {
     process.stderr.write(
@@ -31,8 +30,7 @@ export async function dispatchKeys(rest: string[]): Promise<void> {
       process.stderr.write(`huko keys list: unexpected argument: ${arg}\n`);
       usage();
     }
-    await keysListCommand();
-    return;
+    return await keysListCommand();
   }
 
   if (verb === "set") {
@@ -49,8 +47,7 @@ export async function dispatchKeys(rest: string[]): Promise<void> {
       process.stderr.write("huko keys set: expected <ref> <value>\n");
       usage();
     }
-    await keysSetCommand({ ref: positional[0]!, value: positional[1]! });
-    return;
+    return await keysSetCommand({ ref: positional[0]!, value: positional[1]! });
   }
 
   if (verb === "unset") {
@@ -67,8 +64,7 @@ export async function dispatchKeys(rest: string[]): Promise<void> {
       process.stderr.write("huko keys unset: expected <ref>\n");
       usage();
     }
-    await keysUnsetCommand({ ref: positional[0]! });
-    return;
+    return await keysUnsetCommand({ ref: positional[0]! });
   }
 
   process.stderr.write(`huko keys: unknown verb: ${verb}\n`);

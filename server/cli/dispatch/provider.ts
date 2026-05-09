@@ -3,8 +3,7 @@
  *
  * `huko provider <verb>` — argv parser + handoff to commands/provider.
  *
- * Verbs: list / add / remove. `add` takes structured flags; `remove`
- * takes one positional id-or-name; `list` takes only `--format`.
+ * Returns exit code; usage() throws CliExitError on bad input.
  */
 
 import {
@@ -16,7 +15,7 @@ import type { OutputFormat } from "../commands/sessions.js";
 import type { Protocol } from "../../core/llm/types.js";
 import { parseFormatFlags, usage } from "./shared.js";
 
-export async function dispatchProvider(rest: string[]): Promise<void> {
+export async function dispatchProvider(rest: string[]): Promise<number> {
   const verb = rest[0];
   if (verb === undefined || verb === "-h" || verb === "--help") {
     process.stderr.write(
@@ -39,8 +38,7 @@ export async function dispatchProvider(rest: string[]): Promise<void> {
       );
       usage();
     }
-    await providerListCommand({ format });
-    return;
+    return await providerListCommand({ format });
   }
 
   if (verb === "add") {
@@ -80,14 +78,13 @@ export async function dispatchProvider(rest: string[]): Promise<void> {
       );
       usage();
     }
-    await providerAddCommand({
+    return await providerAddCommand({
       name: name!,
       protocol: protocol!,
       baseUrl: baseUrl!,
       apiKeyRef: apiKeyRef!,
       ...(Object.keys(headers).length > 0 ? { defaultHeaders: headers } : {}),
     });
-    return;
   }
 
   if (verb === "remove") {
@@ -104,8 +101,7 @@ export async function dispatchProvider(rest: string[]): Promise<void> {
       process.stderr.write("huko provider remove: expected exactly one <id|name>\n");
       usage();
     }
-    await providerRemoveCommand({ idOrName: positional[0]! });
-    return;
+    return await providerRemoveCommand({ idOrName: positional[0]! });
   }
 
   process.stderr.write(`huko provider: unknown verb: ${verb}\n`);

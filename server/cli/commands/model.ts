@@ -10,16 +10,11 @@
  *   - `remove <id>`          delete a model
  *   - `default [<id>]`       show or set the system-default model
  *
- * `add` requires:
- *   --provider=<name|id>     existing provider to link this model to
- *   --model-id=<vendor-id>   e.g. "anthropic/claude-sonnet-4" or "gpt-4o"
- *   --display-name=<text>    optional, defaults to --model-id
- *   --think-level=<lvl>      off | low | medium | high (default: off)
- *   --tool-call-mode=<mode>  native | xml (default: native)
- *   --default                also set this as the system default model
+ * Each function returns `Promise<number>` (exit code). The single
+ * `process.exit()` site lives in `cli/index.ts`.
  *
  * Exit codes:
- *   0  ok    1  internal error    3  usage    4  provider/model not found
+ *   0  ok    1  internal error    4  provider/model not found
  */
 
 import {
@@ -50,9 +45,8 @@ export type ModelDefaultArgs = { id?: number };
 
 // ─── list ────────────────────────────────────────────────────────────────────
 
-export async function modelListCommand(args: ModelListArgs): Promise<void> {
+export async function modelListCommand(args: ModelListArgs): Promise<number> {
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
     const rows = await infra.models.list();
@@ -74,20 +68,19 @@ export async function modelListCommand(args: ModelListArgs): Promise<void> {
         printTable(rows, defaultId);
         break;
     }
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: model list failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── add ─────────────────────────────────────────────────────────────────────
 
-export async function modelAddCommand(args: ModelAddArgs): Promise<void> {
+export async function modelAddCommand(args: ModelAddArgs): Promise<number> {
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
     const providers = await infra.providers.list();
@@ -102,8 +95,7 @@ export async function modelAddCommand(args: ModelAddArgs): Promise<void> {
         `huko: provider not found: ${args.provider}\n` +
           `      run \`huko provider list\` to see available providers\n`,
       );
-      exitCode = 4;
-      return;
+      return 4;
     }
 
     const id = await infra.models.create({
@@ -124,28 +116,26 @@ export async function modelAddCommand(args: ModelAddArgs): Promise<void> {
       `huko: created model ${id} ("${args.displayName ?? args.modelId}" via "${provider.name}")${defaultNote}\n`,
     );
     process.stdout.write(String(id) + "\n");
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: model add failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── remove ──────────────────────────────────────────────────────────────────
 
-export async function modelRemoveCommand(args: ModelRemoveArgs): Promise<void> {
+export async function modelRemoveCommand(args: ModelRemoveArgs): Promise<number> {
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
     const list = await infra.models.list();
     const target = list.find((m) => m.id === args.id);
     if (!target) {
       process.stderr.write(`huko: model not found: ${args.id}\n`);
-      exitCode = 4;
-      return;
+      return 4;
     }
 
     await infra.models.delete(args.id);
@@ -159,20 +149,19 @@ export async function modelRemoveCommand(args: ModelRemoveArgs): Promise<void> {
         `      (system default cleared — set a new one with \`huko model default <id>\`)\n`,
       );
     }
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: model remove failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── default ─────────────────────────────────────────────────────────────────
 
-export async function modelDefaultCommand(args: ModelDefaultArgs): Promise<void> {
+export async function modelDefaultCommand(args: ModelDefaultArgs): Promise<number> {
   let infra: InfraPersistence | null = null;
-  let exitCode = 0;
   try {
     infra = new SqliteInfraPersistence();
 
@@ -181,16 +170,16 @@ export async function modelDefaultCommand(args: ModelDefaultArgs): Promise<void>
       const id = await infra.config.getDefaultModelId();
       if (id === null) {
         process.stdout.write("(none)\n");
-        return;
+        return 0;
       }
       const list = await infra.models.list();
       const row = list.find((m) => m.id === id);
       if (!row) {
         process.stdout.write(`${id} (no longer in DB)\n`);
-        return;
+        return 0;
       }
       process.stdout.write(`${row.id}  ${row.displayName} (${row.providerName})\n`);
-      return;
+      return 0;
     }
 
     // Write mode.
@@ -198,20 +187,19 @@ export async function modelDefaultCommand(args: ModelDefaultArgs): Promise<void>
     const row = list.find((m) => m.id === args.id);
     if (!row) {
       process.stderr.write(`huko: model not found: ${args.id}\n`);
-      exitCode = 4;
-      return;
+      return 4;
     }
     await infra.config.setDefaultModelId(args.id);
     process.stderr.write(
       `huko: system default model -> ${args.id} ("${row.displayName}" via "${row.providerName}")\n`,
     );
+    return 0;
   } catch (err) {
     process.stderr.write(`huko: model default failed: ${describe(err)}\n`);
-    exitCode = 1;
+    return 1;
   } finally {
     closeQuietly(infra);
   }
-  process.exit(exitCode);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

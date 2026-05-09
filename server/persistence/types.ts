@@ -13,16 +13,6 @@
  *     own conversation log. Drop a project, drop its `.huko/` and the
  *     conversations go with it.
  *
- * The two were one combined `Persistence` interface in the v0.1 layout,
- * which conflated user identity (API endpoints / keys) with project
- * conversation state. That conflation forced the DB to live next to
- * source code, made provider configs per-project (re-config every clone),
- * and risked plaintext API keys ending up in commits.
- *
- * Splitting also lets the orchestrator be honest about which persistence
- * a given operation hits: token bookkeeping → session, model resolution
- * → infra, etc.
- *
  * **Plaintext keys never live in any DB.** `providers.apiKeyRef` is a
  * logical name (e.g. "openrouter"); the actual secret is resolved at
  * runtime by `server/security/keys.ts` from env / .huko/keys.json / .env.
@@ -30,6 +20,15 @@
  * Backends:
  *   - SqliteInfraPersistence   / SqliteSessionPersistence   (default)
  *   - MemoryInfraPersistence   / MemorySessionPersistence   (--memory, tests)
+ *
+ * Atomicity contract (see persistence.md):
+ *   - Single-row writes are atomic (SQLite per-statement).
+ *   - Task lifecycle's "create task + persist initial entry" is atomic
+ *     via `tasks.createWithInitialEntry` (one transaction). The
+ *     orchestrator uses this to avoid the "task row but no user
+ *     message" ghost state under crash.
+ *   - Multi-step lifecycle further out (assistant turn + tool_results)
+ *     is NOT transactional; resume/orphan recovery is the answer.
  *
  * SessionContext keeps its existing `PersistFn` / `UpdateFn` function-shape
  * dependency. Orchestrator destructures them out of `session.entries` at
@@ -40,7 +39,7 @@
 
 import type { LLMMessage } from "../core/llm/types.js";
 import type { Protocol, ThinkLevel, ToolCallMode } from "../core/llm/types.js";
-import type { SessionType, TaskStatus } from "../../shared/types.js";
+import type { EntryKind, SessionType, TaskStatus } from "../../shared/types.js";
 import type { PersistFn, UpdateFn } from "../engine/SessionContext.js";
 
 // ─── Row shapes (what queries return) ────────────────────────────────────────
@@ -121,9 +120,6 @@ export type ModelRowJoined = ModelRow & {
  * `apiKeyRef` is what the persistence layer carries (never the secret
  * itself). The orchestrator calls `resolveApiKey(apiKeyRef, { cwd })`
  * before constructing TaskContext to turn the ref into a usable key.
- * Doing it that late means provider definitions stay scoped to infra
- * while the credential lookup honours per-cwd `.huko/keys.json` /
- * `.env` overrides.
  */
 export type ResolvedModelConfig = {
   modelId: string;
@@ -134,11 +130,8 @@ export type ResolvedModelConfig = {
   thinkLevel: ThinkLevel;
   defaultHeaders: Record<string, string> | null;
   /**
-   * Model context window in tokens. Optional in storage (we don't
-   * have a `models.context_window` column yet); orchestrator fills it
-   * via `estimateContextWindow(modelId)` when the persistence-side
-   * value is absent. Compaction uses this to scale its thresholds —
-   * see `pipeline/context-manage.ts`.
+   * Model context window in tokens. Optional in storage; orchestrator
+   * fills it via `estimateContextWindow(modelId)` when absent.
    */
   contextWindow?: number;
 };
@@ -199,6 +192,27 @@ export type CreateModelInput = {
   defaultToolCallMode?: ToolCallMode;
 };
 
+/**
+ * The shape of an entry to persist atomically alongside a freshly
+ * created task. Identical to `PersistFn`'s parameter except `taskId`
+ * is omitted — the implementation fills it in after the task INSERT.
+ */
+export type InitialEntryInput = {
+  sessionId: number;
+  sessionType: SessionType;
+  kind: EntryKind;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  toolCallId?: string | null;
+  thinking?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type CreateTaskWithInitialEntryInput = {
+  task: CreateTaskInput;
+  entry: InitialEntryInput;
+};
+
 // ─── SessionPersistence — per-project DB ─────────────────────────────────────
 
 export interface SessionPersistence {
@@ -207,10 +221,7 @@ export interface SessionPersistence {
     update: UpdateFn;
     /**
      * Replay the LLM-visible history of a session into LLMMessages.
-     * Used by resume / "continue conversation" flows.
-     *
-     * Already filters out entries elided by previous compactions (see
-     * `metadata.elidedEntryIds` on `compaction_done` reminders).
+     * Already filters out entries elided by previous compactions.
      */
     loadLLMContext(sessionId: number, type: SessionType): Promise<LLMMessage[]>;
     listForSession(sessionId: number, type: SessionType): Promise<EntryRow[]>;
@@ -225,6 +236,20 @@ export interface SessionPersistence {
 
   readonly tasks: {
     create(input: CreateTaskInput): Promise<number>;
+    /**
+     * Atomic: create the task row AND persist its initial entry in
+     * one transaction. Used at task spinup to avoid the "task created
+     * but user message lost" ghost state if the process dies between
+     * two separate inserts.
+     *
+     * Returns both the new task id and the new entry id. Callers
+     * (orchestrator) then notify SessionContext via
+     * `append(payload, { knownEntryId })` to emit the event and update
+     * the in-memory llmContext WITHOUT a redundant DB write.
+     */
+    createWithInitialEntry(
+      input: CreateTaskWithInitialEntryInput,
+    ): Promise<{ taskId: number; entryId: number }>;
     update(id: number, patch: UpdateTaskPatch): Promise<void>;
     get(id: number): Promise<TaskRow | null>;
     /**
@@ -234,10 +259,7 @@ export interface SessionPersistence {
     listNonTerminal(): Promise<TaskRow[]>;
   };
 
-  /**
-   * Graceful shutdown — close connections, flush WAL, etc.
-   * Required: every backend implements this even if it's a no-op.
-   */
+  /** Graceful shutdown — close connections, flush WAL, etc. */
   close(): Promise<void> | void;
 }
 
@@ -265,8 +287,6 @@ export interface InfraPersistence {
     /**
      * Convenience accessor for the system-level default model id (a
      * numeric models.id stored under app_config["default_model_id"]).
-     * Project-level "default model" is a separate concept that lives
-     * in `<cwd>/.huko/config.json`'s `model.default` (logical name).
      */
     getDefaultModelId(): Promise<number | null>;
     setDefaultModelId(modelId: number): Promise<void>;

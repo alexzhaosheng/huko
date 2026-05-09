@@ -7,13 +7,16 @@
  * `--new`, `--session=<id>`) before passing the rest through the
  * generic format-flag parser. Unknown flags fail loud at format-flag
  * stage.
+ *
+ * Returns the exit code from `runCommand` (0..5). usage() throws
+ * `CliExitError`; index.ts catches and exits the process.
  */
 
 import { runCommand } from "../commands/run.js";
 import type { FormatName } from "../formatters/index.js";
 import { parseFormatFlags, usage } from "./shared.js";
 
-export async function dispatchRun(rest: string[]): Promise<void> {
+export async function dispatchRun(rest: string[]): Promise<number> {
   let title: string | undefined;
   let ephemeral = false;
   let role: string | undefined;
@@ -62,7 +65,7 @@ export async function dispatchRun(rest: string[]): Promise<void> {
   }
   const prompt = positional.join(" ");
 
-  await runCommand({
+  return await runCommand({
     prompt,
     format,
     ...(title !== undefined ? { title } : {}),

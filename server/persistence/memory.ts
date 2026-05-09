@@ -24,6 +24,7 @@ import type {
   CreateModelInput,
   CreateProviderInput,
   CreateTaskInput,
+  CreateTaskWithInitialEntryInput,
   EntryRow,
   InfraPersistence,
   ModelRow,
@@ -273,6 +274,46 @@ export class MemorySessionPersistence implements SessionPersistence {
           updatedAt: t,
         });
         return id;
+      },
+      createWithInitialEntry: async (input: CreateTaskWithInitialEntryInput) => {
+        // Single-threaded JS: between these two synchronous map sets
+        // nothing else can run, so this is naturally atomic. No `await`
+        // between the two lines.
+        const taskId = allocId();
+        const t = now();
+        this._tasks.set(taskId, {
+          id: taskId,
+          chatSessionId: input.task.chatSessionId,
+          agentSessionId: input.task.agentSessionId,
+          status: input.task.status ?? "running",
+          modelId: input.task.modelId,
+          toolCallMode: input.task.toolCallMode,
+          thinkLevel: input.task.thinkLevel,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          toolCallCount: 0,
+          iterationCount: 0,
+          finalResult: "",
+          errorMessage: null,
+          createdAt: t,
+          updatedAt: t,
+        });
+        const entryId = allocId();
+        this._entries.set(entryId, {
+          id: entryId,
+          taskId,
+          sessionId: input.entry.sessionId,
+          sessionType: input.entry.sessionType,
+          kind: input.entry.kind,
+          role: input.entry.role,
+          content: input.entry.content,
+          toolCallId: input.entry.toolCallId ?? null,
+          thinking: input.entry.thinking ?? null,
+          metadata: input.entry.metadata ?? null,
+          createdAt: now(),
+        });
+        return { taskId, entryId };
       },
       update: async (id, patch: UpdateTaskPatch) => {
         const existing = this._tasks.get(id);

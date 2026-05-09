@@ -3,9 +3,7 @@
  *
  * `huko model <verb>` — argv parser + handoff to commands/model.
  *
- * Verbs: list / add / remove / default.
- * `add` is the heavy one — six flags + `--default` boolean; the
- * dispatcher validates each and forwards to `modelAddCommand`.
+ * Returns exit code; usage() throws CliExitError on bad input.
  */
 
 import {
@@ -18,7 +16,7 @@ import type { OutputFormat } from "../commands/sessions.js";
 import type { ThinkLevel, ToolCallMode } from "../../core/llm/types.js";
 import { parseFormatFlags, usage } from "./shared.js";
 
-export async function dispatchModel(rest: string[]): Promise<void> {
+export async function dispatchModel(rest: string[]): Promise<number> {
   const verb = rest[0];
   if (verb === undefined || verb === "-h" || verb === "--help") {
     process.stderr.write(
@@ -39,8 +37,7 @@ export async function dispatchModel(rest: string[]): Promise<void> {
       process.stderr.write(`huko model list: unexpected argument: ${positional[0]}\n`);
       usage();
     }
-    await modelListCommand({ format });
-    return;
+    return await modelListCommand({ format });
   }
 
   if (verb === "add") {
@@ -80,7 +77,7 @@ export async function dispatchModel(rest: string[]): Promise<void> {
       process.stderr.write("huko model add: --provider and --model-id are required\n");
       usage();
     }
-    await modelAddCommand({
+    return await modelAddCommand({
       provider: provider!,
       modelId: modelId!,
       ...(displayName !== undefined ? { displayName } : {}),
@@ -88,7 +85,6 @@ export async function dispatchModel(rest: string[]): Promise<void> {
       ...(toolCallMode !== undefined ? { toolCallMode } : {}),
       ...(setDefault ? { setDefault: true } : {}),
     });
-    return;
   }
 
   if (verb === "remove") {
@@ -110,8 +106,7 @@ export async function dispatchModel(rest: string[]): Promise<void> {
       process.stderr.write(`huko model remove: invalid id: ${positional[0]}\n`);
       usage();
     }
-    await modelRemoveCommand({ id });
-    return;
+    return await modelRemoveCommand({ id });
   }
 
   if (verb === "default") {
@@ -125,19 +120,18 @@ export async function dispatchModel(rest: string[]): Promise<void> {
       positional.push(arg);
     }
     if (positional.length === 0) {
-      await modelDefaultCommand({});
-    } else if (positional.length === 1) {
+      return await modelDefaultCommand({});
+    }
+    if (positional.length === 1) {
       const id = Number(positional[0]!);
       if (!Number.isFinite(id) || !Number.isInteger(id) || id <= 0) {
         process.stderr.write(`huko model default: invalid id: ${positional[0]}\n`);
         usage();
       }
-      await modelDefaultCommand({ id });
-    } else {
-      process.stderr.write("huko model default: at most one <id>\n");
-      usage();
+      return await modelDefaultCommand({ id });
     }
-    return;
+    process.stderr.write("huko model default: at most one <id>\n");
+    usage();
   }
 
   process.stderr.write(`huko model: unknown verb: ${verb}\n`);

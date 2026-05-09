@@ -134,11 +134,11 @@ export class TaskOrchestrator {
     if (liveTaskId !== undefined) {
       const loop = this.liveLoops.get(liveTaskId);
       if (loop) {
-        // Anthropic pairing constraint: assistant(tool_use) → tool(result)
+        // Anthropic pairing constraint: assistant(tool_use) -> tool(result)
         // must be adjacent. If a tool is in flight when the user interjects,
         // wait for it to complete (and its tool_result to land via
         // tool-execute) before appending the user message. Otherwise the
-        // next LLM call would see assistant(tc) → user → tool(result)
+        // next LLM call would see assistant(tc) -> user -> tool(result)
         // which provider validators reject.
         if (loop.ctx.currentToolPromise) {
           await loop.ctx.currentToolPromise;
@@ -180,7 +180,7 @@ export class TaskOrchestrator {
       const completion = this.taskCompletions.get(liveTaskId);
       if (completion) {
         await completion.catch(() => {
-          /* swallow — we're tearing down */
+          /* swallow - we are tearing down */
         });
       }
     }
@@ -213,49 +213,69 @@ export class TaskOrchestrator {
     const config = await this.resolveModelConfig(input.modelId);
 
     // Resolve the provider's API-key ref into the actual secret BEFORE
-    // we touch the DB or build TaskContext — fail fast on missing key.
+    // we touch the DB or build TaskContext - fail fast on missing key.
     // The cwd is also used below for role / CLAUDE.md discovery.
     const cwd = input.cwd ?? process.cwd();
     const apiKey = resolveApiKey(config.apiKeyRef, { cwd });
 
-    const taskId = await this.session.tasks.create({
-      chatSessionId: sessionType === "chat" ? sessionId : null,
-      agentSessionId: sessionType === "agent" ? sessionId : null,
-      modelId: config.modelId,
-      toolCallMode: config.toolCallMode,
-      thinkLevel: config.thinkLevel,
-      status: "running",
+    // Atomic: insert task + initial user-message entry in one SQLite
+    // transaction (SessionPersistence.tasks.createWithInitialEntry).
+    // Avoids the "task row but no user message" ghost state that would
+    // otherwise appear if the process died between two separate inserts.
+    // We then notify SessionContext via append(..., { knownEntryId })
+    // so the wire event fires and llmContext gets updated WITHOUT a
+    // second DB write.
+    const userMetadata: Record<string, unknown> | undefined =
+      input.attachments?.length ? { attachments: input.attachments } : undefined;
+    const { taskId, entryId } = await this.session.tasks.createWithInitialEntry({
+      task: {
+        chatSessionId: sessionType === "chat" ? sessionId : null,
+        agentSessionId: sessionType === "agent" ? sessionId : null,
+        modelId: config.modelId,
+        toolCallMode: config.toolCallMode,
+        thinkLevel: config.thinkLevel,
+        status: "running",
+      },
+      entry: {
+        sessionId,
+        sessionType,
+        kind: EntryKind.UserMessage,
+        role: "user",
+        content: input.content,
+        ...(userMetadata !== undefined ? { metadata: userMetadata } : {}),
+      },
     });
 
-    await sessionContext.append({
-      taskId,
-      kind: EntryKind.UserMessage,
-      role: "user",
-      content: input.content,
-      ...(input.attachments?.length
-        ? { metadata: { attachments: input.attachments } }
-        : {}),
-    });
+    await sessionContext.append(
+      {
+        taskId,
+        kind: EntryKind.UserMessage,
+        role: "user",
+        content: input.content,
+        ...(userMetadata !== undefined ? { metadata: userMetadata } : {}),
+      },
+      { knownEntryId: entryId },
+    );
 
     const sessionOwnership =
       sessionType === "chat"
         ? ({ sessionType: "chat", chatSessionId: sessionId } as const)
         : ({ sessionType: "agent", agentSessionId: sessionId } as const);
 
-    // Role-driven system prompt. `--role` flag (CLI) → input.role.
-    // Defaults to `coding`. `cwd` selects the project root for CLAUDE.md
-    // discovery; falls back to process.cwd() so non-CLI callers don't
+    // Role-driven system prompt. --role flag (CLI) -> input.role.
+    // Defaults to coding. cwd selects the project root for CLAUDE.md
+    // discovery; falls back to process.cwd() so non-CLI callers do not
     // have to pass anything.
     const roleName = input.role ?? getConfig().role.default;
     const role = await loadRole(roleName, cwd);
     const systemPrompt = await buildSystemPrompt({ role, cwd });
 
-    // TODO(role-model): if `role.frontmatter.model` is set, prefer it
-    // over `input.modelId` / app_config.default_model_id. Needs a
-    // `persistence.models.findByLogicalId(string): Promise<number|null>`
-    // method first — the orchestrator can't go from "claude-sonnet-4"
+    // TODO(role-model): if role.frontmatter.model is set, prefer it
+    // over input.modelId / app_config.default_model_id. Needs a
+    // persistence.models.findByLogicalId(string): Promise<number|null>
+    // method first - the orchestrator can not go from "claude-sonnet-4"
     // to a numeric models.id without that. Until then we silently
-    // ignore `role.frontmatter.model`.
+    // ignore role.frontmatter.model.
 
     // Per-role tool gating from frontmatter. The current shape is the
     // single composition layer; future per-user / per-task toggles will
@@ -270,7 +290,7 @@ export class TaskOrchestrator {
     }
 
     // Context window: prefer the value carried by ResolvedModelConfig
-    // (which a future `models.context_window` column would supply);
+    // (which a future models.context_window column would supply);
     // fall back to a string-pattern heuristic on the model id.
     const contextWindow =
       config.contextWindow ?? estimateContextWindow(config.modelId);
