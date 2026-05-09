@@ -3,11 +3,14 @@
  *
  * Glue layer between transport (HTTP/WS, CLI) and the engine.
  *
- * The orchestrator speaks two interfaces:
+ * The orchestrator speaks three interfaces:
  *
- *   - `Persistence` for all state (sessions, tasks, entries, providers,
- *     models, config). The actual backend is injected — orchestrator
- *     never imports drizzle or sqlite directly.
+ *   - `InfraPersistence` for user-global state (providers, models,
+ *     system-level default model). One instance shared across every
+ *     project on the machine.
+ *
+ *   - `SessionPersistence` for per-project state (chat sessions, tasks,
+ *     entry log). One instance per `<cwd>/.huko/huko.db`.
  *
  *   - `EmitterFactory` for outgoing `HukoEvent`s. The factory hands back
  *     an Emitter for a given room id; the orchestrator never knows
@@ -32,13 +35,19 @@ import {
   type TaskStatus,
   type UserAttachment,
 } from "../../shared/types.js";
-import type { Persistence, ResolvedModelConfig, TaskRow } from "../persistence/index.js";
+import type {
+  InfraPersistence,
+  ResolvedModelConfig,
+  SessionPersistence,
+  TaskRow,
+} from "../persistence/index.js";
 import type { TaskSummary } from "../../shared/events.js";
 import { loadRole } from "../roles/index.js";
 import { getConfig } from "../config/index.js";
 import { buildSystemPrompt } from "./build-system-prompt.js";
 import { recoverOrphans, type RecoveryReport } from "../task/resume.js";
 import { estimateContextWindow } from "../core/llm/model-context-window.js";
+import { resolveApiKey } from "../security/keys.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -46,7 +55,16 @@ import { estimateContextWindow } from "../core/llm/model-context-window.js";
 export type EmitterFactory = (room: string) => Emitter;
 
 export type OrchestratorOptions = {
-  persistence: Persistence;
+  /**
+   * User-global infra DB: providers, models, system defaults like
+   * default_model_id. Same instance shared across all projects.
+   */
+  infra: InfraPersistence;
+  /**
+   * Per-project session DB: this project's chat sessions, tasks, and
+   * the LLM-visible entry log.
+   */
+  session: SessionPersistence;
   emitterFactory: EmitterFactory;
 };
 
@@ -70,7 +88,8 @@ export type SendMessageResult = {
 // ─── TaskOrchestrator ─────────────────────────────────────────────────────────
 
 export class TaskOrchestrator {
-  private readonly persistence: Persistence;
+  private readonly infra: InfraPersistence;
+  private readonly session: SessionPersistence;
   private readonly emitterFactory: EmitterFactory;
 
   private readonly liveSessions = new Map<string, SessionContext>();
@@ -80,7 +99,8 @@ export class TaskOrchestrator {
   private readonly taskCompletions = new Map<number, Promise<TaskRunSummary>>();
 
   constructor(opts: OrchestratorOptions) {
-    this.persistence = opts.persistence;
+    this.infra = opts.infra;
+    this.session = opts.session;
     this.emitterFactory = opts.emitterFactory;
   }
 
@@ -96,11 +116,11 @@ export class TaskOrchestrator {
    * `--memory` ephemeral mode (memory backend has no orphans to find).
    */
   async recoverOrphans(): Promise<RecoveryReport> {
-    return recoverOrphans(this.persistence);
+    return recoverOrphans(this.session);
   }
 
   async createChatSession(title: string = ""): Promise<number> {
-    return this.persistence.sessions.create({ title });
+    return this.session.sessions.create({ title });
   }
 
   async sendUserMessage(input: SendMessageInput): Promise<SendMessageResult> {
@@ -165,7 +185,7 @@ export class TaskOrchestrator {
       }
     }
 
-    await this.persistence.sessions.delete(sessionId);
+    await this.session.sessions.delete(sessionId);
 
     this.liveSessions.delete(sessionKey);
     this.liveSessionEmitters.delete(sessionKey);
@@ -176,7 +196,7 @@ export class TaskOrchestrator {
     const cached = this.taskCompletions.get(taskId);
     if (cached) return cached;
 
-    const row = await this.persistence.tasks.get(taskId);
+    const row = await this.session.tasks.get(taskId);
     if (!row) throw new Error(`Task ${taskId} not found.`);
 
     return summaryFromRow(row);
@@ -192,7 +212,13 @@ export class TaskOrchestrator {
   ): Promise<SendMessageResult> {
     const config = await this.resolveModelConfig(input.modelId);
 
-    const taskId = await this.persistence.tasks.create({
+    // Resolve the provider's API-key ref into the actual secret BEFORE
+    // we touch the DB or build TaskContext — fail fast on missing key.
+    // The cwd is also used below for role / CLAUDE.md discovery.
+    const cwd = input.cwd ?? process.cwd();
+    const apiKey = resolveApiKey(config.apiKeyRef, { cwd });
+
+    const taskId = await this.session.tasks.create({
       chatSessionId: sessionType === "chat" ? sessionId : null,
       agentSessionId: sessionType === "agent" ? sessionId : null,
       modelId: config.modelId,
@@ -221,7 +247,6 @@ export class TaskOrchestrator {
     // discovery; falls back to process.cwd() so non-CLI callers don't
     // have to pass anything.
     const roleName = input.role ?? getConfig().role.default;
-    const cwd = input.cwd ?? process.cwd();
     const role = await loadRole(roleName, cwd);
     const systemPrompt = await buildSystemPrompt({ role, cwd });
 
@@ -256,7 +281,7 @@ export class TaskOrchestrator {
       protocol: config.protocol,
       modelId: config.modelId,
       baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
+      apiKey,
       toolCallMode: config.toolCallMode,
       thinkLevel: config.thinkLevel,
       contextWindow,
@@ -291,7 +316,7 @@ export class TaskOrchestrator {
     sessionKey: string,
     summary: TaskRunSummary,
   ): Promise<void> {
-    await this.persistence.tasks.update(taskId, {
+    await this.session.tasks.update(taskId, {
       status: summary.status,
       finalResult: summary.finalResult,
       promptTokens: summary.promptTokens,
@@ -325,7 +350,7 @@ export class TaskOrchestrator {
     err: unknown,
   ): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
-    await this.persistence.tasks.update(taskId, {
+    await this.session.tasks.update(taskId, {
       status: "failed",
       errorMessage: message,
     });
@@ -363,7 +388,7 @@ export class TaskOrchestrator {
     if (cached) return cached;
 
     const emitter = this.emitterFactory(key);
-    const initialContext = await this.persistence.entries.loadLLMContext(
+    const initialContext = await this.session.entries.loadLLMContext(
       sessionId,
       sessionType,
     );
@@ -371,8 +396,8 @@ export class TaskOrchestrator {
     const sc = new SessionContext({
       sessionId,
       sessionType,
-      persist: this.persistence.entries.persist,
-      updateDb: this.persistence.entries.update,
+      persist: this.session.entries.persist,
+      updateDb: this.session.entries.update,
       emitter,
       initialContext,
     });
@@ -389,7 +414,7 @@ export class TaskOrchestrator {
   ): Promise<ResolvedModelConfig> {
     let id = modelId;
     if (id == null) {
-      const def = await this.persistence.config.getDefaultModelId();
+      const def = await this.infra.config.getDefaultModelId();
       if (def == null) {
         throw new Error(
           "No default model configured. Set app_config.default_model_id (number).",
@@ -398,7 +423,7 @@ export class TaskOrchestrator {
       id = def;
     }
 
-    const config = await this.persistence.models.resolveConfig(id);
+    const config = await this.infra.models.resolveConfig(id);
     if (!config) throw new Error(`Model id=${id} not found.`);
 
     return config;

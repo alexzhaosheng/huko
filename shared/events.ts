@@ -19,6 +19,8 @@
  *                        `sessionContext.emit()`
  *   3. Orchestrator    — task lifecycle (task_terminated, task_error)
  *                        emitted via the cached session emitter.
+ *   4. Bootstrap       — orphan recovery (orphan_recovered), one per
+ *                        healed orphan task at startup.
  *
  * Adding a new event type:
  *   1. Add a sub-type below.
@@ -143,6 +145,30 @@ export type TaskErrorEvent = {
   error: string;
 };
 
+/**
+ * Orphan-recovery healed a task left over from a previous crash.
+ *
+ * Emitted at startup, once per orphan task that the resume pass found
+ * and "stitched" — the task is now `failed`; if it had assistant
+ * `tool_use`s without matching `tool_result`s, synthetic results have
+ * been written to keep provider-side pairing valid.
+ *
+ * Frontends should render this prominently (yellow, etc.) so users
+ * notice the previous crash. It's not an error — the data is healed —
+ * but it's a non-trivial state change worth flagging.
+ */
+export type OrphanRecoveredEvent = {
+  type: "orphan_recovered";
+  taskId: number;
+  sessionId: number;
+  sessionType: SessionType;
+  ts: number;
+  /** Short reason: e.g. "process exited mid-tool" / "process exited while waiting for user reply". */
+  reason: string;
+  /** How many synthetic tool_result rows were injected to repair pairing. 0 if none needed. */
+  danglingToolCount: number;
+};
+
 // ─── Summary type (for task_terminated) ──────────────────────────────────────
 
 /**
@@ -173,7 +199,8 @@ export type HukoEvent =
   | SystemNoticeEvent
   | SystemReminderEvent
   | TaskTerminatedEvent
-  | TaskErrorEvent;
+  | TaskErrorEvent
+  | OrphanRecoveredEvent;
 
 // ─── Wire constants ──────────────────────────────────────────────────────────
 

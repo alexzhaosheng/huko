@@ -65,7 +65,12 @@ huko 的形态是 **kernel + 可插拔扩展**：
 
 - **Kernel 零基础设施假设**：`server/engine/` / `server/task/` / `server/services/` 永远不直接 import HTTP 库 / Socket.IO / 具体 DB / UI 框架。基础设施通过构造函数注入。
 - **Frontend 不被 kernel 反向 import**：内核暴露事件 + 接口；frontend（CLI、daemon HTTP、外部 web）调用内核。**反过来不行**。
-- **持久化通过 `Persistence` 接口**——内核**不**直接 import drizzle / better-sqlite3。具体实现在 `server/persistence/<name>/`。
+- **持久化通过 `InfraPersistence` + `SessionPersistence` 接口**——按 scope 分两份：
+  - `InfraPersistence` 在 `~/.huko/infra.db`：providers / models / 系统默认（用户全局）
+  - `SessionPersistence` 在 `<cwd>/.huko/huko.db`：sessions / tasks / entries（项目级）
+  - 内核**不**直接 import drizzle / better-sqlite3
+- **API key 永不进 DB**——`providers.api_key_ref` 是逻辑名，运行时由
+  `server/security/keys.ts` 三层查找（`<cwd>/.huko/keys.json` > env > `<cwd>/.env`）解析为真值
 
 ### Context 写入垄断
 
@@ -123,14 +128,15 @@ huko 的形态是 **kernel + 可插拔扩展**：
 | Roles | `server/roles/` + `server/services/build-system-prompt.ts` | [roles](./modules/roles.md) | 角色/persona 系统：markdown role + buildSystemPrompt + CLAUDE.md 注入；默认 `coding` | ✅ |
 | Config | `server/config/` | [config](./modules/config.md) | 单一 config 子系统：DEFAULT_CONFIG + ~/.huko/config.json + project + env。所有 hardcoded tunable 收口于此 | ✅ |
 | Resume | `server/task/resume.ts` | [resume](./modules/resume.md) | orphan 恢复：mark failed + 合成 tool_result 保配对 + elided entries 过滤 | ✅ |
-| Persistence | `server/persistence/` | [persistence](./modules/persistence.md) | Persistence 接口 + memory + file (JSONL) + sqlite | ✅ |
-| DB schema | `server/db/` | [db](./modules/db.md) | SQLite schema + migrations（被 SqlitePersistence 包装） | ✅ |
+| Persistence | `server/persistence/` | [persistence](./modules/persistence.md) | 两个接口：InfraPersistence (~/.huko/infra.db) + SessionPersistence (<cwd>/.huko/huko.db)；sqlite + memory 后端 | ✅ |
+| DB schema | `server/db/` | [db](./modules/db.md) | 两份 SQLite schema：`schema/infra.ts` + `schema/session.ts`；分别 migration | ✅ |
+| Security | `server/security/` | [security](./modules/security.md) | API key 解析：`<cwd>/.huko/keys.json` > env > `<cwd>/.env`；DB 永不持有 key | ✅ |
 | Orchestrator | `server/services/` | [orchestrator](./modules/orchestrator.md) | 内核装配总枢（已接 Persistence） | ✅ |
 | Daemon Gateway | `server/gateway.ts` | [gateway](./modules/gateway.md) | Socket.IO 网关 + 单一 "huko" wire event | ✅ |
 | Daemon Routers | `server/routers/` | [routers](./modules/routers.md) | tRPC 控制接口（仅 daemon 用） | ✅ |
 | Daemon Bootstrap | `server/core/app.ts` | [app](./modules/app.md) | Express + WS + tRPC 装配 | ✅ |
 | HukoEvent 协议 | `shared/events.ts` | （待写专项 doc） | 语义事件 discriminated union（11 种类型） | ✅ |
-| CLI | `server/cli/` | [cli](./modules/cli.md) | 一次性 `huko run` ✅；后台 / 交互 ⏳ | ✅（v1） |
+| CLI | `server/cli/` | [cli](./modules/cli.md) | `run` (active session 默认) / `sessions` / `provider` / `model` / `keys` / `config`；后台 / 交互 ⏳ | ✅（v1） |
 | Workstation | `server/workstation-manager/` | （未写） | 本地机器集成 | ⏳ |
 | ~~Web Client~~ | ~~`client/`~~ | （已拆出） | 移到独立仓库 / 包 | 🚮 已删 |
 
@@ -189,7 +195,7 @@ huko 的形态是 **kernel + 可插拔扩展**：
 - ~~Orchestrator + routers 解耦 DB → 接 Persistence~~
 - ~~HukoEvent 语义事件协议正式化~~
 - ~~CLI 一次性模式 `huko run` (text / jsonl / json formatter)~~
-- ~~FilePersistence (JSONL append-only event-sourced)~~
+- ~~FilePersistence (JSONL append-only event-sourced)~~（split 时退役）
 - ~~Tool 系统 v2：ToolHandlerResult / coerceArgs / display / dangerLevel / platformNotes~~
 - ~~首批内置 server tools：`message`（info+result）、`web_fetch`~~
 - ~~CLI `sessions list/delete`、`--memory`、`--title`~~
@@ -197,6 +203,12 @@ huko 的形态是 **kernel + 可插拔扩展**：
 - ~~`Persistence.close()` 必选化（架构清理）~~
 - ~~CLAUDE.md 立"从根本解决"原则~~
 - ~~WeavesAI 设计研究 doc（[agent-design-notes.md](./agent-design-notes.md)）~~
+- ~~**Persistence 双拆**：`InfraPersistence` (~/.huko/infra.db) + `SessionPersistence` (<cwd>/.huko/huko.db)~~
+- ~~**API key 解耦**：`providers.api_key_ref` + `server/security/keys.ts` 三层查找~~
+- ~~**Active session per-cwd**：`<cwd>/.huko/state.json` + `huko run` 默认接续 + `sessions current/switch/new`~~
+- ~~**Provider/Model/Keys CLI**：`huko provider/model/keys` 完整 CRUD~~
+- ~~`<cwd>/.huko/.gitignore` 自动生成（默认排除 huko.db / keys.json / state.json）~~
+- ~~删除 `HUKO_DB_PATH` env override（无消费者）~~
 
 **⏳ 后续待建**
 

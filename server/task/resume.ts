@@ -38,10 +38,24 @@
  *     tool_results will keep history valid.
  *   - Periodic re-scan (WeavesAI runs an OrphanRecovery health check
  *     every minute). Startup-once is sufficient for huko's CLI shape.
+ *
+ * Reporting: each healed task contributes one entry to `report.records`
+ * so the caller can emit one `orphan_recovered` HukoEvent per task
+ * (rendered yellow by the text formatter — see docs/modules/cli.md).
  */
 
-import { EntryKind, type TaskStatus } from "../../shared/types.js";
-import type { Persistence, EntryRow, TaskRow } from "../persistence/index.js";
+import { EntryKind, type SessionType, type TaskStatus } from "../../shared/types.js";
+import type { SessionPersistence, EntryRow, TaskRow } from "../persistence/index.js";
+
+export type OrphanRecord = {
+  taskId: number;
+  sessionId: number;
+  sessionType: SessionType;
+  /** Short reason: e.g. "process exited mid-tool" / "process exited while waiting for user reply". */
+  reason: string;
+  /** How many synthetic tool_result rows were injected for pairing. 0 if none needed. */
+  danglingToolCount: number;
+};
 
 export type RecoveryReport = {
   scanned: number;
@@ -52,6 +66,8 @@ export type RecoveryReport = {
     waitingForApproval: number;
     other: number;
   };
+  /** Per-task detail, one entry per healed task. Emitted as `orphan_recovered` events. */
+  records: OrphanRecord[];
 };
 
 /**
@@ -59,7 +75,7 @@ export type RecoveryReport = {
  * a row is safe (the second run finds nothing because the first marked
  * everything failed).
  */
-export async function recoverOrphans(persistence: Persistence): Promise<RecoveryReport> {
+export async function recoverOrphans(persistence: SessionPersistence): Promise<RecoveryReport> {
   const report: RecoveryReport = {
     scanned: 0,
     healed: 0,
@@ -69,32 +85,57 @@ export async function recoverOrphans(persistence: Persistence): Promise<Recovery
       waitingForApproval: 0,
       other: 0,
     },
+    records: [],
   };
 
   const orphans = await persistence.tasks.listNonTerminal();
   report.scanned = orphans.length;
 
   for (const task of orphans) {
-    const sessionType = task.chatSessionId !== null ? "chat" : "agent";
+    const sessionType: SessionType = task.chatSessionId !== null ? "chat" : "agent";
     const sessionId = task.chatSessionId ?? task.agentSessionId;
     if (sessionId === null) {
       // Defensive: task without a session — mark failed.
-      await markFailed(persistence, task, "orphan task has no session");
+      const reason = "orphan task has no session";
+      await markFailed(persistence, task, reason);
       report.byKind.other += 1;
       report.healed += 1;
+      report.records.push({
+        taskId: task.id,
+        sessionId: 0,
+        sessionType,
+        reason,
+        danglingToolCount: 0,
+      });
       continue;
     }
 
     if (task.status === "waiting_for_reply") {
-      await markFailed(persistence, task, "process exited while waiting for user reply");
+      const reason = "process exited while waiting for user reply";
+      await markFailed(persistence, task, reason);
       report.byKind.waitingForReply += 1;
       report.healed += 1;
+      report.records.push({
+        taskId: task.id,
+        sessionId,
+        sessionType,
+        reason,
+        danglingToolCount: 0,
+      });
       continue;
     }
     if (task.status === "waiting_for_approval") {
-      await markFailed(persistence, task, "process exited while waiting for approval");
+      const reason = "process exited while waiting for approval";
+      await markFailed(persistence, task, reason);
       report.byKind.waitingForApproval += 1;
       report.healed += 1;
+      report.records.push({
+        taskId: task.id,
+        sessionId,
+        sessionType,
+        reason,
+        danglingToolCount: 0,
+      });
       continue;
     }
 
@@ -129,14 +170,19 @@ export async function recoverOrphans(persistence: Persistence): Promise<Recovery
     if (dangling.length > 0) report.byKind.danglingTools += 1;
     else report.byKind.other += 1;
 
-    await markFailed(
-      persistence,
-      task,
+    const reason =
       dangling.length > 0
         ? `process exited mid-tool; ${dangling.length} synthetic tool_result(s) injected for pairing`
-        : "process exited while running; no dangling tool_calls",
-    );
+        : "process exited while running; no dangling tool_calls";
+    await markFailed(persistence, task, reason);
     report.healed += 1;
+    report.records.push({
+      taskId: task.id,
+      sessionId,
+      sessionType,
+      reason,
+      danglingToolCount: dangling.length,
+    });
   }
 
   return report;
@@ -145,7 +191,7 @@ export async function recoverOrphans(persistence: Persistence): Promise<Recovery
 // ─── Internals ───────────────────────────────────────────────────────────────
 
 async function markFailed(
-  persistence: Persistence,
+  persistence: SessionPersistence,
   task: TaskRow,
   reason: string,
 ): Promise<void> {

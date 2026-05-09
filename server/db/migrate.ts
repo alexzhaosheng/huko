@@ -1,43 +1,49 @@
 /**
  * server/db/migrate.ts
  *
- * Migration runner.
+ * Migration runner — generic over (sqlite handle, migrations dir).
  *
  * Convention:
- *   - Migration files live in `./migrations/` named `NNNN_name.sql`
- *   - Files are applied in lexicographic order (zero-pad the number)
- *   - Each file is wrapped in a transaction; partial failures roll back
- *   - Applied versions are tracked in the `_migrations` table
+ *   - Migration files named `NNNN_name.sql`, applied in lexicographic order
+ *   - Each file wrapped in a transaction; partial failures roll back
+ *   - Applied versions tracked in this DB's `_migrations` table
  *
- * We deliberately do NOT use drizzle-kit. SQLite's limited ALTER TABLE
- * means many schema changes need the new-table-copy-data dance, which
- * is easier to write and review as hand-authored SQL.
+ * The runner is per-handle: each Sqlite persistence backend (infra,
+ * session) calls it with its own handle and its own migrations
+ * subdirectory. The `_migrations` book-keeping table is created lazily
+ * inside the target DB.
  *
- * Schema drift between `schema.ts` and the SQL files is the author's
- * responsibility — when you touch a column, update both.
+ * Schema drift between Drizzle's `schema/{infra,session}.ts` and the
+ * SQL files is the author's responsibility — when you touch a column,
+ * update both.
  */
 
 import path from "node:path";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
-import { sqlite } from "./client.js";
+import type { Database as BetterSqlite3Database } from "better-sqlite3";
 
 export type MigrationResult = {
   applied: string[];
   skipped: string[];
 };
 
-export function runMigrations(): MigrationResult {
-  ensureMigrationsTable();
-  const applied = readAppliedSet();
+/**
+ * Apply every `*.sql` in `migrationsDir` (sorted) that hasn't been
+ * applied to this handle yet. Idempotent.
+ */
+export function runMigrations(
+  sqlite: BetterSqlite3Database,
+  migrationsDir: string,
+): MigrationResult {
+  ensureMigrationsTable(sqlite);
+  const applied = readAppliedSet(sqlite);
 
-  const dir = migrationsDir();
-  if (!fs.existsSync(dir)) {
+  if (!fs.existsSync(migrationsDir)) {
     return { applied: [], skipped: [] };
   }
 
   const files = fs
-    .readdirSync(dir)
+    .readdirSync(migrationsDir)
     .filter((f) => f.endsWith(".sql"))
     .sort(); // lexicographic — relies on zero-padded NNNN_ prefix
 
@@ -51,7 +57,7 @@ export function runMigrations(): MigrationResult {
       continue;
     }
 
-    const ddl = fs.readFileSync(path.join(dir, file), "utf8");
+    const ddl = fs.readFileSync(path.join(migrationsDir, file), "utf8");
 
     sqlite.transaction(() => {
       sqlite.exec(ddl);
@@ -68,7 +74,7 @@ export function runMigrations(): MigrationResult {
 
 // ─── Internals ───────────────────────────────────────────────────────────────
 
-function ensureMigrationsTable(): void {
+function ensureMigrationsTable(sqlite: BetterSqlite3Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS _migrations (
       version    TEXT PRIMARY KEY,
@@ -77,14 +83,9 @@ function ensureMigrationsTable(): void {
   `);
 }
 
-function readAppliedSet(): Set<string> {
+function readAppliedSet(sqlite: BetterSqlite3Database): Set<string> {
   const rows = sqlite
     .prepare("SELECT version FROM _migrations")
     .all() as Array<{ version: string }>;
   return new Set(rows.map((r) => r.version));
-}
-
-function migrationsDir(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.join(here, "migrations");
 }

@@ -16,7 +16,7 @@ const toolCallModeEnum = z.enum(["native", "xml"]);
 
 export const modelRouter = router({
   list: publicProcedure.query(async ({ ctx }) => {
-    return ctx.persistence.models.list();
+    return ctx.infra.models.list();
   }),
 
   create: publicProcedure
@@ -30,7 +30,7 @@ export const modelRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const id = await ctx.persistence.models.create({
+      const id = await ctx.infra.models.create({
         providerId: input.providerId,
         modelId: input.modelId,
         displayName: input.displayName ?? input.modelId,
@@ -47,23 +47,23 @@ export const modelRouter = router({
   delete: publicProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
-      const exists = await ctx.persistence.models.resolveConfig(input.id);
+      const exists = await ctx.infra.models.resolveConfig(input.id);
       if (!exists) throw new TRPCError({ code: "NOT_FOUND" });
-      await ctx.persistence.models.delete(input.id);
+      await ctx.infra.models.delete(input.id);
       return { ok: true };
     }),
 
   setDefault: publicProcedure
     .input(z.object({ modelId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
-      const exists = await ctx.persistence.models.resolveConfig(input.modelId);
+      const exists = await ctx.infra.models.resolveConfig(input.modelId);
       if (!exists) throw new TRPCError({ code: "NOT_FOUND", message: "Model not found." });
-      await ctx.persistence.config.setDefaultModelId(input.modelId);
+      await ctx.infra.config.setDefaultModelId(input.modelId);
       return { ok: true };
     }),
 
   getDefault: publicProcedure.query(async ({ ctx }) => {
-    const modelId = await ctx.persistence.config.getDefaultModelId();
+    const modelId = await ctx.infra.config.getDefaultModelId();
     return { modelId };
   }),
 });

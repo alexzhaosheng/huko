@@ -4,10 +4,11 @@
  * Daemon-mode entry point.
  *
  * Boots:
- *   1. SqlitePersistence — its constructor migrates idempotently
+ *   1. SqliteInfraPersistence + SqliteSessionPersistence — each migrates
+ *      idempotently from its constructor
  *   2. Express + plain HTTP server (so Socket.IO can attach)
  *   3. Socket.IO gateway -> emitterFactory
- *   4. TaskOrchestrator wired up with persistence + gateway
+ *   4. TaskOrchestrator wired up with both persistences + gateway
  *   5. tRPC adapter at /api/trpc
  *   6. Health endpoint
  *   7. Listen
@@ -17,17 +18,20 @@
  * (CLI in daemon mode, future plugins, IDE extensions) can drive it.
  *
  * Other frontends (CLI one-shot) wire the kernel directly with whatever
- * Persistence they want and no HTTP surface at all.
+ * persistence they want and no HTTP surface at all.
  *
- * Graceful shutdown closes Socket.IO, the HTTP server, and the
- * persistence backend in order.
+ * Graceful shutdown closes Socket.IO, the HTTP server, and both
+ * persistence backends in order.
  */
 
 import { createServer } from "node:http";
 import express from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 
-import { SqlitePersistence } from "../persistence/index.js";
+import {
+  SqliteInfraPersistence,
+  SqliteSessionPersistence,
+} from "../persistence/index.js";
 import { createGateway } from "../gateway.js";
 import { TaskOrchestrator } from "../services/index.js";
 import { appRouter } from "../routers/index.js";
@@ -45,9 +49,10 @@ const HOST = process.env["HOST"] ?? cfg.host;
 
 // ─── 1. Persistence ──────────────────────────────────────────────────────────
 
-// SqlitePersistence's constructor runs migrations idempotently — schema
-// management is its own concern, the daemon doesn't need to know.
-const persistence = new SqlitePersistence();
+// Each backend's constructor runs migrations idempotently — schema
+// management is the backend's own concern, the daemon doesn't need to know.
+const infra = new SqliteInfraPersistence();
+const session = new SqliteSessionPersistence({ cwd: process.cwd() });
 
 // ─── 2. Express + HTTP ───────────────────────────────────────────────────────
 
@@ -63,7 +68,8 @@ const gateway = createGateway(httpServer);
 // ─── 4. Orchestrator ─────────────────────────────────────────────────────────
 
 const orchestrator = new TaskOrchestrator({
-  persistence,
+  infra,
+  session,
   emitterFactory: gateway.emitterFactory,
 });
 
@@ -89,7 +95,7 @@ app.use(
   "/api/trpc",
   createExpressMiddleware({
     router: appRouter,
-    createContext: () => ({ persistence, orchestrator }),
+    createContext: () => ({ infra, session, orchestrator }),
     onError({ error, path }) {
       console.error(`[trpc] ${path ?? "?"} -> ${error.code}: ${error.message}`);
     },
@@ -136,7 +142,12 @@ async function shutdown(signal: string): Promise<void> {
   }
   httpServer.close(() => {
     try {
-      void persistence.close();
+      void session.close();
+    } catch {
+      /* already closed */
+    }
+    try {
+      void infra.close();
     } catch {
       /* already closed */
     }

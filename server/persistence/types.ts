@@ -1,26 +1,41 @@
 /**
  * server/persistence/types.ts
  *
- * The Persistence interface — the single seam between huko's kernel and
- * any storage backend (in-memory, SQLite, Postgres, log services, ...).
+ * Two persistence interfaces, two scopes:
  *
- * Backed by:
- *   - MemoryPersistence  — full impl, in-memory, lost on exit
- *   - SqlitePersistence  — full impl backed by better-sqlite3 + Drizzle
- *   - external packages  — `huko-persistence-postgres` etc.
+ *   InfraPersistence    user-global  (~/.huko/infra.db)
+ *     providers / models / app_config (system-level defaults like
+ *     default_model_id). Lives once per machine; carries the user's
+ *     "personal toolbox" of LLM providers and models.
  *
- * Two tiers:
- *   Tier 1 — kernel-required: a TaskLoop can run with just these. Engine
- *            calls `entries.persist` / `entries.update` from SessionContext
- *            and `entries.loadLLMContext` on session resume.
- *   Tier 2 — daemon-required: list sessions, manage providers/models, etc.
- *            Needed by tRPC routers and the orchestrator's session lookup.
+ *   SessionPersistence  per-project  (<cwd>/.huko/huko.db)
+ *     entries / chat_sessions / tasks. Each project directory gets its
+ *     own conversation log. Drop a project, drop its `.huko/` and the
+ *     conversations go with it.
+ *
+ * The two were one combined `Persistence` interface in the v0.1 layout,
+ * which conflated user identity (API endpoints / keys) with project
+ * conversation state. That conflation forced the DB to live next to
+ * source code, made provider configs per-project (re-config every clone),
+ * and risked plaintext API keys ending up in commits.
+ *
+ * Splitting also lets the orchestrator be honest about which persistence
+ * a given operation hits: token bookkeeping → session, model resolution
+ * → infra, etc.
+ *
+ * **Plaintext keys never live in any DB.** `providers.apiKeyRef` is a
+ * logical name (e.g. "openrouter"); the actual secret is resolved at
+ * runtime by `server/security/keys.ts` from env / .huko/keys.json / .env.
+ *
+ * Backends:
+ *   - SqliteInfraPersistence   / SqliteSessionPersistence   (default)
+ *   - MemoryInfraPersistence   / MemorySessionPersistence   (--memory, tests)
  *
  * SessionContext keeps its existing `PersistFn` / `UpdateFn` function-shape
- * dependency. The orchestrator destructures them out of `persistence.entries`
- * at SessionContext construction time. This lets SessionContext stay
- * decoupled from the Persistence interface as a whole — unit tests can
- * stub two bare functions.
+ * dependency. Orchestrator destructures them out of `session.entries` at
+ * SessionContext construction time. SessionContext stays decoupled from
+ * the SessionPersistence interface as a whole — unit tests can stub two
+ * bare functions.
  */
 
 import type { LLMMessage } from "../core/llm/types.js";
@@ -75,7 +90,11 @@ export type ProviderRow = {
   name: string;
   protocol: Protocol;
   baseUrl: string;
-  apiKey: string;
+  /**
+   * Logical key reference (e.g. "openrouter"). NOT the actual key.
+   * Pass through `resolveApiKey(ref, { cwd })` to get the secret.
+   */
+  apiKeyRef: string;
   defaultHeaders: Record<string, string> | null;
   createdAt: number;
 };
@@ -95,11 +114,22 @@ export type ModelRowJoined = ModelRow & {
   providerProtocol: Protocol;
 };
 
+/**
+ * Result of `infra.models.resolveConfig(modelId)` — the connection
+ * shape the orchestrator needs to make an LLM call.
+ *
+ * `apiKeyRef` is what the persistence layer carries (never the secret
+ * itself). The orchestrator calls `resolveApiKey(apiKeyRef, { cwd })`
+ * before constructing TaskContext to turn the ref into a usable key.
+ * Doing it that late means provider definitions stay scoped to infra
+ * while the credential lookup honours per-cwd `.huko/keys.json` /
+ * `.env` overrides.
+ */
 export type ResolvedModelConfig = {
   modelId: string;
   protocol: Protocol;
   baseUrl: string;
-  apiKey: string;
+  apiKeyRef: string;
   toolCallMode: ToolCallMode;
   thinkLevel: ThinkLevel;
   defaultHeaders: Record<string, string> | null;
@@ -149,7 +179,7 @@ export type CreateProviderInput = {
   name: string;
   protocol: Protocol;
   baseUrl: string;
-  apiKey: string;
+  apiKeyRef: string;
   defaultHeaders?: Record<string, string> | null;
 };
 
@@ -157,7 +187,7 @@ export type UpdateProviderPatch = {
   name?: string;
   protocol?: Protocol;
   baseUrl?: string;
-  apiKey?: string;
+  apiKeyRef?: string;
   defaultHeaders?: Record<string, string> | null;
 };
 
@@ -169,9 +199,9 @@ export type CreateModelInput = {
   defaultToolCallMode?: ToolCallMode;
 };
 
-// ─── The interface ───────────────────────────────────────────────────────────
+// ─── SessionPersistence — per-project DB ─────────────────────────────────────
 
-export interface Persistence {
+export interface SessionPersistence {
   readonly entries: {
     persist: PersistFn;
     update: UpdateFn;
@@ -179,14 +209,8 @@ export interface Persistence {
      * Replay the LLM-visible history of a session into LLMMessages.
      * Used by resume / "continue conversation" flows.
      *
-     * TODO(continue-conversation): when resume / `huko run --session=N`
-     * lands, this method must filter out entries whose ids appear in
-     * any `<system_reminder reason="compaction_done">`'s
-     * `metadata.elidedEntryIds`. Otherwise the loaded context contains
-     * BOTH the elision marker AND the elided entries — self-contradictory
-     * and re-blows the context window. The compactor records those IDs
-     * on the write side already (see `pipeline/context-manage.ts`); only
-     * the read-side filter is missing.
+     * Already filters out entries elided by previous compactions (see
+     * `metadata.elidedEntryIds` on `compaction_done` reminders).
      */
     loadLLMContext(sessionId: number, type: SessionType): Promise<LLMMessage[]>;
     listForSession(sessionId: number, type: SessionType): Promise<EntryRow[]>;
@@ -206,11 +230,20 @@ export interface Persistence {
     /**
      * List every task whose status is NOT terminal (i.e. not `done` /
      * `failed` / `stopped`). Used by resume / orphan recovery at startup.
-     * Implementations return [] when there are none.
      */
     listNonTerminal(): Promise<TaskRow[]>;
   };
 
+  /**
+   * Graceful shutdown — close connections, flush WAL, etc.
+   * Required: every backend implements this even if it's a no-op.
+   */
+  close(): Promise<void> | void;
+}
+
+// ─── InfraPersistence — user-global DB ───────────────────────────────────────
+
+export interface InfraPersistence {
   readonly providers: {
     list(): Promise<ProviderRow[]>;
     create(input: CreateProviderInput): Promise<number>;
@@ -229,17 +262,16 @@ export interface Persistence {
     get(key: string): Promise<unknown>;
     set(key: string, value: unknown): Promise<void>;
     list(): Promise<ConfigRow[]>;
+    /**
+     * Convenience accessor for the system-level default model id (a
+     * numeric models.id stored under app_config["default_model_id"]).
+     * Project-level "default model" is a separate concept that lives
+     * in `<cwd>/.huko/config.json`'s `model.default` (logical name).
+     */
     getDefaultModelId(): Promise<number | null>;
     setDefaultModelId(modelId: number): Promise<void>;
   };
 
-  /**
-   * Graceful shutdown — close connections, flush WAL, etc.
-   * Required: every backend implements this even if it's a no-op
-   * (MemoryPersistence). Making it part of the interface lets callers
-   * do `persistence.close()` without duck-typing.
-   */
+  /** Graceful shutdown — see `SessionPersistence.close`. */
   close(): Promise<void> | void;
 }
-
-// ─── Errors (none currently — backends throw standard Error if needed) ──────

@@ -1,15 +1,16 @@
 /**
  * server/db/adapter.ts
  *
- * Wires the DB to the engine's dependency-injection seams.
+ * Wires the session DB to the engine's dependency-injection seams.
  *
  * The engine (SessionContext) depends on three pure-function interfaces:
  *   - PersistFn  — append a new task_context row, return its id
  *   - UpdateFn   — patch an existing row's content / metadata
  *   - Emitter    — push WebSocket events (NOT in this file — see gateway.ts)
  *
- * This module provides factories that bind those interfaces to the
- * Drizzle handle. The orchestrator wires them up at task spinup.
+ * This module provides factories that bind those interfaces to a Drizzle
+ * handle bound to the SESSION schema. The orchestrator wires them up at
+ * task spinup.
  *
  * Also exposes:
  *   - loadSessionLLMContext(sessionId, type) — replay history → LLMMessage[]
@@ -20,16 +21,21 @@
  */
 
 import { eq, and, asc } from "drizzle-orm";
+import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import type { LLMMessage, ToolCall } from "../core/llm/types.js";
 import type { PersistFn, UpdateFn } from "../engine/SessionContext.js";
 import type { EntryKind, SessionType } from "../../shared/types.js";
 import { isLLMVisible } from "../../shared/types.js";
-import type { Db } from "./client.js";
-import { taskContext } from "./schema.js";
+import * as sessionSchema from "./schema/session.js";
+
+const { taskContext } = sessionSchema;
+
+/** Drizzle handle bound to the session schema. */
+export type SessionDb = BetterSQLite3Database<typeof sessionSchema>;
 
 // ─── PersistFn / UpdateFn factories ──────────────────────────────────────────
 
-export function makePersistEntry(db: Db): PersistFn {
+export function makePersistEntry(db: SessionDb): PersistFn {
   return async (entry) => {
     const row = await db
       .insert(taskContext)
@@ -50,7 +56,7 @@ export function makePersistEntry(db: Db): PersistFn {
   };
 }
 
-export function makeUpdateEntry(db: Db): UpdateFn {
+export function makeUpdateEntry(db: SessionDb): UpdateFn {
   return async (entryId, patch) => {
     if (patch.content === undefined && patch.metadata === undefined) return;
 
@@ -90,7 +96,7 @@ export function makeUpdateEntry(db: Db): UpdateFn {
  * matches insertion order.
  */
 export async function loadSessionLLMContext(
-  db: Db,
+  db: SessionDb,
   sessionId: number,
   sessionType: SessionType,
 ): Promise<LLMMessage[]> {

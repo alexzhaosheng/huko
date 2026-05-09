@@ -224,9 +224,3 @@ console.log(summary);
 console.log(dim("─".repeat(60)));
 console.log("final result:");
 console.log(taskContext.finalResult);
-
-");
-console.log(summary);
-console.log(dim("─".repeat(60)));
-console.log("final result:");
-console.log(taskContext.finalResult);

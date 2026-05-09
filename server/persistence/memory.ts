@@ -1,20 +1,17 @@
 /**
  * server/persistence/memory.ts
  *
- * In-memory `Persistence` implementation.
+ * In-memory implementations of `InfraPersistence` and `SessionPersistence`.
  *
  * For:
- *   - One-shot CLI runs (`huko run "..."`) — no disk side-effects
+ *   - `huko run --memory` (one-shot, no disk side effects)
  *   - Unit tests — hand-rolled fixtures, fast teardown
  *   - Sandboxes / read-only filesystems
  *
- * Implements the FULL interface (Tier 1 + Tier 2). Sessions, tasks,
- * providers, models, app_config — everything works in memory and
- * disappears on process exit.
- *
- * The in-memory shape mirrors the SQLite tables so the row mappings
- * downstream don't need to special-case which backend they're talking
- * to. Auto-incrementing ids per "table".
+ * Each class implements ONE interface. Tests / ephemeral runs that need
+ * both create both. The two share an internal id counter through
+ * dependency injection only when they need linked ids — otherwise each
+ * keeps its own.
  */
 
 import { isLLMVisible } from "../../shared/types.js";
@@ -28,31 +25,146 @@ import type {
   CreateProviderInput,
   CreateTaskInput,
   EntryRow,
+  InfraPersistence,
   ModelRow,
   ModelRowJoined,
-  Persistence,
   ProviderRow,
   ResolvedModelConfig,
+  SessionPersistence,
   TaskRow,
   UpdateProviderPatch,
   UpdateTaskPatch,
 } from "./types.js";
 
-export class MemoryPersistence implements Persistence {
+// ─── MemoryInfraPersistence ──────────────────────────────────────────────────
+
+export class MemoryInfraPersistence implements InfraPersistence {
   private nextId = 1;
-  private readonly _sessions = new Map<number, ChatSessionRow>();
-  private readonly _tasks = new Map<number, TaskRow>();
-  private readonly _entries = new Map<number, EntryRow>();
   private readonly _providers = new Map<number, ProviderRow>();
   private readonly _models = new Map<number, ModelRow>();
   private readonly _config = new Map<string, ConfigRow>();
 
-  readonly entries: Persistence["entries"];
-  readonly sessions: Persistence["sessions"];
-  readonly tasks: Persistence["tasks"];
-  readonly providers: Persistence["providers"];
-  readonly models: Persistence["models"];
-  readonly config: Persistence["config"];
+  readonly providers: InfraPersistence["providers"];
+  readonly models: InfraPersistence["models"];
+  readonly config: InfraPersistence["config"];
+
+  constructor() {
+    const allocId = (): number => this.nextId++;
+    const now = (): number => Date.now();
+
+    this.providers = {
+      list: async () => [...this._providers.values()],
+      create: async (input: CreateProviderInput) => {
+        const id = allocId();
+        this._providers.set(id, {
+          id,
+          name: input.name,
+          protocol: input.protocol,
+          baseUrl: input.baseUrl,
+          apiKeyRef: input.apiKeyRef,
+          defaultHeaders: input.defaultHeaders ?? null,
+          createdAt: now(),
+        });
+        return id;
+      },
+      update: async (id, patch: UpdateProviderPatch) => {
+        const existing = this._providers.get(id);
+        if (!existing) return;
+        const next: ProviderRow = { ...existing };
+        if (patch.name !== undefined) next.name = patch.name;
+        if (patch.protocol !== undefined) next.protocol = patch.protocol;
+        if (patch.baseUrl !== undefined) next.baseUrl = patch.baseUrl;
+        if (patch.apiKeyRef !== undefined) next.apiKeyRef = patch.apiKeyRef;
+        if (patch.defaultHeaders !== undefined) next.defaultHeaders = patch.defaultHeaders;
+        this._providers.set(id, next);
+      },
+      delete: async (id) => {
+        this._providers.delete(id);
+        for (const [mid, m] of this._models) {
+          if (m.providerId === id) this._models.delete(mid);
+        }
+      },
+    };
+
+    this.models = {
+      list: async (): Promise<ModelRowJoined[]> => {
+        const out: ModelRowJoined[] = [];
+        for (const m of this._models.values()) {
+          const p = this._providers.get(m.providerId);
+          if (!p) continue;
+          out.push({ ...m, providerName: p.name, providerProtocol: p.protocol });
+        }
+        return out;
+      },
+      create: async (input: CreateModelInput) => {
+        const id = allocId();
+        this._models.set(id, {
+          id,
+          providerId: input.providerId,
+          modelId: input.modelId,
+          displayName: input.displayName,
+          defaultThinkLevel: input.defaultThinkLevel ?? "off",
+          defaultToolCallMode: input.defaultToolCallMode ?? "native",
+          createdAt: now(),
+        });
+        return id;
+      },
+      delete: async (id) => {
+        this._models.delete(id);
+      },
+      resolveConfig: async (modelId): Promise<ResolvedModelConfig | null> => {
+        const m = this._models.get(modelId);
+        if (!m) return null;
+        const p = this._providers.get(m.providerId);
+        if (!p) return null;
+        return {
+          modelId: m.modelId,
+          protocol: p.protocol,
+          baseUrl: p.baseUrl,
+          apiKeyRef: p.apiKeyRef,
+          toolCallMode: m.defaultToolCallMode,
+          thinkLevel: m.defaultThinkLevel,
+          defaultHeaders: p.defaultHeaders,
+        };
+      },
+    };
+
+    this.config = {
+      get: async (key) => this._config.get(key)?.value ?? null,
+      set: async (key, value) => {
+        this._config.set(key, { key, value, updatedAt: now() });
+      },
+      list: async () => [...this._config.values()],
+      getDefaultModelId: async () => {
+        const v = this._config.get("default_model_id")?.value;
+        return typeof v === "number" ? v : null;
+      },
+      setDefaultModelId: async (modelId) => {
+        this._config.set("default_model_id", {
+          key: "default_model_id",
+          value: modelId,
+          updatedAt: now(),
+        });
+      },
+    };
+  }
+
+  close(): void {
+    /* nothing to do */
+  }
+}
+
+// ─── MemorySessionPersistence ────────────────────────────────────────────────
+
+export class MemorySessionPersistence implements SessionPersistence {
+  private nextId = 1;
+  private readonly _sessions = new Map<number, ChatSessionRow>();
+  private readonly _tasks = new Map<number, TaskRow>();
+  private readonly _entries = new Map<number, EntryRow>();
+
+  readonly entries: SessionPersistence["entries"];
+  readonly sessions: SessionPersistence["sessions"];
+  readonly tasks: SessionPersistence["tasks"];
 
   constructor() {
     const allocId = (): number => this.nextId++;
@@ -93,10 +205,6 @@ export class MemoryPersistence implements Persistence {
       },
       loadLLMContext: async (sessionId, type) => {
         const rows = this.entriesForSession(sessionId, type);
-        // Drop entries that previous compactions elided. Their IDs live
-        // in any `compaction_done` reminder's metadata.elidedEntryIds.
-        // (See pipeline/context-manage.ts and the TODO on this method
-        // in persistence/types.ts.)
         const dropped = collectElidedEntryIds(rows);
         const out: LLMMessage[] = [];
         for (const r of rows) {
@@ -191,106 +299,6 @@ export class MemoryPersistence implements Persistence {
         return out;
       },
     };
-
-    this.providers = {
-      list: async () => [...this._providers.values()],
-      create: async (input: CreateProviderInput) => {
-        const id = allocId();
-        this._providers.set(id, {
-          id,
-          name: input.name,
-          protocol: input.protocol,
-          baseUrl: input.baseUrl,
-          apiKey: input.apiKey,
-          defaultHeaders: input.defaultHeaders ?? null,
-          createdAt: now(),
-        });
-        return id;
-      },
-      update: async (id, patch: UpdateProviderPatch) => {
-        const existing = this._providers.get(id);
-        if (!existing) return;
-        const next: ProviderRow = { ...existing };
-        if (patch.name !== undefined) next.name = patch.name;
-        if (patch.protocol !== undefined) next.protocol = patch.protocol;
-        if (patch.baseUrl !== undefined) next.baseUrl = patch.baseUrl;
-        if (patch.apiKey !== undefined) next.apiKey = patch.apiKey;
-        if (patch.defaultHeaders !== undefined) next.defaultHeaders = patch.defaultHeaders;
-        this._providers.set(id, next);
-      },
-      delete: async (id) => {
-        this._providers.delete(id);
-        for (const [mid, m] of this._models) {
-          if (m.providerId === id) this._models.delete(mid);
-        }
-      },
-    };
-
-    this.models = {
-      list: async (): Promise<ModelRowJoined[]> => {
-        const out: ModelRowJoined[] = [];
-        for (const m of this._models.values()) {
-          const p = this._providers.get(m.providerId);
-          if (!p) continue;
-          out.push({
-            ...m,
-            providerName: p.name,
-            providerProtocol: p.protocol,
-          });
-        }
-        return out;
-      },
-      create: async (input: CreateModelInput) => {
-        const id = allocId();
-        this._models.set(id, {
-          id,
-          providerId: input.providerId,
-          modelId: input.modelId,
-          displayName: input.displayName,
-          defaultThinkLevel: input.defaultThinkLevel ?? "off",
-          defaultToolCallMode: input.defaultToolCallMode ?? "native",
-          createdAt: now(),
-        });
-        return id;
-      },
-      delete: async (id) => {
-        this._models.delete(id);
-      },
-      resolveConfig: async (modelId): Promise<ResolvedModelConfig | null> => {
-        const m = this._models.get(modelId);
-        if (!m) return null;
-        const p = this._providers.get(m.providerId);
-        if (!p) return null;
-        return {
-          modelId: m.modelId,
-          protocol: p.protocol,
-          baseUrl: p.baseUrl,
-          apiKey: p.apiKey,
-          toolCallMode: m.defaultToolCallMode,
-          thinkLevel: m.defaultThinkLevel,
-          defaultHeaders: p.defaultHeaders,
-        };
-      },
-    };
-
-    this.config = {
-      get: async (key) => this._config.get(key)?.value ?? null,
-      set: async (key, value) => {
-        this._config.set(key, { key, value, updatedAt: now() });
-      },
-      list: async () => [...this._config.values()],
-      getDefaultModelId: async () => {
-        const v = this._config.get("default_model_id")?.value;
-        return typeof v === "number" ? v : null;
-      },
-      setDefaultModelId: async (modelId) => {
-        this._config.set("default_model_id", {
-          key: "default_model_id",
-          value: modelId,
-          updatedAt: now(),
-        });
-      },
-    };
   }
 
   private entriesForSession(sessionId: number, type: SessionType): EntryRow[] {
@@ -301,8 +309,6 @@ export class MemoryPersistence implements Persistence {
     return out.sort((a, b) => a.id - b.id);
   }
 
-  // No-op — there's nothing to flush or close. Implemented to satisfy the
-  // Persistence interface so callers can `persistence.close()` uniformly.
   close(): void {
     /* nothing to do */
   }
@@ -329,9 +335,8 @@ function projectToLLMMessage(r: EntryRow): LLMMessage | null {
  * their `metadata.elidedEntryIds` arrays. Returns the union — IDs to
  * drop on context replay.
  *
- * Used by both MemoryPersistence and SqlitePersistence in their
- * loadLLMContext path. Lifted into shared util so both backends reach
- * the same conclusion.
+ * Used by Memory and Sqlite session backends in their loadLLMContext
+ * path. Lifted into shared util so both backends reach the same conclusion.
  */
 export function collectElidedEntryIds(rows: EntryRow[]): Set<number> {
   const out = new Set<number>();

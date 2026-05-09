@@ -6,14 +6,18 @@
  * Verbs:
  *   - `list`              show all chat sessions in the local DB
  *   - `delete <id>`       cascade-delete a session (and its tasks + entries)
+ *   - `current`           print the active session id (or `(none)`)
+ *   - `switch <id>`       set <id> as active session for this cwd
+ *   - `new [--title=...]` create a new (empty) session and set it active
  *
  * Coming later:
  *   - `get <id>`          show a single session's metadata + entry count
  *   - `show <id>`         render a session's full conversation history
  *
  * No SessionContext / Orchestrator needed — this only reads/writes the
- * Persistence tier 2 surface. SqlitePersistence's constructor handles
- * its own schema migrations.
+ * SessionPersistence interface plus `<cwd>/.huko/state.json` for the
+ * active pointer. SqliteSessionPersistence's constructor handles its
+ * own schema migrations + .gitignore creation.
  *
  * Exit codes:
  *   0  — success
@@ -22,8 +26,12 @@
  *   4  — target not found (e.g. delete <id> for a nonexistent session)
  */
 
-import { SqlitePersistence, type Persistence } from "../../persistence/index.js";
+import { SqliteSessionPersistence, type SessionPersistence } from "../../persistence/index.js";
 import type { ChatSessionRow } from "../../persistence/types.js";
+import {
+  getActiveSessionId,
+  setActiveSessionId,
+} from "../state.js";
 
 export type OutputFormat = "text" | "jsonl" | "json";
 
@@ -38,10 +46,10 @@ export type SessionsDeleteArgs = {
 // ─── list ────────────────────────────────────────────────────────────────────
 
 export async function sessionsListCommand(args: SessionsListArgs): Promise<void> {
-  let persistence: Persistence | null = null;
+  let persistence: SessionPersistence | null = null;
   let exitCode = 0;
   try {
-    persistence = new SqlitePersistence();
+    persistence = new SqliteSessionPersistence();
     const rows = await persistence.sessions.list();
 
     const sorted = [...rows].sort((a, b) => b.createdAt - a.createdAt);
@@ -78,10 +86,10 @@ export async function sessionsListCommand(args: SessionsListArgs): Promise<void>
 // ─── delete ──────────────────────────────────────────────────────────────────
 
 export async function sessionsDeleteCommand(args: SessionsDeleteArgs): Promise<void> {
-  let persistence: Persistence | null = null;
+  let persistence: SessionPersistence | null = null;
   let exitCode = 0;
   try {
-    persistence = new SqlitePersistence();
+    persistence = new SqliteSessionPersistence();
 
     const existing = await persistence.sessions.get(args.id);
     if (!existing) {
@@ -94,6 +102,14 @@ export async function sessionsDeleteCommand(args: SessionsDeleteArgs): Promise<v
     process.stderr.write(
       `huko: deleted session ${args.id} ("${truncate(existing.title, 60)}")\n`,
     );
+
+    // If we just deleted the active session, clear the pointer so the
+    // next `huko run` creates a fresh one (without a confusing
+    // "the session you're on doesn't exist" stale-pointer message).
+    const cwd = process.cwd();
+    if (getActiveSessionId(cwd) === args.id) {
+      setActiveSessionId(cwd, null);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`huko: sessions delete failed: ${msg}\n`);
@@ -105,9 +121,101 @@ export async function sessionsDeleteCommand(args: SessionsDeleteArgs): Promise<v
   process.exit(exitCode);
 }
 
+// ─── current ─────────────────────────────────────────────────────────────────
+
+export async function sessionsCurrentCommand(): Promise<void> {
+  const cwd = process.cwd();
+  const id = getActiveSessionId(cwd);
+
+  let exitCode = 0;
+  let persistence: SessionPersistence | null = null;
+  try {
+    if (id === null) {
+      process.stdout.write("(none)\n");
+    } else {
+      persistence = new SqliteSessionPersistence({ cwd });
+      const row = await persistence.sessions.get(id);
+      if (!row) {
+        // Stale pointer — surfaces a recoverable state to the user.
+        process.stdout.write(
+          `${id} (no longer in DB; next run will create a fresh session)\n`,
+        );
+      } else {
+        process.stdout.write(
+          `${row.id}  ${row.title || "(untitled)"}\n`,
+        );
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`huko: sessions current failed: ${msg}\n`);
+    exitCode = 1;
+  } finally {
+    closeQuietly(persistence);
+  }
+
+  process.exit(exitCode);
+}
+
+// ─── switch ──────────────────────────────────────────────────────────────────
+
+export async function sessionsSwitchCommand(args: { id: number }): Promise<void> {
+  const cwd = process.cwd();
+  let exitCode = 0;
+  let persistence: SessionPersistence | null = null;
+  try {
+    persistence = new SqliteSessionPersistence({ cwd });
+    const row = await persistence.sessions.get(args.id);
+    if (!row) {
+      process.stderr.write(`huko: session ${args.id} not found\n`);
+      exitCode = 4;
+      return;
+    }
+    setActiveSessionId(cwd, args.id);
+    process.stderr.write(
+      `huko: active session -> ${args.id} ("${truncate(row.title, 60)}")\n`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`huko: sessions switch failed: ${msg}\n`);
+    exitCode = 1;
+  } finally {
+    closeQuietly(persistence);
+  }
+
+  process.exit(exitCode);
+}
+
+// ─── new ─────────────────────────────────────────────────────────────────────
+
+export async function sessionsNewCommand(args: { title?: string }): Promise<void> {
+  const cwd = process.cwd();
+  let exitCode = 0;
+  let persistence: SessionPersistence | null = null;
+  try {
+    persistence = new SqliteSessionPersistence({ cwd });
+    const id = await persistence.sessions.create({
+      ...(args.title !== undefined ? { title: args.title } : {}),
+    });
+    setActiveSessionId(cwd, id);
+    process.stderr.write(
+      `huko: created session ${id}${args.title ? ` ("${truncate(args.title, 60)}")` : ""} and set it active\n`,
+    );
+    process.stdout.write(String(id) + "\n");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`huko: sessions new failed: ${msg}\n`);
+    exitCode = 1;
+  } finally {
+    closeQuietly(persistence);
+  }
+
+  process.exit(exitCode);
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function closeQuietly(p: Persistence | null): void {
+function closeQuietly(p: SessionPersistence | null): void {
   if (!p) return;
   try {
     void p.close();

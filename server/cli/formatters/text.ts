@@ -76,6 +76,22 @@ export function makeTextFormatter(): Formatter {
           process.stderr.write(red(`[notice/${event.severity}] ${event.content}`) + "\n");
           break;
 
+        case "orphan_recovered": {
+          // Yellow warning — previous crash detected and stitched up.
+          // Not an error (data is healed), but worth flagging so the
+          // user notices it happened.
+          const tail =
+            event.danglingToolCount > 0
+              ? ` (${event.danglingToolCount} synthetic tool_result(s) injected for pairing)`
+              : "";
+          process.stderr.write(
+            yellow(
+              `[orphan recovered] task #${event.taskId} (${event.sessionType} session #${event.sessionId}): ${event.reason}${tail}`,
+            ) + "\n",
+          );
+          break;
+        }
+
         case "task_terminated":
         case "task_error":
           // Handled in onSummary / onError.

@@ -3,41 +3,55 @@
  *
  * Shared CLI orchestrator setup.
  *
- * Bootstrap deals in Persistence abstractions. It does NOT know about
- * migrations, file paths, schema, or any other backend implementation
- * detail — those are each backend's own concern (e.g. SqlitePersistence
- * runs its own migrations from its constructor).
+ * Bootstrap deals in `InfraPersistence` + `SessionPersistence` abstractions.
+ * It does NOT know about migrations, file paths, schema, or any other
+ * backend implementation detail — those are each backend's own concern
+ * (e.g. SqliteSessionPersistence runs its own migrations, auto-creates
+ * `<cwd>/.huko/.gitignore`, etc., from its constructor).
  *
  * Two modes:
  *
  *   1. Default (persistent):
- *        - SqlitePersistence
- *        - sessions / tasks / entries land in huko.db
+ *        - SqliteInfraPersistence at ~/.huko/infra.db
+ *        - SqliteSessionPersistence at <cwd>/.huko/huko.db
  *
  *   2. Ephemeral (`{ ephemeral: true }`, surfaced as `--memory` on the CLI):
- *        - MemoryPersistence
- *        - sessions / tasks / entries are in-memory only — vanish on exit
- *        - providers / models / default_model_id are SEEDED from a
- *          short-lived SqlitePersistence at startup so the user's saved
- *          config still applies; that connection is then closed
+ *        - MemoryInfraPersistence (seeded from disk infra DB at startup,
+ *          then disconnected — your saved providers/models are visible
+ *          but no writes hit disk this run)
+ *        - MemorySessionPersistence (sessions/tasks/entries vanish on exit)
+ *
+ * Orphan recovery: persistent mode runs `recoverOrphans()` once and
+ * emits one `orphan_recovered` HukoEvent per healed task to
+ * `formatter.emitter`. The text formatter renders these in yellow so
+ * users notice that a previous crash got cleaned up.
+ *
+ * Concurrency: bootstrap itself does NOT acquire the per-cwd lock —
+ * that's the caller's concern (the CLI command). `huko run` acquires
+ * the lock BEFORE calling bootstrap so orphan recovery is also under
+ * the lock.
  */
 
 import {
-  MemoryPersistence,
-  SqlitePersistence,
-  type Persistence,
+  MemoryInfraPersistence,
+  MemorySessionPersistence,
+  SqliteInfraPersistence,
+  SqliteSessionPersistence,
+  type InfraPersistence,
+  type SessionPersistence,
 } from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
 import { loadConfig } from "../config/index.js";
 import type { Formatter } from "./formatters/index.js";
 
 export type BootstrapOptions = {
-  /** When true, use MemoryPersistence seeded from SQLite for config. */
+  /** When true, both DBs run in memory; infra is seeded from disk. */
   ephemeral?: boolean;
 };
 
 export type CliBootstrap = {
-  persistence: Persistence;
+  infra: InfraPersistence;
+  session: SessionPersistence;
   orchestrator: TaskOrchestrator;
   shutdown(): void;
 };
@@ -51,14 +65,15 @@ export async function bootstrap(
   // < HUKO_CONFIG env. See docs/modules/config.md.
   loadConfig({ cwd: process.cwd() });
 
-  const persistence = options.ephemeral
-    ? await buildEphemeralPersistence()
-    : new SqlitePersistence();
+  const { infra, session } = options.ephemeral
+    ? await buildEphemeralPersistences()
+    : buildPersistentPersistences();
 
   // Single formatter for the whole process — the CLI is one task at a time,
   // so we don't need per-room emitters. The factory ignores the room arg.
   const orchestrator = new TaskOrchestrator({
-    persistence,
+    infra,
+    session,
     emitterFactory: (_room: string) => formatter.emitter,
   });
 
@@ -69,21 +84,35 @@ export async function bootstrap(
   if (!options.ephemeral) {
     const report = await orchestrator.recoverOrphans();
     if (report.healed > 0) {
-      process.stderr.write(
-        `huko: recovered ${report.healed} orphan task(s) ` +
-          `(${report.byKind.danglingTools} mid-tool, ` +
-          `${report.byKind.waitingForReply} ask, ` +
-          `${report.byKind.waitingForApproval} approval)\n`,
-      );
+      // Emit per-task semantic events. The text formatter renders these
+      // yellow; jsonl/json formatters serialise as-is.
+      const now = Date.now();
+      for (const rec of report.records) {
+        formatter.emitter.emit({
+          type: "orphan_recovered",
+          taskId: rec.taskId,
+          sessionId: rec.sessionId,
+          sessionType: rec.sessionType,
+          ts: now,
+          reason: rec.reason,
+          danglingToolCount: rec.danglingToolCount,
+        });
+      }
     }
   }
 
   return {
-    persistence,
+    infra,
+    session,
     orchestrator,
     shutdown() {
       try {
-        void persistence.close();
+        void session.close();
+      } catch {
+        /* already closed */
+      }
+      try {
+        void infra.close();
       } catch {
         /* already closed */
       }
@@ -91,37 +120,55 @@ export async function bootstrap(
   };
 }
 
+// ─── Persistent mode ─────────────────────────────────────────────────────────
+
+function buildPersistentPersistences(): {
+  infra: InfraPersistence;
+  session: SessionPersistence;
+} {
+  const infra = new SqliteInfraPersistence();
+  const session = new SqliteSessionPersistence({ cwd: process.cwd() });
+  return { infra, session };
+}
+
 // ─── Ephemeral mode ──────────────────────────────────────────────────────────
 
 /**
- * Build a MemoryPersistence pre-seeded with providers / models / default
- * model from the on-disk SQLite. The SQLite connection is opened just
- * long enough to copy these rows, then closed — no writes hit the disk.
+ * Build memory-backed persistences. Infra is seeded from the on-disk
+ * infra DB so the user's saved providers/models still apply, then the
+ * SQLite connection is closed. Session is a fresh in-memory store.
  */
-async function buildEphemeralPersistence(): Promise<Persistence> {
-  const sqlite = new SqlitePersistence();
-  const memory = new MemoryPersistence();
+async function buildEphemeralPersistences(): Promise<{
+  infra: InfraPersistence;
+  session: SessionPersistence;
+}> {
+  const memInfra = new MemoryInfraPersistence();
+  const memSession = new MemorySessionPersistence();
+
+  const diskInfra = new SqliteInfraPersistence();
   try {
-    await seedFromSource(memory, sqlite);
+    await seedInfraFromSource(memInfra, diskInfra);
   } finally {
     try {
-      void sqlite.close();
+      void diskInfra.close();
     } catch {
       /* already closed */
     }
   }
-  return memory;
+
+  return { infra: memInfra, session: memSession };
 }
 
 /**
- * Copy providers, models and default_model_id from `source` into
- * `target`, preserving the foreign-key relationships.
- *
- * Ids may be reassigned by the target — `seedFromSource` keeps id maps
- * locally so model.providerId and the default_model_id config value
- * point to the right new rows after the copy.
+ * Copy providers, models and default_model_id from `source` into `target`,
+ * preserving foreign-key relationships. Ids may be reassigned by the
+ * target — local maps keep model.providerId and the default_model_id
+ * config value pointing to the right new rows.
  */
-async function seedFromSource(target: Persistence, source: Persistence): Promise<void> {
+async function seedInfraFromSource(
+  target: InfraPersistence,
+  source: InfraPersistence,
+): Promise<void> {
   const sourceProviders = await source.providers.list();
   const providerIdMap = new Map<number, number>();
   for (const p of sourceProviders) {
@@ -129,7 +176,7 @@ async function seedFromSource(target: Persistence, source: Persistence): Promise
       name: p.name,
       protocol: p.protocol,
       baseUrl: p.baseUrl,
-      apiKey: p.apiKey,
+      apiKeyRef: p.apiKeyRef,
       defaultHeaders: p.defaultHeaders ?? null,
     });
     providerIdMap.set(p.id, newId);

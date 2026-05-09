@@ -1,8 +1,40 @@
 # Persistence
 
-> `server/persistence/` —— 持久化抽象层。
+> `server/persistence/` —— 持久化抽象层。**两个接口、两个 DB、两个 scope**。
 >
 > 见 [架构总览](../architecture.md) 了解跨模块原则。
+
+---
+
+## 大方向
+
+历史上 huko 只有**一个** `Persistence` 接口、**一个** `<cwd>/huko.db`，把
+provider/API key（用户身份）跟 sessions/tasks/entries（项目对话）混存。
+这条路走不通——切项目就要重新配 key、DB 紧贴源码、API key 风险蹭进 git
+仓库。
+
+新设计**按 scope 切两份**：
+
+```
+~/.huko/                      用户全局
+  infra.db                    providers / models / app_config（默认 model）
+  keys.json                   API keys（chmod 600，永不入 DB）
+  config.json                 已有
+  roles/                      已有
+
+<cwd>/.huko/                  项目级
+  huko.db                     sessions / tasks / entries（这个项目的对话）
+  keys.json                   API keys 项目覆盖（gitignored）
+  state.json                  active session id
+  config.json                 已有
+  roles/                      已有
+  .gitignore                  自动生成
+```
+
+| 类别 | 接口 | 落地 |
+|---|---|---|
+| 用户身份（providers / models / 系统默认） | `InfraPersistence` | `~/.huko/infra.db` |
+| 项目对话（sessions / tasks / entries） | `SessionPersistence` | `<cwd>/.huko/huko.db` |
 
 ---
 
@@ -10,209 +42,178 @@
 
 ```
 server/persistence/
-  types.ts             Persistence 接口 + Row 类型 + Input 类型 + 错误类
-  sqlite.ts            SqlitePersistence —— 包装 server/db/，full impl
-  memory.ts            MemoryPersistence —— 全功能内存实现
-  file.ts              FilePersistence —— JSONL append-only event-sourced
-  index.ts             barrel
+  types.ts             InfraPersistence + SessionPersistence + Row 类型
+  sqlite-infra.ts      SqliteInfraPersistence  (~/.huko/infra.db)
+  sqlite-session.ts    SqliteSessionPersistence (<cwd>/.huko/huko.db)
+  sqlite.ts            兼容 barrel——re-export 上面两个
+  memory.ts            MemoryInfraPersistence + MemorySessionPersistence
+  file.ts              已退役（split 时移除——代码可从 git 历史恢复）
+  index.ts             顶层 barrel
 ```
 
 ---
 
-## 职责
+## 接口边界
 
-Persistence 是 huko kernel 与**任何**存储后端的唯一接触面。
+**InfraPersistence**：
+```typescript
+providers: { list, create, update, delete }
+models:    { list, create, delete, resolveConfig }
+config:    { get, set, list, getDefaultModelId, setDefaultModelId }
+close()
+```
 
-- Kernel（engine / orchestrator / routers）**只**依赖 `Persistence` 接口
-- 具体后端（SQLite、内存、未来的 Postgres / Redis）实现这个接口
-- 切换后端 = 换一个实现，零 kernel 改动
+**SessionPersistence**：
+```typescript
+entries:  { persist, update, loadLLMContext, listForSession }
+sessions: { create, list, get, delete }
+tasks:    { create, update, get, listNonTerminal }
+close()
+```
+
+orchestrator 持有两份；CLI 视情况开一份或两份；router 按 procedure 分摊。
+**不再有**单一 `Persistence` 接口。
 
 ---
 
-## 两个 Tier
+## API key 不进 DB
+
+`providers.api_key_ref` 列存的是**逻辑名**（如 `"openrouter"`），不是 key。
+运行时由 `server/security/keys.ts` 三层查找：
 
 ```
-┌────────────────────────────────────────────┐
-│  Tier 1（kernel 必需）                     │
-│  ───────────────────────                   │
-│  entries.persist                           │
-│  entries.update                            │
-│  entries.loadLLMContext                    │
-│  entries.listForSession                    │
-│                                            │
-│  → SessionContext 用前两个                 │
-│  → resume 用第三个                         │
-│  → daemon UI 用第四个                      │
-└────────────────────────────────────────────┘
-┌────────────────────────────────────────────┐
-│  Tier 2（daemon / 多会话特性必需）         │
-│  ──────────────────────────────            │
-│  sessions.{create, list, get, delete}      │
-│  tasks.{create, update, get}               │
-│  providers.{list, create, update, delete}  │
-│  models.{list, create, delete, resolve}    │
-│  config.{get, set, list, *DefaultModelId}  │
-└────────────────────────────────────────────┘
+1. <cwd>/.huko/keys.json         项目显式（最高）
+2. process.env.<REF>_API_KEY     shell / 系统
+3. <cwd>/.env                    项目 dotenv（最低）
 ```
 
-后端可以**只**实现 Tier 1（一次性 / 嵌入场景），Tier 2 抛 `PersistenceUnsupportedError`。但内置的 Memory + SQLite 都实现 Tier 1 + Tier 2 全套——保持替换性。
+env 变量命名约定：`<REF.toUpperCase()>_API_KEY`，例如 ref `openrouter` 找
+`OPENROUTER_API_KEY`。
+
+后果：**两个 DB 都不含敏感数据**。备份、复制、把 `.huko/huko.db` 入 git
+（你大概不想这样，默认 `.gitignore` 已把它排除，但理论上）—— 都不会泄漏 key。
+
+详见 [security.md](./security.md)。
 
 ---
 
 ## 内置实现
 
-| 实现 | 适用 | 落盘? | 进程退出后? | 形态 |
-|---|---|---|---|---|
-| `MemoryPersistence` | 一次性 CLI / 测试 / 沙盒 | ❌ | 全丢 | 内存 Map |
-| `FilePersistence` | 轻量长期 / 调试 / 可外送日志服务 | ✅ JSONL | 持久 | event-sourced 一行一 op，启动 replay |
-| `SqlitePersistence` | daemon 默认 / 大量并发 | ✅ huko.db | 持久 | 关系型，索引检索 O(log N) |
-| 外部包（未来） | Postgres / Redis / S3 / ... | 视实现 | 视实现 | 视实现 |
+| 实现 | 接口 | 落盘 | 用途 |
+|---|---|---|---|
+| `SqliteInfraPersistence` | InfraPersistence | ~/.huko/infra.db | 默认 |
+| `SqliteSessionPersistence` | SessionPersistence | `<cwd>`/.huko/huko.db | 默认 |
+| `MemoryInfraPersistence` | InfraPersistence | ❌ | --memory / 测试 |
+| `MemorySessionPersistence` | SessionPersistence | ❌ | --memory / 测试 |
 
-外部实现按 npm 包 `huko-persistence-<name>` 命名约定发布，导出实现 `Persistence` 的 class。barrel 不需改。
+每个 SQLite 实现的 constructor：
+1. `mkdir -p` 父目录
+2. 打开 better-sqlite3 + drizzle
+3. 跑自己 migration 子目录（`server/db/migrations/{infra,session}/*.sql`）
+4. （仅 session 默认路径）写入 `<cwd>/.huko/.gitignore` 防止误提交
 
----
-
-## FilePersistence (JSONL append-only)
-
-每个 mutation 是一行 JSON "op"。状态由启动时 replay 文件重建。读全部 in-memory。
-
-```typescript
-import { FilePersistence } from "./persistence/index.js";
-
-const persistence = new FilePersistence({
-  path: process.env.HUKO_LOG_PATH ?? "./huko.jsonl",
-  fsync: false,  // true 时每 op 后强制 flush，durability 优先；默认靠 OS 缓存
-});
-```
-
-**Op 类型**（11 种）：
-
-```
-session.create / session.delete
-task.create    / task.update
-entry.append   / entry.update
-provider.create / provider.update / provider.delete
-model.create   / model.delete
-config.set
-```
-
-**Cascade 优化**：`session.delete` 只写一行——replay/apply 时自动联动删 tasks + 它们的 entries。日志保持紧凑。
-
-**为什么要这个**：
-- 调试友好：`cat huko.jsonl` 看到完整历史
-- 可外送：每行直接送 fluentd / kafka / S3 sync 之类
-- Crash safe：append-only 写不破坏前面的历史
-- Event-sourced 与 HukoEvent 协议契合（虽然 op 不是 HukoEvent，但形态思路一致）
-- 无 schema migration：op 自带形态
-
-**取舍 vs SQLite**：
-- 启动 O(N) replay；SQLite 启动 O(1)
-- 无索引 → 列出所有 sessions 是 Map 全扫；SQLite 有 B-tree
-- 单写并发 OK；多 writer 进程并发 = 乱（O_APPEND 在 PIPE_BUF 以下原子，但混进度量难调）
-- 适合**几百 sessions 量级的轻量持久化**；不适合 multi-tenant 大规模
-
-**容错**：replay 时坏行（JSON parse 失败 / op 不识别）skip + stderr warn。最后一行可能因 crash 半截，无法 parse 直接跳。
-
-**默认路径**：`opts.path` 必填。约定 `$HUKO_LOG_PATH` 或 `./huko.jsonl`。
+各管各的连接，互不知情。换路径用 `opts.dbPath`（测试 / 自定义布局）。
 
 ---
 
-## SessionContext 的解耦设计
+## SessionContext 的解耦
 
-SessionContext 不直接依赖 `Persistence` 接口，而是吃**两个函数 shape**：
+SessionContext 不直接依赖 `SessionPersistence` 接口，而是吃**两个函数 shape**：
 
 ```typescript
 new SessionContext({
-  persist: persistence.entries.persist,     // PersistFn
-  updateDb: persistence.entries.update,     // UpdateFn
+  persist:  session.entries.persist,    // PersistFn
+  updateDb: session.entries.update,     // UpdateFn
   emitter,
   initialContext,
 });
 ```
 
-orchestrator 在装配 SessionContext 时从 `persistence.entries` 解构出来。这样 SessionContext 单元测试可以塞两个 mock 函数，不需要造完整 Persistence。
+orchestrator 在装配 SessionContext 时从 `session.entries` 解构出来。
+SessionContext 单元测试可以塞两个 mock 函数，不需要造完整 SessionPersistence。
 
 ---
 
 ## 用法
 
-### Daemon 模式
+### Daemon / 持久 CLI
 
 ```typescript
-import { SqlitePersistence } from "./persistence/index.js";
+import {
+  SqliteInfraPersistence,
+  SqliteSessionPersistence,
+} from "./persistence/index.js";
 
-const persistence = new SqlitePersistence();   // constructor 自己 migrate
-const orchestrator = new TaskOrchestrator({ persistence, emitterFactory });
+const infra = new SqliteInfraPersistence();
+const session = new SqliteSessionPersistence({ cwd: process.cwd() });
+const orchestrator = new TaskOrchestrator({ infra, session, emitterFactory });
 ```
 
-`SqlitePersistence` 的 constructor 会幂等地跑 migrations。调用方**不需要**
-也**不应该**先单独调 `runMigrations()`——schema 管理是这个 backend 的内部
-实现细节。要显式跑 migration（CI 步骤、部署脚本），用 `pnpm db:migrate`。
+各 backend 自己跑 migration，bootstrap 不知道也不需要知道。
 
-### 一次性 CLI
+### 一次性 / `--memory`
 
 ```typescript
-import { MemoryPersistence } from "./persistence/index.js";
+import {
+  MemoryInfraPersistence,
+  MemorySessionPersistence,
+} from "./persistence/index.js";
 
-const persistence = new MemoryPersistence();
-const orchestrator = new TaskOrchestrator({ persistence, emitterFactory });
-// 跑完 task → 进程退出 → 一切清空
+const infra = new MemoryInfraPersistence();      // 启动时从磁盘 seed providers
+const session = new MemorySessionPersistence(); // 永远空
+const orchestrator = new TaskOrchestrator({ infra, session, emitterFactory });
 ```
 
-### 轻量长期 / 调试
-
-```typescript
-import { FilePersistence } from "./persistence/index.js";
-
-const persistence = new FilePersistence({ path: "./huko.jsonl" });
-const orchestrator = new TaskOrchestrator({ persistence, emitterFactory });
-// 关闭时 persistence.close()
-```
+CLI `--memory` 模式：bootstrap 用 SqliteInfraPersistence 短开一下，把
+providers / models / default model 拷进 MemoryInfra，然后关闭磁盘连接。
+session 直接用 MemorySession（不读不写）。
 
 ### 测试
 
 ```typescript
-import { MemoryPersistence } from "@/persistence/index.js";
+import {
+  MemoryInfraPersistence,
+  MemorySessionPersistence,
+} from "@/persistence/index.js";
 
-const persistence = new MemoryPersistence();
-const sessionId = await persistence.sessions.create({ title: "test" });
-const taskId = await persistence.tasks.create({ ... });
-// ...assertions
+const infra = new MemoryInfraPersistence();
+const session = new MemorySessionPersistence();
+const sessionId = await session.sessions.create({ title: "test" });
 ```
 
 ---
 
 ## 关键约定
 
-- **方法都是 async**——即使底层 better-sqlite3 是同步的也包成 Promise，统一调用风格、未来换异步后端无痛
-- **不抛对象，抛 Error**——`PersistenceUnsupportedError` / `Error` 等，让 catch 一致
-- **删除是 cascade**——`sessions.delete(id)` 自动清掉 owned tasks + entries（FK CASCADE 或显式遍历）
-- **Row 类型独立于 Drizzle**——接口里的 `TaskRow` 是接口契约，不是 Drizzle 的 `$inferSelect`。SqlitePersistence 内部做映射
+- **方法都是 async**——即使 better-sqlite3 是同步的也包成 Promise，统一调用风格
+- **删除 cascade**——`sessions.delete(id)` 自动清掉 owned tasks + entries（FK CASCADE 或显式遍历）
+- **Row 类型独立于 Drizzle**——接口里的 `TaskRow` / `ProviderRow` 是接口契约，不是 Drizzle 的 `$inferSelect`。SQLite 实现内部做映射
+- **`apiKeyRef` 永不是真 key**——一个字符串 ref 名，运行时查表
 
 ---
 
 ## 易踩的坑
 
-- **不要**让 kernel 代码直接 import drizzle / better-sqlite3——那是 SqlitePersistence 的内部细节。kernel 只 import `Persistence` 接口。
-- **不要**把 SQLite 特有概念（事务、prepared statement、WAL）泄漏到接口里——接口要中立。
-- **不要**忘了 SessionContext 的 `update.mergeMetadata` 语义——shallow merge over existing。所有实现都要遵守。
-- **不要**在 MemoryPersistence / FilePersistence 里用真 `drizzle` 的 `$inferSelect` 类型——它们各是独立的 Map / op-log 实现，造自己的 row 形态即可。
-- **不要**让 FilePersistence 多 writer 进程同时跑——单写就好。多读 OK。
+- **不要**在 kernel 代码直接 import drizzle / better-sqlite3——那是 SQLite 实现的内部细节
+- **不要**把 SQLite 特有概念（事务、prepared statement、WAL）泄漏到接口
+- **不要**忘了 SessionContext 的 `update.mergeMetadata` 语义——shallow merge over existing
+- **不要**用 `apiKeyRef` 当 key 直接传给 LLM SDK——必须先过 `resolveApiKey`
+- **不要**让 `MemoryInfra` 和 `MemorySession` 共享 id 计数——它们是独立 backend
+- **不要**期望 `<cwd>/.huko/huko.db` 跨 cwd 共享——cwd 不同 = 不同 DB
 
 ---
 
 ## 验证
 
-接口齐 + 三个实现 type-check 通过：
-
 ```bash
-npm run check
+npx tsc --noEmit
 ```
 
 ---
 
 ## 见
 
-- [engine.md](./engine.md) —— SessionContext 怎么消费 `entries.persist` / `entries.update`
-- [orchestrator.md](./orchestrator.md) —— 装配点
-- [db.md](./db.md) —— 当前 SQLite schema 的细节（SqlitePersistence 包装它）
+- [security.md](./security.md) —— keys.json / env / .env 三层查找细节
+- [orchestrator.md](./orchestrator.md) —— 怎么把 infra + session + emitterFactory 接起来
+- [engine.md](./engine.md) —— SessionContext 消费 `entries.persist` / `entries.update`
+- [db.md](./db.md) —— SQLite schema（split 后两份）

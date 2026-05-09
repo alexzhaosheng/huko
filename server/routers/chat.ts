@@ -22,17 +22,17 @@ export const chatRouter = router({
     }),
 
   list: publicProcedure.query(async ({ ctx }) => {
-    return ctx.persistence.sessions.list();
+    return ctx.session.sessions.list();
   }),
 
   get: publicProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
-      const session = await ctx.persistence.sessions.get(input.id);
+      const session = await ctx.session.sessions.get(input.id);
       if (!session) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Chat session not found." });
       }
-      const entries = await ctx.persistence.entries.listForSession(input.id, "chat");
+      const entries = await ctx.session.entries.listForSession(input.id, "chat");
       return { session, entries };
     }),
 

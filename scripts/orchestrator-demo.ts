@@ -3,72 +3,65 @@
  *
  * End-to-end smoke test for orchestrator + Persistence + HukoEvent.
  *
- *   1. Build SqlitePersistence (its constructor migrates idempotently)
- *   2. Seed an OpenRouter provider + model + default (idempotent)
- *   3. Build orchestrator with a console-backed HukoEvent emitter
- *   4. Create a chat session
- *   5. Send a user message
- *   6. Watch the typed event stream, await completion, print summary
+ * Two memory-backed persistences (no disk side effects), seeded inline
+ * with an OpenRouter provider + model. The actual API key is resolved
+ * at task startup from `OPENROUTER_API_KEY` env via
+ * `server/security/keys.ts`, so the demo only references the LOGICAL
+ * name "openrouter" — no plaintext secret in this script.
+ *
+ *   1. MemoryInfraPersistence   — provider/model/default-model registered live
+ *   2. MemorySessionPersistence — sessions / tasks / entries vanish on exit
+ *   3. Orchestrator wired to a console-backed HukoEvent emitter
+ *   4. Create a chat session, send a user message, watch the typed event
+ *      stream, await completion, print summary
  *
  * Usage:
  *   OPENROUTER_API_KEY=sk-or-... npx tsx scripts/orchestrator-demo.ts
  *   OPENROUTER_API_KEY=sk-or-... MODEL=openai/gpt-4o-mini npx tsx scripts/orchestrator-demo.ts
  */
 
-import { SqlitePersistence } from "../server/persistence/index.js";
+import {
+  MemoryInfraPersistence,
+  MemorySessionPersistence,
+} from "../server/persistence/index.js";
 import { TaskOrchestrator } from "../server/services/index.js";
 import type { HukoEvent } from "../shared/events.js";
-// Temporary: switch to FilePersistence
-// import { SqlitePersistence } from "../server/persistence/index.js";
-import { FilePersistence } from "../server/persistence/index.js";
-// const persistence = new SqlitePersistence();
-const persistence = new FilePersistence({ path: "./huko.jsonl" });
 
 // ─── Sanity ──────────────────────────────────────────────────────────────────
 
-const apiKey = process.env["OPENROUTER_API_KEY"];
-if (!apiKey) {
+// Sanity-check the env var early — though resolveApiKey would fail with
+// a good message at task spinup, we'd rather not even seed the provider
+// if the key isn't reachable.
+if (!process.env["OPENROUTER_API_KEY"]) {
   console.error("Set OPENROUTER_API_KEY in your env first.");
   process.exit(1);
 }
 const modelIdString = process.env["MODEL"] ?? "anthropic/claude-3.5-haiku";
 
-// const persistence = new SqlitePersistence();
-// (SqlitePersistence's constructor migrates idempotently if used.)
+// ─── Persistence (in-memory, seeded inline) ──────────────────────────────────
 
-// ─── Seed: provider + model + default ───────────────────────────────────────
+const infra = new MemoryInfraPersistence();
+const session = new MemorySessionPersistence();
 
-const PROVIDER_NAME = "OpenRouter (demo)";
+// `apiKeyRef: "openrouter"` is a logical name. The orchestrator turns
+// it into the actual key at task startup via server/security/keys.ts,
+// which checks env (OPENROUTER_API_KEY) among other sources. The demo
+// thus never needs to read the env var directly.
+const providerId = await infra.providers.create({
+  name: "OpenRouter (demo)",
+  protocol: "openai",
+  baseUrl: "https://openrouter.ai/api/v1",
+  apiKeyRef: "openrouter",
+  defaultHeaders: { "HTTP-Referer": "https://huko.dev", "X-Title": "Huko" },
+});
 
-const allProviders = await persistence.providers.list();
-let providerId = allProviders.find((p) => p.name === PROVIDER_NAME)?.id;
+const modelId = await infra.models.create({
+  providerId,
+  modelId: modelIdString,
+  displayName: modelIdString,
+});
 
-if (providerId === undefined) {
-  providerId = await persistence.providers.create({
-    name: PROVIDER_NAME,
-    protocol: "openai",
-    baseUrl: "https://openrouter.ai/api/v1",
-    apiKey,
-    defaultHeaders: { "HTTP-Referer": "https://huko.dev", "X-Title": "Huko" },
-  });
-} else {
-  await persistence.providers.update(providerId, { apiKey });
-}
-
-const allModels = await persistence.models.list();
-let modelId = allModels.find(
-  (m) => m.providerId === providerId && m.modelId === modelIdString,
-)?.id;
-
-if (modelId === undefined) {
-  modelId = await persistence.models.create({
-    providerId,
-    modelId: modelIdString,
-    displayName: modelIdString,
-  });
-}
-
-await persistence.config.setDefaultModelId(modelId);
+await infra.config.setDefaultModelId(modelId);
 
 console.log(`seed: provider=${providerId} model=${modelId} (${modelIdString})`);
 
@@ -152,7 +145,8 @@ function makeConsoleEmitter(room: string) {
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
 const orchestrator = new TaskOrchestrator({
-  persistence,
+  infra,
+  session,
   emitterFactory: makeConsoleEmitter,
 });
 
@@ -172,4 +166,5 @@ console.log("\n" + dim("-".repeat(60)));
 console.log("summary:", summary);
 console.log(dim("-".repeat(60)));
 
-persistence.close();
+session.close();
+infra.close();

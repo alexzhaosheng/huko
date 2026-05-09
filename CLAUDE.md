@@ -101,8 +101,15 @@ npx tsc --noEmit       # 严格类型检查
 
 - **kernel 边界**：`server/engine/` + `server/task/` + `server/services/` + `server/core/llm/`
   这些目录**不**直接 import HTTP / Socket.IO / drizzle / better-sqlite3 / DOM
-- **Persistence 是 single seam**：要持久化 → 走 Persistence 接口；要加新 backend
-  → 实现 Persistence
+- **Persistence 是两个 seam，不是一个**：
+  - `InfraPersistence` 在 `~/.huko/infra.db`（providers / models / 系统默认）
+  - `SessionPersistence` 在 `<cwd>/.huko/huko.db`（sessions / tasks / entries）
+  - 加新 backend = 实现一个或两个接口
+- **DB 永不持有 API key**：`providers.api_key_ref` 是逻辑名；真值由
+  `server/security/keys.ts` 三层查找（`<cwd>/.huko/keys.json` > env > `<cwd>/.env`）
+  解析。后果：DB 文件可以备份 / 复制 / 入仓而不泄密
+- **`<cwd>/.huko/.gitignore` 自动生成**：huko.db / keys.json / state.json 默认
+  排除。要把对话入 git？显式删 `huko.db` 那行
 - **Frontends（CLI / daemon / 未来 IDE 插件）消费 kernel**：单向依赖，frontend
   → kernel，绝不反向
 

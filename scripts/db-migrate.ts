@@ -1,27 +1,31 @@
 /**
  * scripts/db-migrate.ts
  *
- * Apply any pending DB migrations.
+ * Apply any pending DB migrations to BOTH the user-global infra DB and
+ * the per-cwd session DB. Both backends migrate themselves on construction,
+ * so this script is mostly a "trigger that flow + report" wrapper for CI.
  *
  * Usage:
  *   npm run db:migrate
- *
- * Each unapplied SQL file under server/db/migrations/ is run inside a
- * transaction; partial failures roll back. Already-applied migrations
- * are skipped (tracked in the `_migrations` table).
  */
 
-import { runMigrations } from "../server/db/migrate.js";
+import {
+  SqliteInfraPersistence,
+  SqliteSessionPersistence,
+} from "../server/persistence/index.js";
 
-const result = runMigrations();
+let exitCode = 0;
+try {
+  const infra = new SqliteInfraPersistence();
+  console.log("infra DB ready (~/.huko/infra.db)");
+  infra.close();
 
-if (result.applied.length > 0) {
-  console.log(`Applied ${result.applied.length} migration(s):`);
-  for (const v of result.applied) console.log(`  + ${v}`);
+  const session = new SqliteSessionPersistence({ cwd: process.cwd() });
+  console.log("session DB ready (<cwd>/.huko/huko.db)");
+  session.close();
+} catch (err) {
+  console.error("migration failed:", err);
+  exitCode = 1;
 }
-if (result.skipped.length > 0) {
-  console.log(`Already applied: ${result.skipped.length} migration(s).`);
-}
-if (result.applied.length === 0 && result.skipped.length === 0) {
-  console.log("No migrations found.");
-}
+
+process.exit(exitCode);

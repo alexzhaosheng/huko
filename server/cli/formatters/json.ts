@@ -42,6 +42,21 @@ export function makeJsonFormatter(): Formatter {
             }
           }
           break;
+        case "orphan_recovered": {
+          // Yellow warning on stderr; the final JSON doc on stdout
+          // stays focused on the current run, so we don't pollute it
+          // with stale-orphan state.
+          const tail =
+            event.danglingToolCount > 0
+              ? ` (${event.danglingToolCount} synthetic tool_result(s) injected)`
+              : "";
+          process.stderr.write(
+            yellow(
+              `[orphan recovered] task #${event.taskId} (${event.sessionType} session #${event.sessionId}): ${event.reason}${tail}`,
+            ) + "\n",
+          );
+          break;
+        }
         // All other events are silent in json mode — we'll synthesise
         // the final document in onSummary.
       }

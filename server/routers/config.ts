@@ -15,18 +15,18 @@ export const configRouter = router({
   get: publicProcedure
     .input(z.object({ key: z.string().min(1).max(100) }))
     .query(async ({ ctx, input }) => {
-      const value = await ctx.persistence.config.get(input.key);
+      const value = await ctx.infra.config.get(input.key);
       return { value };
     }),
 
   set: publicProcedure
     .input(z.object({ key: z.string().min(1).max(100), value: z.unknown() }))
     .mutation(async ({ ctx, input }) => {
-      await ctx.persistence.config.set(input.key, input.value);
+      await ctx.infra.config.set(input.key, input.value);
       return { ok: true };
     }),
 
   list: publicProcedure.query(async ({ ctx }) => {
-    return ctx.persistence.config.list();
+    return ctx.infra.config.list();
   }),
 });

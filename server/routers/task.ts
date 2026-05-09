@@ -24,7 +24,7 @@ export const taskRouter = router({
   get: publicProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
-      const row = await ctx.persistence.tasks.get(input.id);
+      const row = await ctx.session.tasks.get(input.id);
       if (!row) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Task not found." });
       }

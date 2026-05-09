@@ -3,20 +3,24 @@
  *
  * Public surface of the persistence layer.
  *
- * Consumers (orchestrator, routers, app.ts) import the `Persistence`
- * interface and one of the built-in implementations from here.
+ * Two separate interfaces, two separate scopes:
+ *   - InfraPersistence    user-global  (~/.huko/infra.db)
+ *   - SessionPersistence  per-project  (<cwd>/.huko/huko.db)
+ *
+ * Consumers (orchestrator, routers, app.ts) hold one or both depending
+ * on what they need. The combined `Persistence` interface from v0.1
+ * has been removed.
  *
  * Adding a new built-in implementation:
- *   1. Drop a file under this directory implementing `Persistence`.
+ *   1. Drop a file under this directory implementing one or both interfaces.
  *   2. Re-export its class below.
- *
- * Adding an external implementation (npm package):
- *   - Ship `huko-persistence-<name>` exporting a class implementing
- *     `Persistence`. No change needed in this barrel.
  */
 
 export type {
-  Persistence,
+  // Interfaces
+  InfraPersistence,
+  SessionPersistence,
+  // Row shapes
   ChatSessionRow,
   TaskRow,
   EntryRow,
@@ -25,6 +29,7 @@ export type {
   ModelRowJoined,
   ResolvedModelConfig,
   ConfigRow,
+  // Inputs
   CreateChatSessionInput,
   CreateTaskInput,
   UpdateTaskPatch,
@@ -33,6 +38,16 @@ export type {
   CreateModelInput,
 } from "./types.js";
 
-export { SqlitePersistence, type SqlitePersistenceOptions } from "./sqlite.js";
-export { MemoryPersistence } from "./memory.js";
-export { FilePersistence, type FilePersistenceOptions } from "./file.js";
+export {
+  SqliteInfraPersistence,
+  type SqliteInfraPersistenceOptions,
+} from "./sqlite-infra.js";
+export {
+  SqliteSessionPersistence,
+  type SqliteSessionPersistenceOptions,
+} from "./sqlite-session.js";
+export {
+  MemoryInfraPersistence,
+  MemorySessionPersistence,
+  collectElidedEntryIds,
+} from "./memory.js";

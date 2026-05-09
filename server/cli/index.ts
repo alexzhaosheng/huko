@@ -4,240 +4,47 @@
  *
  * `huko` CLI entry point.
  *
- * Subcommands implemented:
- *   - `run <prompt>`           one-shot task; prints assistant reply, exits.
- *   - `sessions list`          list chat sessions in the local DB.
- *   - `sessions delete <id>`   cascade-delete a chat session by id.
+ * This file is deliberately small. Its only job is:
+ *   1. Read argv
+ *   2. Find the right per-resource dispatcher in `dispatch/`
+ *   3. Hand off
  *
- * Coming later:
- *   - `start`                  launch a daemon (HTTP + WS) in background
- *   - `send <prompt>`          fire a message at a running daemon
- *   - `chat`                   interactive REPL backed by the daemon
- *   - `stop <taskId>`          signal a running task
- *   - `sessions get <id>`      single-session detail
- *   - `tasks list`             task inspector (optionally scoped to session)
- *   - `models list`            configured models
- *   - `providers list`         configured providers
+ * Argv parsing for each resource lives next to that resource in
+ * `server/cli/dispatch/<resource>.ts`. Help text + shared format-flag
+ * parsing lives in `server/cli/dispatch/shared.ts`. Per-resource
+ * command bodies (DB ops, etc.) live in `server/cli/commands/<resource>.ts`.
  *
- * Shape: noun-first (`<resource> <verb>`) — scales as we grow more verbs
- * per resource. Mirrors gh / docker / aws CLIs.
+ * Adding a new top-level resource:
+ *   1. Add a file under `commands/` with the actual work
+ *   2. Add a file under `dispatch/` with argv parsing → command call
+ *   3. Add a row to the DISPATCH table below
+ *   4. Add a row to `dispatch/shared.ts`'s help text
  *
- * Argv parser: hand-rolled (no commander/yargs) — small enough that
- * the dependency would be heavier than the parser.
+ * Why not a Command-descriptor abstraction (parse/run pairs in a
+ * registry, auto-generated help) — see CLI module doc. Short version:
+ * descriptor patterns lose TS narrowing across the registry and force
+ * `unknown`/`any`; the file-split here gets the readability win
+ * without paying that cost.
  */
 
-import { runCommand } from "./commands/run.js";
-import {
-  sessionsListCommand,
-  sessionsDeleteCommand,
-  type OutputFormat,
-} from "./commands/sessions.js";
-import { configShowCommand } from "./commands/config.js";
-import type { FormatName } from "./formatters/index.js";
+import { dispatchConfig } from "./dispatch/config.js";
+import { dispatchKeys } from "./dispatch/keys.js";
+import { dispatchModel } from "./dispatch/model.js";
+import { dispatchProvider } from "./dispatch/provider.js";
+import { dispatchRun } from "./dispatch/run.js";
+import { dispatchSessions } from "./dispatch/sessions.js";
+import { usage } from "./dispatch/shared.js";
 
-function usage(exitCode: number = 3): never {
-  process.stderr.write(
-    [
-      "Usage: huko <command> [args] [options]",
-      "",
-      "Commands:",
-      "  run <prompt>              Run a one-shot task with the given prompt",
-      "  sessions list             List chat sessions in the local DB",
-      "  sessions delete <id>      Delete a chat session and its tasks/entries",
-      "",
-      "Options for `run`:",
-      "  --format=<fmt>            text | jsonl | json   (default: text)",
-      "  --json                    Shortcut for --format=json",
-      "  --jsonl                   Shortcut for --format=jsonl",
-      "  --title=<text>            Override the chat-session title",
-      "                            (default: first ~40 chars of the prompt)",
-      "  --memory                  Run ephemerally — session/messages are NOT",
-      "                            written to disk. Provider/model config is",
-      "                            still read from huko.db at startup.",
-      "  --role=<name>             Role / persona (default: coding). Looks up",
-      "                            <project>/.huko/roles/<name>.md, then",
-      "                            ~/.huko/roles/<name>.md, then built-in.",
-      "  -h, --help                Show this help",
-      "",
-      "Options for `sessions list`:",
-      "  --format=<fmt>            text | jsonl | json   (default: text)",
-      "  --json                    Shortcut for --format=json",
-      "  --jsonl                   Shortcut for --format=jsonl",
-      "",
-      "Examples:",
-      '  huko run "What is 2 + 2?"',
-      '  huko run --jsonl "Summarize this" | jq \'select(.type == "tool_result")\'',
-      '  RESULT=$(huko run --json "do X"); echo "$RESULT" | jq -r .final',
-      '  huko run --title="ad-hoc Q" "What is the weather today?"',
-      '  huko run --memory "private question that should not persist"',
-      "  huko sessions list",
-      "  huko sessions list --json | jq '.[0]'",
-      "  huko sessions delete 12",
-      "",
-      "Exit codes:",
-      "  0  ok / task done    1  failed    2  task stopped",
-      "  3  usage error       4  target not found",
-      "",
-    ].join("\n"),
-  );
-  process.exit(exitCode);
-}
+type Dispatcher = (rest: string[]) => Promise<void>;
 
-/**
- * Walk argv pulling out --format / --json / --jsonl flags.
- * Returns the resolved format and the leftover positional / flag args.
- *
- * Unknown `--<flag>` strings cause a usage error so typos fail loud.
- */
-function parseFormatFlags<F extends string>(
-  argv: string[],
-  validFormats: readonly F[],
-  defaultFormat: F,
-): { format: F; positional: string[] } {
-  let format: F = defaultFormat;
-  const positional: string[] = [];
-
-  for (const arg of argv) {
-    if (arg === "-h" || arg === "--help") usage(0);
-    if (arg === "--json") {
-      assertFormat("json", validFormats);
-      format = "json" as F;
-      continue;
-    }
-    if (arg === "--jsonl") {
-      assertFormat("jsonl", validFormats);
-      format = "jsonl" as F;
-      continue;
-    }
-    if (arg.startsWith("--format=")) {
-      const v = arg.slice("--format=".length);
-      assertFormat(v, validFormats);
-      format = v as F;
-      continue;
-    }
-    if (arg.startsWith("--")) {
-      process.stderr.write(`huko: unknown flag: ${arg}\n`);
-      usage();
-    }
-    positional.push(arg);
-  }
-
-  return { format, positional };
-}
-
-function assertFormat<F extends string>(value: string, validFormats: readonly F[]): void {
-  if (!validFormats.includes(value as F)) {
-    process.stderr.write(
-      `huko: invalid format value: ${value} (allowed: ${validFormats.join(", ")})\n`,
-    );
-    usage();
-  }
-}
-
-// ─── run command ─────────────────────────────────────────────────────────────
-
-async function dispatchRun(rest: string[]): Promise<void> {
-  // Pre-extract run-specific flags before generic flag parsing —
-  // parseFormatFlags rejects unknown --xxx flags loudly.
-  let title: string | undefined;
-  let ephemeral = false;
-  let role: string | undefined;
-  const filtered: string[] = [];
-  for (const arg of rest) {
-    if (arg.startsWith("--title=")) {
-      title = arg.slice("--title=".length);
-      continue;
-    }
-    if (arg === "--memory") {
-      ephemeral = true;
-      continue;
-    }
-    if (arg.startsWith("--role=")) {
-      role = arg.slice("--role=".length);
-      continue;
-    }
-    filtered.push(arg);
-  }
-
-  const { format, positional } = parseFormatFlags<FormatName>(
-    filtered,
-    ["text", "jsonl", "json"],
-    "text",
-  );
-
-  if (positional.length === 0) {
-    process.stderr.write("huko run: prompt is required\n");
-    usage();
-  }
-  const prompt = positional.join(" ");
-
-  await runCommand({
-    prompt,
-    format,
-    ...(title !== undefined ? { title } : {}),
-    ...(ephemeral ? { ephemeral: true } : {}),
-    ...(role !== undefined ? { role } : {}),
-  });
-}
-
-// ─── sessions <verb> ─────────────────────────────────────────────────────────
-
-async function dispatchSessions(rest: string[]): Promise<void> {
-  const verb = rest[0];
-  if (verb === undefined || verb === "-h" || verb === "--help") {
-    process.stderr.write(
-      verb === undefined
-        ? "huko sessions: missing verb (list | delete)\n"
-        : "",
-    );
-    usage(verb === undefined ? 3 : 0);
-  }
-
-  if (verb === "list") {
-    const { format, positional } = parseFormatFlags<OutputFormat>(
-      rest.slice(1),
-      ["text", "jsonl", "json"],
-      "text",
-    );
-    if (positional.length > 0) {
-      process.stderr.write(
-        `huko sessions list: unexpected argument: ${positional[0]}\n`,
-      );
-      usage();
-    }
-    await sessionsListCommand({ format });
-    return;
-  }
-
-  if (verb === "delete") {
-    const positional: string[] = [];
-    for (const arg of rest.slice(1)) {
-      if (arg === "-h" || arg === "--help") usage(0);
-      if (arg.startsWith("--")) {
-        process.stderr.write(`huko: unknown flag: ${arg}\n`);
-        usage();
-      }
-      positional.push(arg);
-    }
-    if (positional.length !== 1) {
-      process.stderr.write("huko sessions delete: expected exactly one <id>\n");
-      usage();
-    }
-    const idRaw = positional[0]!;
-    const id = Number(idRaw);
-    if (!Number.isFinite(id) || !Number.isInteger(id) || id <= 0) {
-      process.stderr.write(`huko sessions delete: invalid id: ${idRaw}\n`);
-      usage();
-    }
-    await sessionsDeleteCommand({ id });
-    return;
-  }
-
-  process.stderr.write(`huko sessions: unknown verb: ${verb}\n`);
-  usage();
-}
-
-// ─── main ────────────────────────────────────────────────────────────────────
+const DISPATCH: Record<string, Dispatcher> = {
+  run: dispatchRun,
+  sessions: dispatchSessions,
+  provider: dispatchProvider,
+  model: dispatchModel,
+  keys: dispatchKeys,
+  config: dispatchConfig,
+};
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -245,31 +52,13 @@ async function main(): Promise<void> {
   const head = argv[0]!;
   if (head === "-h" || head === "--help") usage(0);
 
-  const cmd = head;
-  const rest = argv.slice(1);
-
-  if (cmd === "run") {
-    await dispatchRun(rest);
-    return;
-  }
-
-  if (cmd === "sessions") {
-    await dispatchSessions(rest);
-    return;
-  }
-
-  if (cmd === "config") {
-    const verb = rest[0];
-    if (verb === "show" || verb === undefined) {
-      await configShowCommand();
-      return;
-    }
-    process.stderr.write(`huko config: unknown verb: ${verb} (try: show)\n`);
+  const handler = DISPATCH[head];
+  if (!handler) {
+    process.stderr.write(`huko: unknown command: ${head}\n`);
     usage();
   }
 
-  process.stderr.write(`huko: unknown command: ${cmd}\n`);
-  usage();
+  await handler(argv.slice(1));
 }
 
 main().catch((err: unknown) => {
