@@ -13,7 +13,7 @@
     "check": "tsc --noEmit",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "huko": "tsx server/cli/index.ts",
-    "test": "vitest run"
+    "test": "node --import tsx --test \"tests/*.test.ts\""
   },
   "dependencies": {
     "@trpc/client": "^11.0.0",
@@ -35,7 +35,6 @@
     "drizzle-kit": "^0.31.0",
     "esbuild": "^0.25.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.9.0",
-    "vitest": "^2.0.0"
+    "typescript": "^5.9.0"
   }
 }
