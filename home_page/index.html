@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>huko-explicit</title>
+    <meta
+      name="description"
+      content="Minimalist CLI. Maximalist intelligence. Configurable all the way down."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="prompt-line">
+          <span class="prompt-user">root</span>@<span class="prompt-host">huko</span>:<span class="prompt-path">~</span>$ ./launch
+        </div>
+        <h1>huko-explicit</h1>
+        <p class="tagline">
+          Minimalist CLI. Maximalist intelligence. Configurable all the way down.
+        </p>
+      </section>
+
+      <section class="feature-list" aria-label="Key features">
+        <article class="feature">
+          <h2><span class="section-mark">[01]</span> Noun-first CLI</h2>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># continue the active session</span>
+<span class="command">huko run "review this diff for risky changes"</span></span>
+<span class="pair"><span class="comment"># check who the agent is talking to</span>
+<span class="command">huko sessions current</span></span>
+<span class="pair"><span class="comment"># set the default model explicitly</span>
+<span class="command">huko model default anthropic/claude-sonnet-4-6</span></span></code></pre>
+        </article>
+
+        <article class="feature">
+          <h2><span class="section-mark">[02]</span> Explicit Setup</h2>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># start with the guided path</span>
+<span class="command">huko setup</span></span>
+<span class="pair"><span class="comment"># add a provider definition</span>
+<span class="command">huko provider add --name=OpenRouter --protocol=openai --base-url=https://openrouter.ai/api/v1 --api-key-ref=openrouter</span></span>
+<span class="pair"><span class="comment"># bind the key to a named ref</span>
+<span class="command">huko keys set openrouter sk-or-...</span></span></code></pre>
+        </article>
+
+        <article class="feature">
+          <h2><span class="section-mark">[03]</span> Layered Config</h2>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># inspect the resolved runtime config</span>
+<span class="command">huko config show</span></span>
+<span class="pair"><span class="comment"># inspect the merged infra view</span>
+<span class="command">huko info</span></span>
+<span class="pair"><span class="comment"># inspect only the global layer</span>
+<span class="command">huko info global</span></span></code></pre>
+        </article>
+
+        <article class="feature">
+          <h2><span class="section-mark">[04]</span> Project Memory</h2>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># continue work inside this repo</span>
+<span class="command">huko run "continue the refactor plan"</span></span>
+<span class="pair"><span class="comment"># list saved sessions for this project</span>
+<span class="command">huko sessions list</span></span>
+<span class="pair"><span class="comment"># branch into a fresh thread</span>
+<span class="command">huko run --new --title="release triage" "summarize today's blockers"</span></span></code></pre>
+        </article>
+
+        <article class="feature">
+          <h2><span class="section-mark">[05]</span> Zero-trace Runs</h2>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># run without touching session storage</span>
+<span class="command">huko run --memory "summarize this build log in 3 bullets"</span></span>
+<span class="pair"><span class="comment"># return machine-readable output</span>
+<span class="command">huko run --memory --json "return a release note draft"</span></span>
+<span class="pair"><span class="comment"># ask something private and leave no trail</span>
+<span class="command">huko run --memory "private question"</span></span></code></pre>
+        </article>
+
+        <article class="feature">
+          <h2><span class="section-mark">[06]</span> Inspectable Agents</h2>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># capture a final result as JSON</span>
+<span class="command">huko run --json "generate a changelog from these commits"</span></span>
+<span class="pair"><span class="comment"># stream semantic events line by line</span>
+<span class="command">huko run --jsonl "fetch the page and extract the title"</span></span>
+<span class="pair"><span class="comment"># inspect the project-specific agent surface</span>
+<span class="command">huko info project</span></span></code></pre>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>
