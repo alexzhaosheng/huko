@@ -4,7 +4,7 @@
  * Default text formatter — ANSI-coloured, human-readable.
  *
  *   stdout: the assistant's final answer (streamed token-by-token).
- *           Pure plaintext so `huko run "..." > out.txt` captures only
+ *           Pure plaintext so `huko run -- ... > out.txt` captures only
  *           the answer, not the diagnostics.
  *   stderr: everything else — tool calls, tool results, reminders,
  *           thinking deltas (dim), final summary.

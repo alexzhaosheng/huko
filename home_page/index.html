@@ -26,7 +26,7 @@
         <article class="feature">
           <h2><span class="section-mark">[01]</span> Noun-first CLI</h2>
           <pre class="terminal"><code><span class="pair"><span class="comment"># continue the active session</span>
-<span class="command">huko run "review this diff for risky changes"</span></span>
+<span class="command">huko run -- review this diff for risky changes</span></span>
 <span class="pair"><span class="comment"># check who the agent is talking to</span>
 <span class="command">huko sessions current</span></span>
 <span class="pair"><span class="comment"># set the default model explicitly</span>
@@ -56,11 +56,11 @@
         <article class="feature">
           <h2><span class="section-mark">[04]</span> Project Memory</h2>
           <pre class="terminal"><code><span class="pair"><span class="comment"># continue work inside this repo</span>
-<span class="command">huko run "continue the refactor plan"</span></span>
+<span class="command">huko run -- continue the refactor plan</span></span>
 <span class="pair"><span class="comment"># list saved sessions for this project</span>
 <span class="command">huko sessions list</span></span>
 <span class="pair"><span class="comment"># branch into a fresh thread</span>
-<span class="command">huko run --new --title="release triage" "summarize today's blockers"</span></span></code></pre>
+<span class="command">huko run --new --title="release triage" -- summarize today's blockers</span></span></code></pre>
         </article>
 
         <article class="feature">

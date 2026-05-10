@@ -1,7 +1,7 @@
 /**
  * server/cli/commands/run.ts
  *
- * `huko run "..."` — append to the active session by default.
+ * `huko run [flags] -- <prompt>` — append to the active session by default.
  *
  * Session selection:
  *   1. `--session=<id>`   one-off send to that session; active pointer

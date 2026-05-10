@@ -42,7 +42,7 @@ resource 一个 dispatcher 函数（`dispatchSessions` / `dispatchProvider`
 
 | 命令 | 干啥 |
 |---|---|
-| `huko run <prompt>` | append 到 active session（没就建一个） |
+| `huko run [flags] -- <prompt>` | append 到 active session（没就建一个） |
 | `huko sessions list` | 列本地项目 DB 的所有 chat sessions |
 | `huko sessions delete <id>` | 级联删除 session + tasks + entries |
 | `huko sessions current` | 显示当前 cwd 的 active session |
@@ -83,14 +83,23 @@ huko model add --provider=OpenRouter \
                --model-id=anthropic/claude-3.5-haiku --default
 
 # 4. 跑！
-huko run "hello"
+huko run -- hello
 ```
 
 ---
 
 ## 命令细节
 
-### `huko run <prompt>`
+### `huko run [flags] -- <prompt>`
+
+**Argv 协议**：在 `--` 之前只允许 flag（顺序自由），`--` 之后到行尾的所有内容**逐字成为 prompt**，不再做任何解析。这意味着：
+
+- `huko run --new -- explain --no-interaction works` — 合法，prompt 含 `--no-interaction`
+- `huko run hello` — 错误：positional 必须在 `--` 之后
+- `huko run --new` — 错误：缺少 prompt
+
+`--` 是 POSIX 标准的 "end of options" 标记，bash/zsh/PowerShell 都不会动它。
+
 
 #### Session 选择规则
 
@@ -120,7 +129,7 @@ huko run "hello"
 | `jsonl` | 每个 HukoEvent 一行 JSON | 仅 fatal error |
 | `json` | task 完成时一份 JSON 文档（status / final / usage / counts） | 进度提示（tool calls / tool results） |
 
-**核心约定**：stdout 是"结果流"，stderr 是"诊断流"。`huko run "..." > out.txt`
+**核心约定**：stdout 是"结果流"，stderr 是"诊断流"。`huko run -- ... > out.txt`
 永远只捕获 stdout 的结果——shell pipe 友好。
 
 #### 选项

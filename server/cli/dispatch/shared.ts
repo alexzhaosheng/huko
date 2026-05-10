@@ -40,7 +40,7 @@ export function usage(exitCode: number = 3): never {
       "",
       h("Commands:"),
       row("setup", "Interactive wizard: provider + key + model"),
-      row("run <prompt>", "Append to active session (creates one if none)"),
+      row("run [flags] -- <prompt>", "Append to active session (creates one if none)"),
       row("sessions list", "List chat sessions in the local DB"),
       row("sessions delete <id>", "Delete a chat session and its tasks/entries"),
       row("sessions current", "Show the active chat-session id for this cwd"),
@@ -62,6 +62,9 @@ export function usage(exitCode: number = 3): never {
       row("debug llm-log", "Render this session's LLM calls into huko_llm_log.html"),
       "",
       h("Options for `run`:"),
+      d("  Protocol: `huko run [flags] -- <prompt>`. The `--` token is required;"),
+      d("  everything after it is the prompt verbatim, including words like `--metric`."),
+      "",
       rowWithDefault("--format=<fmt>", "text | jsonl | json", "(default: text)"),
       row("--json | --jsonl", "Shortcuts for --format=..."),
       row("--title=<text>", "Title for the NEW session (if one is created)"),
@@ -103,10 +106,11 @@ export function usage(exitCode: number = 3): never {
       `  ${c("huko setup")}`,
       "",
       d("  # daily use"),
-      `  ${c('huko run "What is 2 + 2?"')}             ${d("# continues the active session")}`,
-      `  ${c('huko run --new "new conversation"')}     ${d("# starts fresh, switches active")}`,
-      `  ${c("huko sessions current")}                 ${d("# who am I talking to?")}`,
-      `  ${c("huko debug llm-log")}                    ${d("# inspect this session's LLM calls")}`,
+      `  ${c("huko run -- What is 2 + 2?")}                ${d("# continues the active session")}`,
+      `  ${c("huko run --new -- new conversation")}        ${d("# starts fresh, switches active")}`,
+      `  ${c("huko run --show-tokens -- check the build")} ${d("# show token breakdown after")}`,
+      `  ${c("huko sessions current")}                     ${d("# who am I talking to?")}`,
+      `  ${c("huko debug llm-log")}                        ${d("# inspect this session's LLM calls")}`,
       "",
       h("Exit codes:"),
       `  ${c("0")}   ok / task done    ${c("1")}   failed              ${c("2")}   task stopped`,
@@ -120,6 +124,11 @@ export function usage(exitCode: number = 3): never {
 
 /**
  * Walk argv pulling out --format / --json / --jsonl flags.
+ *
+ * Used by list-style subcommands (sessions list, provider list, model
+ * list) that don't take a free-text prompt. The `huko run` parser does
+ * NOT use this — it has its own strict sentinel-based parser in
+ * dispatch/run.ts.
  */
 export function parseFormatFlags<F extends string>(
   argv: string[],

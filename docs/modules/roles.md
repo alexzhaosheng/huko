@@ -85,9 +85,9 @@
 ## CLI 用法
 
 ```bash
-huko run "fix the test"                          # 默认 role=coding
-huko run --role=coding "fix the test"            # 同上，显式
-huko run --role=writing "draft a blog post"      # 切到 writing role（暂未实现）
+huko run -- fix the test                          # 默认 role=general
+huko run --role=coding -- fix the test            # 显式切到 coding role
+huko run --role=writing -- draft a blog post      # 切到 writing role
 ```
 
 `--role=<name>` 找不到 role 时直接报错退出（exit 1），不 fallback——避免静默用错
