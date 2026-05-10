@@ -26,10 +26,7 @@
  *   0  ok    1  internal error    4  not found (unset)
  */
 
-import {
-  SqliteInfraPersistence,
-  type InfraPersistence,
-} from "../../persistence/index.js";
+import { loadInfraConfig } from "../../config/index.js";
 import {
   describeKeySource,
   envVarNameFor,
@@ -87,10 +84,9 @@ export async function keysUnsetCommand(args: KeysUnsetArgs): Promise<number> {
  */
 export async function keysListCommand(): Promise<number> {
   const cwd = process.cwd();
-  let infra: InfraPersistence | null = null;
   try {
-    infra = new SqliteInfraPersistence();
-    const providers = await infra.providers.list();
+    const cfg = loadInfraConfig({ cwd });
+    const providers = cfg.providers;
     const projectRefs = listProjectKeyRefs({ cwd });
 
     const seen = new Set<string>();
@@ -161,21 +157,10 @@ export async function keysListCommand(): Promise<number> {
   } catch (err) {
     process.stderr.write(`huko: keys list failed: ${describe(err)}\n`);
     return 1;
-  } finally {
-    closeQuietly(infra);
   }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function closeQuietly(p: InfraPersistence | null): void {
-  if (!p) return;
-  try {
-    void p.close();
-  } catch {
-    /* already closed */
-  }
-}
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

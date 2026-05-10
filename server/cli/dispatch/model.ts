@@ -3,12 +3,18 @@
  *
  * `huko model <verb>` — argv parser + handoff to commands/model.
  *
- * Returns exit code; usage() throws CliExitError on bad input.
+ * Models are identified by composite ref `<providerName>/<modelId>`,
+ * e.g. `anthropic/claude-sonnet-4-6` or `openrouter/anthropic/claude-sonnet-4.5`.
+ * The first `/` separates provider from modelId; everything after is
+ * the modelId (so OpenRouter slugs containing `/` work).
+ *
+ * --project (add / remove / default): operate on <cwd>/.huko/providers.json
+ * instead of ~/.huko/providers.json.
  */
 
 import {
   modelAddCommand,
-  modelDefaultCommand,
+  modelCurrentCommand,
   modelListCommand,
   modelRemoveCommand,
 } from "../commands/model.js";
@@ -21,7 +27,7 @@ export async function dispatchModel(rest: string[]): Promise<number> {
   if (verb === undefined || verb === "-h" || verb === "--help") {
     process.stderr.write(
       verb === undefined
-        ? "huko model: missing verb (list | add | remove | default)\n"
+        ? "huko model: missing verb (list | add | remove | current)\n"
         : "",
     );
     usage(verb === undefined ? 3 : 0);
@@ -46,7 +52,8 @@ export async function dispatchModel(rest: string[]): Promise<number> {
     let displayName: string | undefined;
     let thinkLevel: ThinkLevel | undefined;
     let toolCallMode: ToolCallMode | undefined;
-    let setDefault = false;
+    let setCurrent = false;
+    let project = false;
     for (const arg of rest.slice(1)) {
       if (arg === "-h" || arg === "--help") usage(0);
       if (arg.startsWith("--provider=")) provider = arg.slice("--provider=".length);
@@ -66,8 +73,10 @@ export async function dispatchModel(rest: string[]): Promise<number> {
           usage();
         }
         toolCallMode = v;
-      } else if (arg === "--default") {
-        setDefault = true;
+      } else if (arg === "--current") {
+        setCurrent = true;
+      } else if (arg === "--project") {
+        project = true;
       } else {
         process.stderr.write(`huko model add: unexpected argument: ${arg}\n`);
         usage();
@@ -83,14 +92,20 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       ...(displayName !== undefined ? { displayName } : {}),
       ...(thinkLevel !== undefined ? { thinkLevel } : {}),
       ...(toolCallMode !== undefined ? { toolCallMode } : {}),
-      ...(setDefault ? { setDefault: true } : {}),
+      ...(setCurrent ? { setCurrent: true } : {}),
+      ...(project ? { project: true } : {}),
     });
   }
 
   if (verb === "remove") {
+    let project = false;
     const positional: string[] = [];
     for (const arg of rest.slice(1)) {
       if (arg === "-h" || arg === "--help") usage(0);
+      if (arg === "--project") {
+        project = true;
+        continue;
+      }
       if (arg.startsWith("--")) {
         process.stderr.write(`huko: unknown flag: ${arg}\n`);
         usage();
@@ -98,21 +113,24 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       positional.push(arg);
     }
     if (positional.length !== 1) {
-      process.stderr.write("huko model remove: expected exactly one <id>\n");
+      process.stderr.write("huko model remove: expected exactly one <ref>\n");
       usage();
     }
-    const id = Number(positional[0]!);
-    if (!Number.isFinite(id) || !Number.isInteger(id) || id <= 0) {
-      process.stderr.write(`huko model remove: invalid id: ${positional[0]}\n`);
-      usage();
-    }
-    return await modelRemoveCommand({ id });
+    return await modelRemoveCommand({
+      ref: positional[0]!,
+      ...(project ? { project: true } : {}),
+    });
   }
 
-  if (verb === "default") {
+  if (verb === "current") {
+    let project = false;
     const positional: string[] = [];
     for (const arg of rest.slice(1)) {
       if (arg === "-h" || arg === "--help") usage(0);
+      if (arg === "--project") {
+        project = true;
+        continue;
+      }
       if (arg.startsWith("--")) {
         process.stderr.write(`huko: unknown flag: ${arg}\n`);
         usage();
@@ -120,17 +138,15 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       positional.push(arg);
     }
     if (positional.length === 0) {
-      return await modelDefaultCommand({});
+      return await modelCurrentCommand({});
     }
     if (positional.length === 1) {
-      const id = Number(positional[0]!);
-      if (!Number.isFinite(id) || !Number.isInteger(id) || id <= 0) {
-        process.stderr.write(`huko model default: invalid id: ${positional[0]}\n`);
-        usage();
-      }
-      return await modelDefaultCommand({ id });
+      return await modelCurrentCommand({
+        modelId: positional[0]!,
+        ...(project ? { project: true } : {}),
+      });
     }
-    process.stderr.write("huko model default: at most one <id>\n");
+    process.stderr.write("huko model current: at most one <modelId>\n");
     usage();
   }
 

@@ -15,13 +15,10 @@
  * files; index.ts keeps only the top-level routing table.
  */
 
+import { bold, type ColorStream, cyan, dim } from "../colors.js";
+
 /**
  * Thrown by `usage()` and similar "stop now with this exit code" sites.
- *
- * Caught at exactly one place — `index.ts:main()` — which maps it to
- * the actual `process.exit(code)`. Anywhere else (tests, REPL host,
- * tRPC adapter) catches it and decides what to do with the code
- * without the process dying.
  */
 export class CliExitError extends Error {
   readonly code: number;
@@ -39,78 +36,117 @@ export class CliExitError extends Error {
  * **stdout** so it can be piped into `less`. Any other code is treated
  * as a usage error → help goes to **stderr** so stdout stays usable
  * for whatever the caller was trying to capture.
+ *
+ * Help text is colored when the relevant stream is a TTY:
+ *   - section headers (`Commands:`, `Options for X:`, ...) bold
+ *   - command names (`setup`, `run`, `sessions list`) cyan
+ *   - flag prefixes (`--memory`, `--format=`) cyan
+ *   - example comments (`# ...`) dim
+ *   - exit code numbers cyan
+ *
+ * Pipes / `huko --help | less` strip the colors automatically.
  */
 export function usage(exitCode: number = 3): never {
   const out = exitCode === 0 ? process.stdout : process.stderr;
+  const stream: ColorStream = exitCode === 0 ? "stdout" : "stderr";
+
+  // Local helpers that capture the right stream.
+  const h = (s: string) => bold(s, stream);
+  const c = (s: string) => cyan(s, stream);
+  const d = (s: string) => dim(s, stream);
+
+  /**
+   * Format a "command" or "option" row: pad the indent + cyan-paint the
+   * name, leave the description plain. Width is fixed (30 cols) to match
+   * the existing layout.
+   */
+  const COL = 30;
+  function pad(s: string, w: number): string {
+    return s.length >= w ? s + " " : s + " ".repeat(w - s.length);
+  }
+  function row(name: string, desc: string): string {
+    return `  ${c(pad(name, COL - 2))} ${desc}`;
+  }
+  /** Same as row(), but the description has a "default" tail to dim. */
+  function rowWithDefault(name: string, desc: string, def: string): string {
+    return `  ${c(pad(name, COL - 2))} ${desc} ${d(def)}`;
+  }
+
   out.write(
     [
-      "Usage: huko <command> [args] [options]",
+      `${h("Usage:")} huko ${c("<command>")} [args] [options]`,
       "",
-      "Commands:",
-      "  run <prompt>                  Append to active session (creates one if none)",
-      "  sessions list                 List chat sessions in the local DB",
-      "  sessions delete <id>          Delete a chat session and its tasks/entries",
-      "  sessions current              Show the active chat-session id for this cwd",
-      "  sessions switch <id>          Set <id> as the active session for this cwd",
-      "  sessions new [opts]           Create a new (empty) session and set it active",
-      "  provider list                 List configured LLM providers",
-      "  provider add <flags>          Add a provider definition (no key value)",
-      "  provider remove <id|name>     Delete a provider (cascades to its models)",
-      "  model list                    List models linked to providers",
-      "  model add <flags>             Add a model linked to a provider",
-      "  model remove <id>             Delete a model",
-      "  model default [<id>]          Show or set the system-default model",
-      "  keys set <ref> <value>        Save a key to <cwd>/.huko/keys.json (chmod 600)",
-      "  keys unset <ref>              Remove a key from <cwd>/.huko/keys.json",
-      "  keys list                     Show every ref + which layer resolves it",
-      "  config show                   Print the resolved huko config (layered)",
+      h("Commands:"),
+      row("setup", "Interactive wizard: provider + key + model"),
+      row("run <prompt>", "Append to active session (creates one if none)"),
+      row("sessions list", "List chat sessions in the local DB"),
+      row("sessions delete <id>", "Delete a chat session and its tasks/entries"),
+      row("sessions current", "Show the active chat-session id for this cwd"),
+      row("sessions switch <id>", "Set <id> as the active session for this cwd"),
+      row("sessions new [opts]", "Create a new (empty) session and set it active"),
+      row("provider list", "List configured LLM providers (merged view)"),
+      row("provider add <flags>", `Add a provider; ${c("--project")} for project layer`),
+      row("provider remove <name>", `Remove a provider; ${c("--project")} for project layer`),
+      row("provider current [<name>]", "Show or set the current provider"),
+      row("model list", "List models (merged view + source column)"),
+      row("model add <flags>", `Add a model; ${c("--project")} for project layer`),
+      row("model remove <ref>", "<ref> = providerName/modelId; --project supported"),
+      row("model current [<modelId>]", "Show or set the current model (paired with provider)"),
+      row("keys set <ref> <value>", "Save a key (project keys.json by default)"),
+      row("keys unset <ref>", "Remove a key from project keys.json"),
+      row("keys list", "Show every ref + which layer resolves it"),
+      row("config show", "Print the resolved huko config (layered)"),
+      row("info [scope]", `Show full configuration (scope: ${c("global")} | ${c("project")} | ${c("builtin")})`),
       "",
-      "Options for `run`:",
-      "  --format=<fmt>                text | jsonl | json   (default: text)",
-      "  --json | --jsonl              Shortcuts for --format=...",
-      "  --title=<text>                Title for the NEW session (if one is created)",
-      "  --memory                      Both DBs in memory; state.json untouched",
-      "  --role=<name>                 Role (default: coding)",
-      "  --new                         Force a fresh session and switch active to it",
-      "  --session=<id>                One-off send to <id>; active pointer untouched",
+      h("Options for `run`:"),
+      rowWithDefault("--format=<fmt>", "text | jsonl | json", "(default: text)"),
+      row("--json | --jsonl", "Shortcuts for --format=..."),
+      row("--title=<text>", "Title for the NEW session (if one is created)"),
+      row("--memory", "Session DB in memory; state.json untouched"),
+      rowWithDefault("--role=<name>", "Role", "(default: coding)"),
+      row("--new", "Force a fresh session and switch active to it"),
+      row("--session=<id>", "One-off send to <id>; active pointer untouched"),
       "",
-      "Options for `provider add`:",
-      "  --name=<text>                 Display name (required)",
-      "  --protocol=<openai|anthropic> Protocol (required)",
-      "  --base-url=<url>              http(s) endpoint (required)",
-      "  --api-key-ref=<name>          Logical key name (required); resolved at run",
-      "                                time from <cwd>/.huko/keys.json | env | .env",
-      "  --header=<K=V>                Repeatable; provider-default HTTP headers",
+      h("Options for `provider add`:"),
+      row("--name=<text>", "Provider name (required)"),
+      row("--protocol=<openai|anthropic>", "Protocol (required)"),
+      row("--base-url=<url>", "http(s) endpoint (required)"),
+      row("--api-key-ref=<name>", "Logical key name (required); resolved at run"),
+      `                                  ${d("time from keys.json | env | .env")}`,
+      row("--header=<K=V>", "Repeatable; provider-default HTTP headers"),
+      row("--project", "Write to <cwd>/.huko/providers.json instead"),
       "",
-      "Options for `model add`:",
-      "  --provider=<name|id>          Existing provider to link to (required)",
-      "  --model-id=<vendor-id>        e.g. anthropic/claude-sonnet-4 (required)",
-      "  --display-name=<text>         Defaults to --model-id",
-      "  --think-level=<lvl>           off | low | medium | high (default: off)",
-      "  --tool-call-mode=<mode>       native | xml (default: native)",
-      "  --default                     Also set as system default model",
+      h("Options for `model add`:"),
+      row("--provider=<name>", "Existing provider name (required)"),
+      row("--model-id=<vendor-id>", "e.g. claude-sonnet-4-6 (required)"),
+      row("--display-name=<text>", "Defaults to --model-id"),
+      rowWithDefault("--think-level=<lvl>", "off | low | medium | high", "(default: off)"),
+      rowWithDefault("--tool-call-mode=<mode>", "native | xml", "(default: native)"),
+      row("--current", "Also set as the current model (paired with provider)"),
+      row("--project", "Write to <cwd>/.huko/providers.json instead"),
       "",
-      "Options for `sessions list` / `provider list` / `model list`:",
-      "  --format=<fmt>                text | jsonl | json   (default: text)",
+      h("Options for `sessions list` / `provider list` / `model list`:"),
+      rowWithDefault("--format=<fmt>", "text | jsonl | json", "(default: text)"),
       "",
-      "Examples:",
-      "  # one-time setup",
-      '  huko provider add --name=OpenRouter --protocol=openai \\',
-      '                    --base-url=https://openrouter.ai/api/v1 \\',
-      '                    --api-key-ref=openrouter',
-      "  huko keys set openrouter sk-or-...",
-      '  huko model add --provider=OpenRouter \\',
-      '                 --model-id=anthropic/claude-3.5-haiku --default',
+      h("Examples:"),
+      d("  # one-time setup (interactive wizard — recommended)"),
+      `  ${c("huko setup")}`,
       "",
-      "  # daily use",
-      '  huko run "What is 2 + 2?"             # continues the active session',
-      '  huko run --new "new conversation"     # starts fresh, switches active',
-      "  huko sessions current                 # who am I talking to?",
-      "  huko sessions switch 7                # jump to session 7",
+      d("  # one-time setup (manual)"),
+      `  ${c("huko keys set")} anthropic sk-ant-...`,
+      `  ${c("huko provider current")} anthropic`,
+      `  ${c("huko model current")} claude-sonnet-4-6`,
       "",
-      "Exit codes:",
-      "  0  ok / task done    1  failed    2  task stopped",
-      "  3  usage error       4  target not found    5  lock contention",
+      d("  # daily use"),
+      `  ${c('huko run "What is 2 + 2?"')}             ${d("# continues the active session")}`,
+      `  ${c('huko run --new "new conversation"')}     ${d("# starts fresh, switches active")}`,
+      `  ${c("huko sessions current")}                 ${d("# who am I talking to?")}`,
+      `  ${c("huko sessions switch 7")}                ${d("# jump to session 7")}`,
+      "",
+      h("Exit codes:"),
+      `  ${c("0")}   ok / task done    ${c("1")}   failed              ${c("2")}   task stopped`,
+      `  ${c("3")}   usage error       ${c("4")}   target not found    ${c("5")}   lock contention`,
+      `  ${c("130")} cancelled by user (Ctrl+C)`,
       "",
     ].join("\n"),
   );

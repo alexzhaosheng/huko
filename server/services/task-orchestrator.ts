@@ -3,11 +3,7 @@
  *
  * Glue layer between transport (HTTP/WS, CLI) and the engine.
  *
- * The orchestrator speaks three interfaces:
- *
- *   - `InfraPersistence` for user-global state (providers, models,
- *     system-level default model). One instance shared across every
- *     project on the machine.
+ * The orchestrator speaks two interfaces:
  *
  *   - `SessionPersistence` for per-project state (chat sessions, tasks,
  *     entry log). One instance per `<cwd>/.huko/huko.db`.
@@ -15,6 +11,11 @@
  *   - `EmitterFactory` for outgoing `HukoEvent`s. The factory hands back
  *     an Emitter for a given room id; the orchestrator never knows
  *     whether it's Socket.IO, an in-memory collector, or stdout.
+ *
+ * Provider/model selection happens BEFORE the orchestrator is called —
+ * the caller pre-resolves a `ResolvedModel` from `loadInfraConfig({ cwd })`
+ * and passes it via `SendMessageInput.model`. The orchestrator does not
+ * touch infra config, never has a "default model" of its own.
  *
  * Out of scope:
  *   - Auth / users (huko is single-user)
@@ -36,11 +37,10 @@ import {
   type UserAttachment,
 } from "../../shared/types.js";
 import type {
-  InfraPersistence,
-  ResolvedModelConfig,
   SessionPersistence,
   TaskRow,
 } from "../persistence/index.js";
+import type { ResolvedModel } from "../config/infra-config-types.js";
 import type { TaskSummary } from "../../shared/events.js";
 import { loadRole } from "../roles/index.js";
 import { getConfig } from "../config/index.js";
@@ -56,13 +56,13 @@ export type EmitterFactory = (room: string) => Emitter;
 
 export type OrchestratorOptions = {
   /**
-   * User-global infra DB: providers, models, system defaults like
-   * default_model_id. Same instance shared across all projects.
-   */
-  infra: InfraPersistence;
-  /**
    * Per-project session DB: this project's chat sessions, tasks, and
    * the LLM-visible entry log.
+   *
+   * Provider/model selection is done by the CALLER (CLI / future router)
+   * before calling sendUserMessage — see SendMessageInput.model. The
+   * orchestrator no longer touches infra config; it just consumes the
+   * pre-resolved ResolvedModel.
    */
   session: SessionPersistence;
   emitterFactory: EmitterFactory;
@@ -72,7 +72,12 @@ export type SendMessageInput = {
   chatSessionId: number;
   content: string;
   attachments?: UserAttachment[];
-  modelId?: number;
+  /**
+   * Pre-resolved model + provider. Caller resolves this from
+   * `loadInfraConfig({ cwd })` (or equivalent). Required — orchestrator
+   * does not fall back to a default.
+   */
+  model: ResolvedModel;
   /** Role name (loaded from server/roles/ etc.). Defaults to `coding`. */
   role?: string;
   /** Working directory for this task — used to resolve project CLAUDE.md. */
@@ -88,7 +93,6 @@ export type SendMessageResult = {
 // ─── TaskOrchestrator ─────────────────────────────────────────────────────────
 
 export class TaskOrchestrator {
-  private readonly infra: InfraPersistence;
   private readonly session: SessionPersistence;
   private readonly emitterFactory: EmitterFactory;
 
@@ -99,7 +103,6 @@ export class TaskOrchestrator {
   private readonly taskCompletions = new Map<number, Promise<TaskRunSummary>>();
 
   constructor(opts: OrchestratorOptions) {
-    this.infra = opts.infra;
     this.session = opts.session;
     this.emitterFactory = opts.emitterFactory;
   }
@@ -210,7 +213,7 @@ export class TaskOrchestrator {
     sessionContext: SessionContext,
     input: SendMessageInput,
   ): Promise<SendMessageResult> {
-    const config = await this.resolveModelConfig(input.modelId);
+    const config = flattenModel(input.model);
 
     // Resolve the provider's API-key ref into the actual secret BEFORE
     // we touch the DB or build TaskContext - fail fast on missing key.
@@ -427,27 +430,38 @@ export class TaskOrchestrator {
     return sc;
   }
 
-  // ─── Internals: model config ──────────────────────────────────────────────
+}
 
-  private async resolveModelConfig(
-    modelId?: number,
-  ): Promise<ResolvedModelConfig> {
-    let id = modelId;
-    if (id == null) {
-      const def = await this.infra.config.getDefaultModelId();
-      if (def == null) {
-        throw new Error(
-          "No default model configured. Set app_config.default_model_id (number).",
-        );
-      }
-      id = def;
-    }
+// ─── Helpers: model flattening ──────────────────────────────────────────────
 
-    const config = await this.infra.models.resolveConfig(id);
-    if (!config) throw new Error(`Model id=${id} not found.`);
-
-    return config;
-  }
+/**
+ * Adapt the layered-config `ResolvedModel` (provider nested) into the
+ * flat shape the rest of the orchestrator + TaskContext expect. This
+ * exists because the TaskContext / engine were written against the old
+ * `ResolvedModelConfig` shape; flattening here keeps the engine
+ * unchanged. If we later refactor the engine to consume ResolvedModel
+ * directly, this helper goes away.
+ */
+function flattenModel(m: ResolvedModel): {
+  modelId: string;
+  protocol: import("../../shared/llm-protocol.js").Protocol;
+  baseUrl: string;
+  apiKeyRef: string;
+  toolCallMode: import("../../shared/llm-protocol.js").ToolCallMode;
+  thinkLevel: import("../../shared/llm-protocol.js").ThinkLevel;
+  defaultHeaders: Record<string, string> | null;
+  contextWindow?: number;
+} {
+  return {
+    modelId: m.modelId,
+    protocol: m.provider.protocol,
+    baseUrl: m.provider.baseUrl,
+    apiKeyRef: m.provider.apiKeyRef,
+    toolCallMode: m.defaultToolCallMode ?? "native",
+    thinkLevel: m.defaultThinkLevel ?? "off",
+    defaultHeaders: m.provider.defaultHeaders ?? null,
+    ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
+  };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

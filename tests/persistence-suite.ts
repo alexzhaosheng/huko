@@ -1,8 +1,8 @@
 /**
  * tests/persistence-suite.ts
  *
- * Shared spec for `InfraPersistence` and `SessionPersistence` so the
- * SQLite and Memory backends are tested by literally the same code,
+ * Shared spec for `SessionPersistence` so the SQLite and Memory
+ * backends are tested by literally the same code,
  * not two parallel copies. Add a behavioural test once, both backends
  * inherit it.
  *
@@ -21,10 +21,7 @@
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import { strict as assert } from "node:assert";
-import type {
-  InfraPersistence,
-  SessionPersistence,
-} from "../server/persistence/index.js";
+import type { SessionPersistence } from "../server/persistence/index.js";
 import { EntryKind, type TaskStatus } from "../shared/types.js";
 
 // A factory's return: the backend instance + a teardown to call
@@ -35,219 +32,7 @@ export type Harness<T> = {
   teardown: () => Promise<void> | void;
 };
 
-export type InfraFactory = () => Harness<InfraPersistence>;
 export type SessionFactory = () => Harness<SessionPersistence>;
-
-// ─── Infra suite ─────────────────────────────────────────────────────────────
-
-export function runInfraSuite(label: string, factory: InfraFactory): void {
-  describe(`InfraPersistence — ${label}`, () => {
-    let infra: InfraPersistence;
-    let teardown: () => Promise<void> | void;
-
-    beforeEach(() => {
-      const h = factory();
-      infra = h.instance;
-      teardown = h.teardown;
-    });
-    afterEach(async () => {
-      await teardown();
-    });
-
-    describe("providers", () => {
-      it("create + list round trip", async () => {
-        const id = await infra.providers.create({
-          name: "openrouter",
-          protocol: "openai",
-          baseUrl: "https://openrouter.ai/api/v1",
-          apiKeyRef: "openrouter",
-        });
-        assert.ok(id > 0);
-        const rows = await infra.providers.list();
-        assert.equal(rows.length, 1);
-        assert.equal(rows[0]!.id, id);
-        assert.equal(rows[0]!.name, "openrouter");
-        assert.equal(rows[0]!.apiKeyRef, "openrouter");
-        assert.equal(rows[0]!.defaultHeaders, null);
-      });
-
-      it("create accepts defaultHeaders", async () => {
-        const id = await infra.providers.create({
-          name: "p",
-          protocol: "openai",
-          baseUrl: "https://x",
-          apiKeyRef: "p",
-          defaultHeaders: { "X-Foo": "bar" },
-        });
-        const row = (await infra.providers.list()).find((r) => r.id === id)!;
-        assert.deepEqual(row.defaultHeaders, { "X-Foo": "bar" });
-      });
-
-      it("update applies a partial patch", async () => {
-        const id = await infra.providers.create({
-          name: "p", protocol: "openai", baseUrl: "https://x", apiKeyRef: "p",
-        });
-        await infra.providers.update(id, {
-          name: "renamed",
-          apiKeyRef: "new-ref",
-        });
-        const row = (await infra.providers.list()).find((r) => r.id === id)!;
-        assert.equal(row.name, "renamed");
-        assert.equal(row.apiKeyRef, "new-ref");
-        assert.equal(row.baseUrl, "https://x");
-        assert.equal(row.protocol, "openai");
-      });
-
-      it("update is a no-op when patch has no fields", async () => {
-        const id = await infra.providers.create({
-          name: "p", protocol: "openai", baseUrl: "https://x", apiKeyRef: "p",
-        });
-        await infra.providers.update(id, {});
-        const rows = await infra.providers.list();
-        assert.equal(rows.length, 1);
-        assert.equal(rows[0]!.name, "p");
-      });
-
-      it("delete removes the row", async () => {
-        const id = await infra.providers.create({
-          name: "p", protocol: "openai", baseUrl: "https://x", apiKeyRef: "p",
-        });
-        await infra.providers.delete(id);
-        assert.deepEqual(await infra.providers.list(), []);
-      });
-
-      it("delete cascades into the provider's models", async () => {
-        const pid = await infra.providers.create({
-          name: "p", protocol: "openai", baseUrl: "https://x", apiKeyRef: "p",
-        });
-        await infra.models.create({
-          providerId: pid, modelId: "m", displayName: "M",
-        });
-        await infra.providers.delete(pid);
-        assert.deepEqual(await infra.providers.list(), []);
-        assert.deepEqual(await infra.models.list(), []);
-      });
-    });
-
-    describe("models", () => {
-      it("create + list joins providerName/protocol", async () => {
-        const pid = await infra.providers.create({
-          name: "openrouter", protocol: "openai",
-          baseUrl: "https://openrouter.ai", apiKeyRef: "openrouter",
-        });
-        const mid = await infra.models.create({
-          providerId: pid,
-          modelId: "anthropic/claude-sonnet-4.5",
-          displayName: "Claude Sonnet 4.5",
-        });
-        const rows = await infra.models.list();
-        assert.equal(rows.length, 1);
-        assert.equal(rows[0]!.id, mid);
-        assert.equal(rows[0]!.modelId, "anthropic/claude-sonnet-4.5");
-        assert.equal(rows[0]!.providerName, "openrouter");
-        assert.equal(rows[0]!.providerProtocol, "openai");
-        // Defaults applied
-        assert.equal(rows[0]!.defaultThinkLevel, "off");
-        assert.equal(rows[0]!.defaultToolCallMode, "native");
-      });
-
-      it("create honours explicit thinkLevel / toolCallMode", async () => {
-        const pid = await infra.providers.create({
-          name: "p", protocol: "openai", baseUrl: "https://x", apiKeyRef: "p",
-        });
-        const mid = await infra.models.create({
-          providerId: pid,
-          modelId: "m",
-          displayName: "M",
-          defaultThinkLevel: "high",
-          defaultToolCallMode: "xml",
-        });
-        const got = (await infra.models.list()).find((m) => m.id === mid)!;
-        assert.equal(got.defaultThinkLevel, "high");
-        assert.equal(got.defaultToolCallMode, "xml");
-      });
-
-      it("resolveConfig returns the joined connection shape", async () => {
-        const pid = await infra.providers.create({
-          name: "openrouter", protocol: "openai",
-          baseUrl: "https://openrouter.ai/api/v1", apiKeyRef: "openrouter",
-          defaultHeaders: { "HTTP-Referer": "huko" },
-        });
-        const mid = await infra.models.create({
-          providerId: pid, modelId: "x/y", displayName: "X/Y",
-          defaultThinkLevel: "low", defaultToolCallMode: "native",
-        });
-        const cfg = await infra.models.resolveConfig(mid);
-        assert.ok(cfg, "resolveConfig should not be null");
-        assert.equal(cfg!.modelId, "x/y");
-        assert.equal(cfg!.protocol, "openai");
-        assert.equal(cfg!.baseUrl, "https://openrouter.ai/api/v1");
-        assert.equal(cfg!.apiKeyRef, "openrouter");
-        assert.equal(cfg!.thinkLevel, "low");
-        assert.equal(cfg!.toolCallMode, "native");
-        assert.deepEqual(cfg!.defaultHeaders, { "HTTP-Referer": "huko" });
-      });
-
-      it("resolveConfig returns null for unknown id", async () => {
-        assert.equal(await infra.models.resolveConfig(99_999), null);
-      });
-
-      it("delete removes the model", async () => {
-        const pid = await infra.providers.create({
-          name: "p", protocol: "openai", baseUrl: "https://x", apiKeyRef: "p",
-        });
-        const mid = await infra.models.create({
-          providerId: pid, modelId: "m", displayName: "M",
-        });
-        await infra.models.delete(mid);
-        assert.deepEqual(await infra.models.list(), []);
-      });
-    });
-
-    describe("config", () => {
-      it("set then get round trip", async () => {
-        await infra.config.set("answer", 42);
-        assert.equal(await infra.config.get("answer"), 42);
-      });
-
-      it("get returns null for missing key", async () => {
-        assert.equal(await infra.config.get("nope"), null);
-      });
-
-      it("set is upsert (overwrites existing key)", async () => {
-        await infra.config.set("k", "first");
-        await infra.config.set("k", "second");
-        assert.equal(await infra.config.get("k"), "second");
-        const all = await infra.config.list();
-        assert.equal(all.filter((r) => r.key === "k").length, 1);
-      });
-
-      it("list returns all rows", async () => {
-        await infra.config.set("a", 1);
-        await infra.config.set("b", "two");
-        const map = Object.fromEntries(
-          (await infra.config.list()).map((r) => [r.key, r.value]),
-        );
-        assert.equal(map["a"], 1);
-        assert.equal(map["b"], "two");
-      });
-
-      it("getDefaultModelId returns null when unset", async () => {
-        assert.equal(await infra.config.getDefaultModelId(), null);
-      });
-
-      it("setDefaultModelId / getDefaultModelId round trip", async () => {
-        await infra.config.setDefaultModelId(7);
-        assert.equal(await infra.config.getDefaultModelId(), 7);
-      });
-
-      it("getDefaultModelId returns null when stored value isn't numeric", async () => {
-        await infra.config.set("default_model_id", "not-a-number");
-        assert.equal(await infra.config.getDefaultModelId(), null);
-      });
-    });
-  });
-}
 
 // ─── Session suite ──────────────────────────────────────────────────────────
 

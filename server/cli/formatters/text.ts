@@ -12,11 +12,15 @@
 
 import type { Emitter } from "../../engine/SessionContext.js";
 import type { Formatter } from "./types.js";
+// Reuse the shared TTY-aware helpers — same colors as static CLI output,
+// stays plain when stderr/stdout aren't TTYs (so `huko run > out.txt`
+// captures clean text).
+import { dim, magenta, red, yellow } from "../colors.js";
 
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
-const magenta = (s: string) => `\x1b[35m${s}\x1b[0m`;
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+const dimErr = (s: string) => dim(s, "stderr");
+const yellowErr = (s: string) => yellow(s, "stderr");
+const magentaErr = (s: string) => magenta(s, "stderr");
+const redErr = (s: string) => red(s, "stderr");
 
 export function makeTextFormatter(): Formatter {
   let assistantStreaming = false;
@@ -39,7 +43,7 @@ export function makeTextFormatter(): Formatter {
 
         case "assistant_thinking_delta":
           // Thinking is diagnostic-ish; dim, on stderr.
-          process.stderr.write(dim(event.delta));
+          process.stderr.write(dimErr(event.delta));
           break;
 
         case "assistant_complete":
@@ -51,7 +55,7 @@ export function makeTextFormatter(): Formatter {
             printedToolCallsFor.add(event.entryId);
             for (const c of event.toolCalls) {
               process.stderr.write(
-                dim(`  → ${c.name}(${JSON.stringify(c.arguments)})`) + "\n",
+                dimErr(`  → ${c.name}(${JSON.stringify(c.arguments)})`) + "\n",
               );
             }
           }
@@ -61,19 +65,19 @@ export function makeTextFormatter(): Formatter {
           const preview =
             event.content.length > 200 ? event.content.slice(0, 200) + "…" : event.content;
           if (event.error) {
-            process.stderr.write(red(`  ← ${event.toolName}: error: ${event.error}`) + "\n");
+            process.stderr.write(redErr(`  ← ${event.toolName}: error: ${event.error}`) + "\n");
           } else {
-            process.stderr.write(yellow(`  ← ${event.toolName}: ${preview}`) + "\n");
+            process.stderr.write(yellowErr(`  ← ${event.toolName}: ${preview}`) + "\n");
           }
           break;
         }
 
         case "system_reminder":
-          process.stderr.write(magenta(`[reminder] ${event.content}`) + "\n");
+          process.stderr.write(magentaErr(`[reminder] ${event.content}`) + "\n");
           break;
 
         case "system_notice":
-          process.stderr.write(red(`[notice/${event.severity}] ${event.content}`) + "\n");
+          process.stderr.write(redErr(`[notice/${event.severity}] ${event.content}`) + "\n");
           break;
 
         case "orphan_recovered": {
@@ -85,7 +89,7 @@ export function makeTextFormatter(): Formatter {
               ? ` (${event.danglingToolCount} synthetic tool_result(s) injected for pairing)`
               : "";
           process.stderr.write(
-            yellow(
+            yellowErr(
               `[orphan recovered] task #${event.taskId} (${event.sessionType} session #${event.sessionId}): ${event.reason}${tail}`,
             ) + "\n",
           );
@@ -107,14 +111,14 @@ export function makeTextFormatter(): Formatter {
     },
     onSummary(summary) {
       process.stderr.write(
-        dim(
+        dimErr(
           `\n[${summary.status}] ${summary.totalTokens} tokens · ${summary.iterationCount} iter · ${summary.toolCallCount} tools · ${summary.elapsedMs}ms`,
         ) + "\n",
       );
     },
     onError(err) {
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(red(`\n[error] ${msg}`) + "\n");
+      process.stderr.write(redErr(`\n[error] ${msg}`) + "\n");
     },
   };
 }

@@ -3,23 +3,28 @@
  *
  * Shared CLI orchestrator setup.
  *
- * Bootstrap deals in `InfraPersistence` + `SessionPersistence` abstractions.
- * It does NOT know about migrations, file paths, schema, or any other
- * backend implementation detail — those are each backend's own concern
- * (e.g. SqliteSessionPersistence runs its own migrations, auto-creates
- * `<cwd>/.huko/.gitignore`, etc., from its constructor).
+ * Bootstrap deals in:
+ *   - `InfraConfig` — providers, models, default model. Loaded from
+ *     layered JSON files via `loadInfraConfig({ cwd })`. Built-ins +
+ *     `~/.huko/providers.json` (global) + `<cwd>/.huko/providers.json`
+ *     (project), merged. NO database — providers/models are config.
+ *   - `SessionPersistence` — chat sessions, tasks, entries. Per-project
+ *     SQLite at `<cwd>/.huko/huko.db`, OR Memory in `--memory` mode.
+ *   - `TaskOrchestrator` — built around the SessionPersistence; receives
+ *     a pre-resolved ResolvedModel per call from the caller (run.ts).
  *
  * Two modes:
  *
  *   1. Default (persistent):
- *        - SqliteInfraPersistence at ~/.huko/infra.db
  *        - SqliteSessionPersistence at <cwd>/.huko/huko.db
  *
  *   2. Ephemeral (`{ ephemeral: true }`, surfaced as `--memory` on the CLI):
- *        - MemoryInfraPersistence (seeded from disk infra DB at startup,
- *          then disconnected — your saved providers/models are visible
- *          but no writes hit disk this run)
  *        - MemorySessionPersistence (sessions/tasks/entries vanish on exit)
+ *
+ * Note: `--memory` only swaps the SESSION layer. InfraConfig is read
+ * from the same JSON files in both modes — the user's saved
+ * providers/models always apply. (Old design rebuilt a Memory infra
+ * from a Sqlite seed; that hack is gone with the JSON layering.)
  *
  * Orphan recovery: persistent mode runs `recoverOrphans()` once and
  * emits one `orphan_recovered` HukoEvent per healed task to
@@ -33,24 +38,21 @@
  */
 
 import {
-  MemoryInfraPersistence,
   MemorySessionPersistence,
-  SqliteInfraPersistence,
   SqliteSessionPersistence,
-  type InfraPersistence,
   type SessionPersistence,
 } from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
-import { loadConfig } from "../config/index.js";
+import { loadConfig, loadInfraConfig, type InfraConfig } from "../config/index.js";
 import type { Formatter } from "./formatters/index.js";
 
 export type BootstrapOptions = {
-  /** When true, both DBs run in memory; infra is seeded from disk. */
+  /** When true, the session DB is in-memory; .huko/state.json untouched. */
   ephemeral?: boolean;
 };
 
 export type CliBootstrap = {
-  infra: InfraPersistence;
+  infra: InfraConfig;
   session: SessionPersistence;
   orchestrator: TaskOrchestrator;
   shutdown(): void;
@@ -60,19 +62,23 @@ export async function bootstrap(
   formatter: Formatter,
   options: BootstrapOptions = {},
 ): Promise<CliBootstrap> {
-  // Load config FIRST — kernel modules read it via getConfig() at task
+  // Load runtime config FIRST — kernel modules read it via getConfig() at task
   // start. Layered: defaults < ~/.huko/config.json < <cwd>/.huko/config.json
   // < HUKO_CONFIG env. See docs/modules/config.md.
   loadConfig({ cwd: process.cwd() });
 
-  const { infra, session } = options.ephemeral
-    ? await buildEphemeralPersistences()
-    : buildPersistentPersistences();
+  // Infra config is sync, file-based. Same in both persistent and
+  // ephemeral modes — providers / models are user configuration, not
+  // session state.
+  const infra = loadInfraConfig({ cwd: process.cwd() });
+
+  const session: SessionPersistence = options.ephemeral
+    ? new MemorySessionPersistence()
+    : new SqliteSessionPersistence({ cwd: process.cwd() });
 
   // Single formatter for the whole process — the CLI is one task at a time,
   // so we don't need per-room emitters. The factory ignores the room arg.
   const orchestrator = new TaskOrchestrator({
-    infra,
     session,
     emitterFactory: (_room: string) => formatter.emitter,
   });
@@ -84,8 +90,6 @@ export async function bootstrap(
   if (!options.ephemeral) {
     const report = await orchestrator.recoverOrphans();
     if (report.healed > 0) {
-      // Emit per-task semantic events. The text formatter renders these
-      // yellow; jsonl/json formatters serialise as-is.
       const now = Date.now();
       for (const rec of report.records) {
         formatter.emitter.emit({
@@ -111,97 +115,6 @@ export async function bootstrap(
       } catch {
         /* already closed */
       }
-      try {
-        void infra.close();
-      } catch {
-        /* already closed */
-      }
     },
   };
-}
-
-// ─── Persistent mode ─────────────────────────────────────────────────────────
-
-function buildPersistentPersistences(): {
-  infra: InfraPersistence;
-  session: SessionPersistence;
-} {
-  const infra = new SqliteInfraPersistence();
-  const session = new SqliteSessionPersistence({ cwd: process.cwd() });
-  return { infra, session };
-}
-
-// ─── Ephemeral mode ──────────────────────────────────────────────────────────
-
-/**
- * Build memory-backed persistences. Infra is seeded from the on-disk
- * infra DB so the user's saved providers/models still apply, then the
- * SQLite connection is closed. Session is a fresh in-memory store.
- */
-async function buildEphemeralPersistences(): Promise<{
-  infra: InfraPersistence;
-  session: SessionPersistence;
-}> {
-  const memInfra = new MemoryInfraPersistence();
-  const memSession = new MemorySessionPersistence();
-
-  const diskInfra = new SqliteInfraPersistence();
-  try {
-    await seedInfraFromSource(memInfra, diskInfra);
-  } finally {
-    try {
-      void diskInfra.close();
-    } catch {
-      /* already closed */
-    }
-  }
-
-  return { infra: memInfra, session: memSession };
-}
-
-/**
- * Copy providers, models and default_model_id from `source` into `target`,
- * preserving foreign-key relationships. Ids may be reassigned by the
- * target — local maps keep model.providerId and the default_model_id
- * config value pointing to the right new rows.
- */
-async function seedInfraFromSource(
-  target: InfraPersistence,
-  source: InfraPersistence,
-): Promise<void> {
-  const sourceProviders = await source.providers.list();
-  const providerIdMap = new Map<number, number>();
-  for (const p of sourceProviders) {
-    const newId = await target.providers.create({
-      name: p.name,
-      protocol: p.protocol,
-      baseUrl: p.baseUrl,
-      apiKeyRef: p.apiKeyRef,
-      defaultHeaders: p.defaultHeaders ?? null,
-    });
-    providerIdMap.set(p.id, newId);
-  }
-
-  const sourceModels = await source.models.list();
-  const modelIdMap = new Map<number, number>();
-  for (const m of sourceModels) {
-    const newProviderId = providerIdMap.get(m.providerId);
-    if (newProviderId === undefined) continue;
-    const newId = await target.models.create({
-      providerId: newProviderId,
-      modelId: m.modelId,
-      displayName: m.displayName,
-      defaultThinkLevel: m.defaultThinkLevel,
-      defaultToolCallMode: m.defaultToolCallMode,
-    });
-    modelIdMap.set(m.id, newId);
-  }
-
-  const oldDefault = await source.config.getDefaultModelId();
-  if (oldDefault !== null) {
-    const newDefault = modelIdMap.get(oldDefault);
-    if (newDefault !== undefined) {
-      await target.config.setDefaultModelId(newDefault);
-    }
-  }
 }

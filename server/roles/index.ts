@@ -35,9 +35,9 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import * as os from "node:os";
+import { BUILTIN_ROLES } from "./builtin-roles.js";
 import { parseYamlSubset } from "./yaml-frontmatter.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -87,16 +87,6 @@ export type Role = {
 
 // ─── Path resolution ─────────────────────────────────────────────────────────
 
-/**
- * Resolve the built-in roles directory. Computes from this module's
- * location so it works regardless of how huko was invoked / installed.
- */
-function builtinRolesDir(): string {
-  const here = fileURLToPath(import.meta.url);
-  // here = .../server/roles/index.{ts,js}
-  return path.dirname(here);
-}
-
 function userRolesDir(): string {
   return path.join(os.homedir(), ".huko", "roles");
 }
@@ -118,13 +108,15 @@ export async function loadRole(
   name: string,
   cwd: string = process.cwd(),
 ): Promise<Role> {
-  const candidates: Array<{ source: Role["source"]; path: string }> = [
+  // Two filesystem layers (project + user) plus a memory layer (builtin).
+  // Filesystem layers shadow the built-in if present; the built-in map
+  // is bundled into dist/cli.js so it works in any install layout.
+  const fsLayers: Array<{ source: Role["source"]; path: string }> = [
     { source: "project", path: path.join(projectRolesDir(cwd), `${name}.md`) },
     { source: "user", path: path.join(userRolesDir(), `${name}.md`) },
-    { source: "builtin", path: path.join(builtinRolesDir(), `${name}.md`) },
   ];
 
-  for (const c of candidates) {
+  for (const c of fsLayers) {
     const raw = await tryRead(c.path);
     if (raw === null) continue;
 
@@ -140,9 +132,27 @@ export async function loadRole(
     };
   }
 
+  // Built-in fallback: BUILTIN_ROLES is `{ name: rawMarkdown }`. Source
+  // for diagnostics is a synthetic identifier since there's no real path.
+  const builtinRaw = BUILTIN_ROLES[name];
+  if (builtinRaw !== undefined) {
+    const synthetic = `(builtin: ${name})`;
+    const { frontmatter: fmRaw, body: bodyRaw } = splitFrontmatter(builtinRaw);
+    const frontmatter = fmRaw === null ? {} : parseFrontmatter(fmRaw, synthetic);
+    return {
+      name,
+      source: "builtin",
+      path: synthetic,
+      frontmatter,
+      body: bodyRaw.trim(),
+    };
+  }
+
+  const builtinNames = Object.keys(BUILTIN_ROLES).sort();
   throw new Error(
     `Role "${name}" not found. Searched:\n` +
-      candidates.map((c) => `  - ${c.path} (${c.source})`).join("\n"),
+      fsLayers.map((c) => `  - ${c.path} (${c.source})`).join("\n") +
+      `\n  - built-in roles: ${builtinNames.join(", ") || "(none)"}`,
   );
 }
 

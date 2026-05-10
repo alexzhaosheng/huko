@@ -11,16 +11,8 @@
  * lives in `sqlite-session.test.ts`.
  */
 
-import {
-  MemoryInfraPersistence,
-  MemorySessionPersistence,
-} from "../server/persistence/memory.js";
-import { runInfraSuite, runSessionSuite } from "./persistence-suite.js";
-
-runInfraSuite("memory", () => {
-  const instance = new MemoryInfraPersistence();
-  return { instance, teardown: () => instance.close() };
-});
+import { MemorySessionPersistence } from "../server/persistence/memory.js";
+import { runSessionSuite } from "./persistence-suite.js";
 
 runSessionSuite("memory", () => {
   const instance = new MemorySessionPersistence();

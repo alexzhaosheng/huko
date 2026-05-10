@@ -151,14 +151,22 @@ export async function runCommand(args: RunArgs): Promise<number> {
       ...(args.ephemeral ? { ephemeral: true } : {}),
     });
 
-    // Default model check — without one we can't proceed.
-    const defaultId = await ctx.infra.config.getDefaultModelId();
-    if (defaultId == null) {
+    // Current provider + model check. Both come from the merged
+    // InfraConfig (built-in pointers seeded by builtin-providers.ts;
+    // overridable in ~/.huko/providers.json or <cwd>/.huko/providers.json
+    // via `currentProvider` / `currentModel`). Built-ins point at
+    // anthropic/claude-sonnet-4-6 so this branch fires only if the user
+    // explicitly cleared one of them and we can't pair them up.
+    const model = ctx.infra.currentModel;
+    if (model === null) {
+      const cp = ctx.infra.currentProvider;
+      const cpName = cp ? cp.name : "(none)";
       process.stderr.write(
-        "huko: no default model configured.\n" +
-          "  Configure one with `huko provider add ...` + `huko keys set ...` +\n" +
-          "  `huko model add ... --default`, or run `npx tsx scripts/orchestrator-demo.ts`\n" +
-          "  once to seed an OpenRouter setup.\n",
+        `huko: no usable current model.\n` +
+          `  current provider: ${cpName} (set in: ${ctx.infra.currentProviderSource ?? "—"})\n` +
+          `  current model:    (none / unresolved)\n` +
+          `  Fix with:  huko provider current <name>  +  huko model current <modelId>\n` +
+          `  Or list: huko model list\n`,
       );
       return 3;
     }
@@ -207,6 +215,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
     const result = await ctx.orchestrator.sendUserMessage({
       chatSessionId,
       content: args.prompt,
+      model,
       ...(args.role !== undefined ? { role: args.role } : {}),
     });
     runtime.activeTaskId = result.taskId;

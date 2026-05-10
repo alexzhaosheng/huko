@@ -1,32 +1,6 @@
 /**
  * server/routers/config.ts
  *
- * `config.*` procedures — generic key-value access into app_config.
- *
- * Most-used keys (default_model_id) have dedicated procedures elsewhere
- * (model.setDefault). This router is the fallback for ui_theme,
- * stream_flush_ms, and similar.
+ * STUB — daemon routers are parked. See server/core/app.ts.
  */
-
-import { z } from "zod";
-import { router, publicProcedure } from "./trpc.js";
-
-export const configRouter = router({
-  get: publicProcedure
-    .input(z.object({ key: z.string().min(1).max(100) }))
-    .query(async ({ ctx, input }) => {
-      const value = await ctx.infra.config.get(input.key);
-      return { value };
-    }),
-
-  set: publicProcedure
-    .input(z.object({ key: z.string().min(1).max(100), value: z.unknown() }))
-    .mutation(async ({ ctx, input }) => {
-      await ctx.infra.config.set(input.key, input.value);
-      return { ok: true };
-    }),
-
-  list: publicProcedure.query(async ({ ctx }) => {
-    return ctx.infra.config.list();
-  }),
-});
+export {};

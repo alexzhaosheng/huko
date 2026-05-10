@@ -15,24 +15,41 @@ import { join } from "node:path";
 import {
   describeKeySource,
   envVarNameFor,
+  listGlobalKeyRefs,
   listProjectKeyRefs,
   resolveApiKey,
+  setGlobalKey,
   setProjectKey,
+  unsetGlobalKey,
   unsetProjectKey,
 } from "../server/security/keys.js";
 
 let cwd: string;
+let tmpHome: string;
+let savedHome: string | undefined;
+let savedUserProfile: string | undefined;
 const TEST_REF = "test_provider";
 const TEST_ENV_NAME = "TEST_PROVIDER_API_KEY";
 
 beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "huko-keys-test-"));
+  tmpHome = mkdtempSync(join(tmpdir(), "huko-keys-home-"));
+  savedHome = process.env["HOME"];
+  savedUserProfile = process.env["USERPROFILE"];
+  // os.homedir() honours HOME on POSIX, USERPROFILE on Windows. Set both.
+  process.env["HOME"] = tmpHome;
+  process.env["USERPROFILE"] = tmpHome;
   delete process.env[TEST_ENV_NAME];
 });
 
 afterEach(() => {
+  if (savedHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = savedHome;
+  if (savedUserProfile === undefined) delete process.env["USERPROFILE"];
+  else process.env["USERPROFILE"] = savedUserProfile;
   delete process.env[TEST_ENV_NAME];
   rmSync(cwd, { recursive: true, force: true });
+  rmSync(tmpHome, { recursive: true, force: true });
 });
 
 describe("envVarNameFor", () => {
@@ -66,6 +83,24 @@ describe("resolveApiKey priority", () => {
   it("layer 3 wins when both above absent: .env", () => {
     writeFileSync(join(cwd, ".env"), `${TEST_ENV_NAME}=from-dotenv\n`);
     assert.equal(resolveApiKey(TEST_REF, { cwd }), "from-dotenv");
+  });
+
+  it("project keys.json beats global keys.json", () => {
+    setGlobalKey(TEST_REF, "from-global");
+    setProjectKey(TEST_REF, "from-project", { cwd });
+    assert.equal(resolveApiKey(TEST_REF, { cwd }), "from-project");
+  });
+
+  it("global keys.json beats env when project is absent", () => {
+    setGlobalKey(TEST_REF, "from-global");
+    process.env[TEST_ENV_NAME] = "from-env";
+    assert.equal(resolveApiKey(TEST_REF, { cwd }), "from-global");
+  });
+
+  it("global keys.json beats .env when env is absent", () => {
+    setGlobalKey(TEST_REF, "from-global");
+    writeFileSync(join(cwd, ".env"), `${TEST_ENV_NAME}=from-dotenv\n`);
+    assert.equal(resolveApiKey(TEST_REF, { cwd }), "from-global");
   });
 
   it("throws when no layer has a value", () => {
@@ -105,6 +140,11 @@ describe("describeKeySource", () => {
     });
   });
 
+  it("reports global layer when only global keys.json has it", () => {
+    setGlobalKey(TEST_REF, "x");
+    assert.equal(describeKeySource(TEST_REF, { cwd }).layer, "global");
+  });
+
   it("reports env layer", () => {
     process.env[TEST_ENV_NAME] = "x";
     assert.equal(describeKeySource(TEST_REF, { cwd }).layer, "env");
@@ -113,6 +153,48 @@ describe("describeKeySource", () => {
   it("reports dotenv layer", () => {
     writeFileSync(join(cwd, ".env"), `${TEST_ENV_NAME}=x\n`);
     assert.equal(describeKeySource(TEST_REF, { cwd }).layer, "dotenv");
+  });
+});
+
+describe("setGlobalKey / unsetGlobalKey / listGlobalKeyRefs", () => {
+  it("set then list returns the ref name only (no value leak)", () => {
+    setGlobalKey(TEST_REF, "secret-12345");
+    const refs = listGlobalKeyRefs();
+    assert.deepEqual(refs, [TEST_REF]);
+  });
+
+  it("set merges with existing global keys.json", () => {
+    setGlobalKey("a", "x");
+    setGlobalKey("b", "y");
+    const refs = listGlobalKeyRefs().sort();
+    assert.deepEqual(refs, ["a", "b"]);
+  });
+
+  it("rejects empty ref or empty value", () => {
+    assert.throws(() => setGlobalKey("", "x"));
+    assert.throws(() => setGlobalKey("a", ""));
+  });
+
+  it("unset returns false when ref absent", () => {
+    assert.equal(unsetGlobalKey("not-there"), false);
+  });
+
+  it("unset returns true and removes the ref", () => {
+    setGlobalKey("a", "x");
+    assert.equal(unsetGlobalKey("a"), true);
+    assert.deepEqual(listGlobalKeyRefs(), []);
+  });
+
+  it("global writes don't touch project file (and vice versa)", () => {
+    setGlobalKey(TEST_REF, "global-value");
+    setProjectKey(TEST_REF, "project-value", { cwd });
+    assert.deepEqual(listGlobalKeyRefs(), [TEST_REF]);
+    assert.deepEqual(listProjectKeyRefs({ cwd }), [TEST_REF]);
+    // resolver picks project (higher precedence)
+    assert.equal(resolveApiKey(TEST_REF, { cwd }), "project-value");
+    // unsetting project falls back to global
+    unsetProjectKey(TEST_REF, { cwd });
+    assert.equal(resolveApiKey(TEST_REF, { cwd }), "global-value");
   });
 });
 

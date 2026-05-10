@@ -5,15 +5,20 @@
   "engines": {
     "node": "24.x"
   },
+  "bin": {
+    "huko": "./bin/huko.mjs"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
   "scripts": {
-    "dev": "cross-env NODE_ENV=development tsx watch server/core/app.ts",
-    "build": "esbuild server/core/app.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
     "build:cli": "esbuild server/cli/index.ts --platform=node --packages=external --bundle --format=esm --outfile=dist/cli.js",
-    "start": "cross-env NODE_ENV=production node dist/app.js",
     "check": "tsc --noEmit",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "huko": "tsx server/cli/index.ts",
-    "test": "node --import tsx --test \"tests/*.test.ts\""
+    "test": "node --import tsx --test \"tests/*.test.ts\"",
+    "prepublishOnly": "npm run check && npm run build:cli"
   },
   "dependencies": {
     "@trpc/client": "^11.0.0",

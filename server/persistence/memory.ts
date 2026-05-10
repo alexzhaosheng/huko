@@ -1,7 +1,9 @@
 /**
  * server/persistence/memory.ts
  *
- * In-memory implementations of `InfraPersistence` and `SessionPersistence`.
+ * In-memory implementation of `SessionPersistence`. The infra-config
+ * sibling went away when providers/models moved to JSON files (see
+ * server/config/infra-config.ts).
  *
  * For:
  *   - `huko run --memory` (one-shot, no disk side effects)
@@ -19,141 +21,14 @@ import type { LLMMessage, ToolCall } from "../core/llm/types.js";
 import type { EntryKind, SessionType } from "../../shared/types.js";
 import type {
   ChatSessionRow,
-  ConfigRow,
   CreateChatSessionInput,
-  CreateModelInput,
-  CreateProviderInput,
   CreateTaskInput,
   CreateTaskWithInitialEntryInput,
   EntryRow,
-  InfraPersistence,
-  ModelRow,
-  ModelRowJoined,
-  ProviderRow,
-  ResolvedModelConfig,
   SessionPersistence,
   TaskRow,
-  UpdateProviderPatch,
   UpdateTaskPatch,
 } from "./types.js";
-
-// ─── MemoryInfraPersistence ──────────────────────────────────────────────────
-
-export class MemoryInfraPersistence implements InfraPersistence {
-  private nextId = 1;
-  private readonly _providers = new Map<number, ProviderRow>();
-  private readonly _models = new Map<number, ModelRow>();
-  private readonly _config = new Map<string, ConfigRow>();
-
-  readonly providers: InfraPersistence["providers"];
-  readonly models: InfraPersistence["models"];
-  readonly config: InfraPersistence["config"];
-
-  constructor() {
-    const allocId = (): number => this.nextId++;
-    const now = (): number => Date.now();
-
-    this.providers = {
-      list: async () => [...this._providers.values()],
-      create: async (input: CreateProviderInput) => {
-        const id = allocId();
-        this._providers.set(id, {
-          id,
-          name: input.name,
-          protocol: input.protocol,
-          baseUrl: input.baseUrl,
-          apiKeyRef: input.apiKeyRef,
-          defaultHeaders: input.defaultHeaders ?? null,
-          createdAt: now(),
-        });
-        return id;
-      },
-      update: async (id, patch: UpdateProviderPatch) => {
-        const existing = this._providers.get(id);
-        if (!existing) return;
-        const next: ProviderRow = { ...existing };
-        if (patch.name !== undefined) next.name = patch.name;
-        if (patch.protocol !== undefined) next.protocol = patch.protocol;
-        if (patch.baseUrl !== undefined) next.baseUrl = patch.baseUrl;
-        if (patch.apiKeyRef !== undefined) next.apiKeyRef = patch.apiKeyRef;
-        if (patch.defaultHeaders !== undefined) next.defaultHeaders = patch.defaultHeaders;
-        this._providers.set(id, next);
-      },
-      delete: async (id) => {
-        this._providers.delete(id);
-        for (const [mid, m] of this._models) {
-          if (m.providerId === id) this._models.delete(mid);
-        }
-      },
-    };
-
-    this.models = {
-      list: async (): Promise<ModelRowJoined[]> => {
-        const out: ModelRowJoined[] = [];
-        for (const m of this._models.values()) {
-          const p = this._providers.get(m.providerId);
-          if (!p) continue;
-          out.push({ ...m, providerName: p.name, providerProtocol: p.protocol });
-        }
-        return out;
-      },
-      create: async (input: CreateModelInput) => {
-        const id = allocId();
-        this._models.set(id, {
-          id,
-          providerId: input.providerId,
-          modelId: input.modelId,
-          displayName: input.displayName,
-          defaultThinkLevel: input.defaultThinkLevel ?? "off",
-          defaultToolCallMode: input.defaultToolCallMode ?? "native",
-          createdAt: now(),
-        });
-        return id;
-      },
-      delete: async (id) => {
-        this._models.delete(id);
-      },
-      resolveConfig: async (modelId): Promise<ResolvedModelConfig | null> => {
-        const m = this._models.get(modelId);
-        if (!m) return null;
-        const p = this._providers.get(m.providerId);
-        if (!p) return null;
-        return {
-          modelId: m.modelId,
-          protocol: p.protocol,
-          baseUrl: p.baseUrl,
-          apiKeyRef: p.apiKeyRef,
-          toolCallMode: m.defaultToolCallMode,
-          thinkLevel: m.defaultThinkLevel,
-          defaultHeaders: p.defaultHeaders,
-        };
-      },
-    };
-
-    this.config = {
-      get: async (key) => this._config.get(key)?.value ?? null,
-      set: async (key, value) => {
-        this._config.set(key, { key, value, updatedAt: now() });
-      },
-      list: async () => [...this._config.values()],
-      getDefaultModelId: async () => {
-        const v = this._config.get("default_model_id")?.value;
-        return typeof v === "number" ? v : null;
-      },
-      setDefaultModelId: async (modelId) => {
-        this._config.set("default_model_id", {
-          key: "default_model_id",
-          value: modelId,
-          updatedAt: now(),
-        });
-      },
-    };
-  }
-
-  close(): void {
-    /* nothing to do */
-  }
-}
 
 // ─── MemorySessionPersistence ────────────────────────────────────────────────
 

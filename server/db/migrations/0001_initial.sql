@@ -1,4 +1,0 @@
--- DEPRECATED: migrations split into ./infra/ and ./session/ subdirectories.
--- This file is intentionally empty — kept only because the Linux sandbox
--- cannot delete it through Windows-side ACLs. The migration runner only
--- scans the infra/ and session/ subdirs, so this file is never applied.

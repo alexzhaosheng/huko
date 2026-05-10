@@ -17,12 +17,12 @@
 import { eq, and, asc, desc } from "drizzle-orm";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import Database, {
   type Database as BetterSqlite3Database,
 } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { runMigrations } from "../db/migrate.js";
+import { sessionMigrations } from "../db/migrations.js";
 import * as schema from "../db/schema/session.js";
 import {
   makePersistEntry,
@@ -80,7 +80,7 @@ export class SqliteSessionPersistence implements SessionPersistence {
     this.sqlite.pragma("foreign_keys = ON");
     this.db = drizzle(this.sqlite, { schema });
 
-    runMigrations(this.sqlite, migrationsDir());
+    runMigrations(this.sqlite, sessionMigrations);
 
     const db = this.db;
 
@@ -258,11 +258,6 @@ function ensureGitignore(hukoDir: string): void {
 
 // ─── Path helpers ────────────────────────────────────────────────────────────
 
-function migrationsDir(): string {
-  // …/server/persistence/sqlite-session.{ts,js} → …/server/db/migrations/session
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(here, "..", "db", "migrations", "session");
-}
 
 // ─── Row mappers ─────────────────────────────────────────────────────────────
 

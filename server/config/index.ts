@@ -3,14 +3,22 @@
  *
  * Public surface of the config subsystem.
  *
- * Read pattern: at module top, `const config = getConfig()`. Use values
- * in handlers/closures. There is NO hot-reload — values are snapshotted
- * at the time `getConfig()` first runs, and `loadConfig()` should have
- * already been called by bootstrap.
+ * Two configuration scopes live here:
  *
- * Write pattern: only bootstrap entry points call `loadConfig()`.
- * Tests use `setConfigForTests()` to inject.
+ *   1. `HukoConfig` — runtime knobs (timeouts, log levels, role
+ *      defaults). Layered defaults → ~/.huko/config.json →
+ *      <cwd>/.huko/config.json → env. Loaded once via `loadConfig()`,
+ *      snapshotted by `getConfig()`. See loader.ts.
+ *
+ *   2. `InfraConfig` — providers, models, default model. Layered
+ *      built-in → ~/.huko/providers.json → <cwd>/.huko/providers.json.
+ *      Loaded on demand via `loadInfraConfig({ cwd })`. See infra-config.ts.
+ *
+ * The two are independent; nothing forces them to be loaded together.
+ * Bootstrap calls both during startup.
  */
+
+// ── Runtime config ──────────────────────────────────────────────────────────
 
 export {
   getConfig,
@@ -27,3 +35,36 @@ export {
   type HukoConfig,
   type ConfigSourceLayer,
 } from "./types.js";
+
+// ── Infra config (providers / models / default model) ───────────────────────
+
+export {
+  loadInfraConfig,
+  findProvider,
+  findModel,
+  globalConfigPath,
+  projectConfigPath,
+  readGlobalConfigFile,
+  readProjectConfigFile,
+  writeGlobalConfigFile,
+  writeProjectConfigFile,
+  type LoadInfraConfigOptions,
+} from "./infra-config.js";
+
+export type {
+  ConfigSource,
+  InfraConfig,
+  InfraConfigFile,
+  ModelConfig,
+  ProviderConfig,
+  ProviderModelRef,
+  ResolvedModel,
+  ResolvedProvider,
+} from "./infra-config-types.js";
+
+export {
+  BUILTIN_PROVIDERS,
+  BUILTIN_MODELS,
+  BUILTIN_CURRENT_PROVIDER,
+  BUILTIN_CURRENT_MODEL,
+} from "./builtin-providers.js";

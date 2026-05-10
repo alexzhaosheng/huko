@@ -1,28 +1,31 @@
 /**
  * server/security/keys.ts
  *
- * API-key resolution + write helpers. The DB never stores keys —
- * `providers.api_key_ref` holds a logical name (e.g. `"openrouter"`);
+ * API-key resolution + write helpers. Provider definitions never carry
+ * a plaintext key — they only hold a logical name (e.g. `"openrouter"`).
  * `resolveApiKey(ref, opts)` turns that name into the actual secret at
- * runtime via a three-layer lookup:
+ * runtime via a four-layer lookup:
  *
  *   1. <cwd>/.huko/keys.json      project-local explicit (highest)
- *   2. process.env                shell / system env vars
- *   3. <cwd>/.env                 project-local dotenv (lowest)
+ *   2. ~/.huko/keys.json          user-global (across every project)
+ *   3. process.env                shell / system env vars
+ *   4. <cwd>/.env                 project-local dotenv (lowest)
+ *
+ * Layer 1 lets a single project override what the rest of the user's
+ * machine sees (CI vs personal, work vs personal). Layer 2 is the "set
+ * one key, every project on this machine sees it" convenience the setup
+ * wizard writes to. Layers 3 and 4 are the existing env-friendly paths.
  *
  * Naming convention for env vars: `<REF.toUpperCase()>_API_KEY`, so the
  * ref `"openrouter"` looks for `OPENROUTER_API_KEY` in env and `.env`.
- * The keys.json layer is keyed directly by ref (no transformation), so
- * `{ "openrouter": "..." }`.
+ * The keys.json files (both project and global) are keyed directly by
+ * ref, so `{ "openrouter": "..." }`.
  *
- * The split-from-DB design keeps `infra.db` and any project DB safe to
- * back up, share, or commit (no plaintext credentials inside). It also
- * lets the same provider definition use different keys per machine —
- * teammates on the same project pick up their own keys via env.
+ * The split-from-config design keeps `providers.json` (which can be
+ * checked into git per-project) free of plaintext credentials.
  *
- * Set/unset helpers (`setProjectKey`, `unsetProjectKey`) write the
- * project keys.json with `chmod 600` on Unix. They power `huko keys set`
- * etc.; the resolver itself is read-only.
+ * Set/unset helpers chmod 600 on Unix. They power `huko keys set` /
+ * `huko setup`; the resolver itself is read-only.
  *
  * NOTE: read paths use synchronous fs on each call. That's fine — keys
  * live in tiny files, lookups happen at task startup, and orchestrator
@@ -37,6 +40,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 export type ResolveKeyOptions = {
@@ -49,7 +53,7 @@ export type ResolveKeyOptions = {
 
 /**
  * Resolve `ref` to a non-empty key string, or throw with a message
- * spelling out the three places the user can put it.
+ * spelling out the four places the user can put it.
  */
 export function resolveApiKey(ref: string, opts: ResolveKeyOptions = {}): string {
   if (!ref || ref.trim() === "") {
@@ -59,19 +63,26 @@ export function resolveApiKey(ref: string, opts: ResolveKeyOptions = {}): string
   const envName = envVarNameFor(ref);
 
   // 1. <cwd>/.huko/keys.json
-  const projectKeys = readKeysJson(path.join(cwd, ".huko", "keys.json"));
+  const projectKeys = readKeysJson(projectKeysPath(cwd));
   const fromProject = projectKeys?.[ref];
   if (typeof fromProject === "string" && fromProject.length > 0) {
     return fromProject;
   }
 
-  // 2. process.env
+  // 2. ~/.huko/keys.json
+  const globalKeys = readKeysJson(globalKeysPath());
+  const fromGlobal = globalKeys?.[ref];
+  if (typeof fromGlobal === "string" && fromGlobal.length > 0) {
+    return fromGlobal;
+  }
+
+  // 3. process.env
   const fromEnv = process.env[envName];
   if (typeof fromEnv === "string" && fromEnv.length > 0) {
     return fromEnv;
   }
 
-  // 3. <cwd>/.env
+  // 4. <cwd>/.env
   const dotenv = readDotenv(path.join(cwd, ".env"));
   const fromDotenv = dotenv?.[envName];
   if (typeof fromDotenv === "string" && fromDotenv.length > 0) {
@@ -81,6 +92,7 @@ export function resolveApiKey(ref: string, opts: ResolveKeyOptions = {}): string
   throw new Error(
     `No API key found for "${ref}". Set one of:\n` +
       `  - <cwd>/.huko/keys.json: { "${ref}": "..." }\n` +
+      `  - ~/.huko/keys.json: { "${ref}": "..." }\n` +
       `  - env: ${envName}=...\n` +
       `  - <cwd>/.env: ${envName}=...`,
   );
@@ -100,7 +112,7 @@ export function envVarNameFor(ref: string): string {
 
 // ─── Introspection ───────────────────────────────────────────────────────────
 
-export type KeySourceLayer = "project" | "env" | "dotenv" | "unset";
+export type KeySourceLayer = "project" | "global" | "env" | "dotenv" | "unset";
 
 export type KeySourceDescription = {
   /** Where the resolver finds the key now (`unset` if it can't). */
@@ -121,10 +133,16 @@ export function describeKeySource(
   const cwd = opts.cwd ?? process.cwd();
   const envName = envVarNameFor(ref);
 
-  const projectKeys = readKeysJson(path.join(cwd, ".huko", "keys.json"));
+  const projectKeys = readKeysJson(projectKeysPath(cwd));
   const fromProject = projectKeys?.[ref];
   if (typeof fromProject === "string" && fromProject.length > 0) {
     return { layer: "project", envName };
+  }
+
+  const globalKeys = readKeysJson(globalKeysPath());
+  const fromGlobal = globalKeys?.[ref];
+  if (typeof fromGlobal === "string" && fromGlobal.length > 0) {
+    return { layer: "global", envName };
   }
 
   const fromEnv = process.env[envName];
@@ -141,7 +159,7 @@ export function describeKeySource(
   return { layer: "unset", envName };
 }
 
-// ─── Write helpers (CLI: huko keys set / unset) ──────────────────────────────
+// ─── Write helpers — project layer (huko keys set / unset) ──────────────────
 
 /**
  * Write `ref → value` into `<cwd>/.huko/keys.json`. Existing keys are
@@ -157,19 +175,7 @@ export function setProjectKey(
   if (!value || value.length === 0) throw new Error("setProjectKey: empty value");
 
   const cwd = opts.cwd ?? process.cwd();
-  const dir = path.join(cwd, ".huko");
-  mkdirSync(dir, { recursive: true });
-  const p = path.join(dir, "keys.json");
-
-  const existing = readKeysJson(p) ?? {};
-  const next: Record<string, unknown> = { ...existing, [ref]: value };
-
-  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
-  try {
-    chmodSync(p, 0o600);
-  } catch {
-    /* Windows / non-POSIX — best effort, keys.json is gitignored anyway. */
-  }
+  writeKeyToFile(projectKeysPath(cwd), ref, value);
 }
 
 /**
@@ -181,21 +187,7 @@ export function unsetProjectKey(
   opts: ResolveKeyOptions = {},
 ): boolean {
   const cwd = opts.cwd ?? process.cwd();
-  const p = path.join(cwd, ".huko", "keys.json");
-  const existing = readKeysJson(p);
-  if (!existing) return false;
-  if (!(ref in existing)) return false;
-
-  const next: Record<string, unknown> = { ...existing };
-  delete next[ref];
-
-  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
-  try {
-    chmodSync(p, 0o600);
-  } catch {
-    /* see setProjectKey */
-  }
-  return true;
+  return removeKeyFromFile(projectKeysPath(cwd), ref);
 }
 
 /**
@@ -205,9 +197,38 @@ export function unsetProjectKey(
  */
 export function listProjectKeyRefs(opts: ResolveKeyOptions = {}): string[] {
   const cwd = opts.cwd ?? process.cwd();
-  const keys = readKeysJson(path.join(cwd, ".huko", "keys.json"));
-  if (!keys) return [];
-  return Object.keys(keys).filter((k) => typeof keys[k] === "string");
+  return listKeyRefs(projectKeysPath(cwd));
+}
+
+// ─── Write helpers — global layer (huko setup / `keys set --global`) ────────
+
+/**
+ * Write `ref → value` into `~/.huko/keys.json`. Same chmod 600 + atomic
+ * write semantics as the project variant. Lives once per machine; every
+ * project's resolver sees it unless overridden by a project-layer entry.
+ */
+export function setGlobalKey(ref: string, value: string): void {
+  if (!ref || ref.trim() === "") throw new Error("setGlobalKey: empty ref");
+  if (!value || value.length === 0) throw new Error("setGlobalKey: empty value");
+  writeKeyToFile(globalKeysPath(), ref, value);
+}
+
+export function unsetGlobalKey(ref: string): boolean {
+  return removeKeyFromFile(globalKeysPath(), ref);
+}
+
+export function listGlobalKeyRefs(): string[] {
+  return listKeyRefs(globalKeysPath());
+}
+
+// ─── Path helpers ────────────────────────────────────────────────────────────
+
+export function projectKeysPath(cwd: string): string {
+  return path.join(cwd, ".huko", "keys.json");
+}
+
+export function globalKeysPath(): string {
+  return path.join(os.homedir(), ".huko", "keys.json");
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
@@ -224,6 +245,41 @@ function readKeysJson(p: string): Record<string, unknown> | null {
     /* malformed JSON; treat as missing */
   }
   return null;
+}
+
+function writeKeyToFile(p: string, ref: string, value: string): void {
+  mkdirSync(path.dirname(p), { recursive: true });
+  const existing = readKeysJson(p) ?? {};
+  const next: Record<string, unknown> = { ...existing, [ref]: value };
+  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
+  try {
+    chmodSync(p, 0o600);
+  } catch {
+    /* Windows / non-POSIX — best effort, keys.json is gitignored anyway. */
+  }
+}
+
+function removeKeyFromFile(p: string, ref: string): boolean {
+  const existing = readKeysJson(p);
+  if (!existing) return false;
+  if (!(ref in existing)) return false;
+
+  const next: Record<string, unknown> = { ...existing };
+  delete next[ref];
+
+  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
+  try {
+    chmodSync(p, 0o600);
+  } catch {
+    /* see writeKeyToFile */
+  }
+  return true;
+}
+
+function listKeyRefs(p: string): string[] {
+  const keys = readKeysJson(p);
+  if (!keys) return [];
+  return Object.keys(keys).filter((k) => typeof keys[k] === "string");
 }
 
 function readDotenv(p: string): Record<string, string> | null {
@@ -246,8 +302,7 @@ function readDotenv(p: string): Record<string, string> | null {
  *   export KEY=value            `export` prefix tolerated and stripped
  *
  * Does NOT support: variable interpolation (`$OTHER`), multiline values,
- * escape sequences inside quotes. If you need those, install `dotenv`
- * and replace this function — the resolveApiKey contract stays the same.
+ * escape sequences inside quotes.
  */
 function parseDotenv(input: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -263,13 +318,11 @@ function parseDotenv(input: string): Record<string, string> {
 
     let value = line.slice(eqIdx + 1).trim();
 
-    // Strip an inline comment from a bare (unquoted) value: ` # ...`.
     if (!startsWithQuote(value)) {
       const hashIdx = value.indexOf(" #");
       if (hashIdx >= 0) value = value.slice(0, hashIdx).trim();
     }
 
-    // Strip surrounding quotes if matched.
     if (
       value.length >= 2 &&
       ((value.startsWith('"') && value.endsWith('"')) ||
