@@ -1,14 +1,7 @@
 /**
  * server/cli/dispatch/shared.ts
  *
- * Shared bits used by multiple per-resource dispatchers:
- *   - usage(exitCode): prints global help text and **throws**
- *     CliExitError. The single process.exit() site is in index.ts;
- *     everywhere else uses a typed exception so tests / embedders /
- *     future REPL composition aren't killed by deep stack frames.
- *   - parseFormatFlags<F>(argv, validFormats, defaultFormat): pulls
- *     --format / --json / --jsonl out of argv. Used by run, sessions
- *     list, provider list, model list.
+ * Shared bits used by multiple per-resource dispatchers.
  */
 
 import { bold, type ColorStream, cyan, dim } from "../colors.js";
@@ -22,14 +15,6 @@ export class CliExitError extends Error {
   }
 }
 
-/**
- * Print the global help text and abort with CliExitError(exitCode).
- *
- * exitCode === 0 (user asked for -h/--help) -> help goes to stdout so
- * it can be piped into less. Any other code is treated as a usage
- * error -> help goes to stderr so stdout stays usable for whatever
- * the caller was trying to capture.
- */
 export function usage(exitCode: number = 3): never {
   const out = exitCode === 0 ? process.stdout : process.stderr;
   const stream: ColorStream = exitCode === 0 ? "stdout" : "stderr";
@@ -74,6 +59,7 @@ export function usage(exitCode: number = 3): never {
       row("keys list", "Show every ref + which layer resolves it"),
       row("config show", "Print the resolved huko config (layered)"),
       row("info [scope]", `Show full configuration (scope: ${c("global")} | ${c("project")})`),
+      row("debug llm-log", "Render this session's LLM calls into huko_llm_log.html"),
       "",
       h("Options for `run`:"),
       rowWithDefault("--format=<fmt>", "text | jsonl | json", "(default: text)"),
@@ -106,20 +92,19 @@ export function usage(exitCode: number = 3): never {
       h("Options for `sessions list` / `provider list` / `model list`:"),
       rowWithDefault("--format=<fmt>", "text | jsonl | json", "(default: text)"),
       "",
+      h("Options for `debug llm-log`:"),
+      row("--session=<id>", "Session id to dump (default: active session)"),
+      row("--out=<path>", "Output path (default: <cwd>/huko_llm_log.html)"),
+      "",
       h("Examples:"),
       d("  # one-time setup (interactive wizard — recommended)"),
       `  ${c("huko setup")}`,
-      "",
-      d("  # one-time setup (manual)"),
-      `  ${c("huko keys set")} anthropic sk-ant-...`,
-      `  ${c("huko provider current")} anthropic`,
-      `  ${c("huko model current")} claude-sonnet-4-6`,
       "",
       d("  # daily use"),
       `  ${c('huko run "What is 2 + 2?"')}             ${d("# continues the active session")}`,
       `  ${c('huko run --new "new conversation"')}     ${d("# starts fresh, switches active")}`,
       `  ${c("huko sessions current")}                 ${d("# who am I talking to?")}`,
-      `  ${c("huko sessions switch 7")}                ${d("# jump to session 7")}`,
+      `  ${c("huko debug llm-log")}                    ${d("# inspect this session's LLM calls")}`,
       "",
       h("Exit codes:"),
       `  ${c("0")}   ok / task done    ${c("1")}   failed              ${c("2")}   task stopped`,
@@ -133,9 +118,6 @@ export function usage(exitCode: number = 3): never {
 
 /**
  * Walk argv pulling out --format / --json / --jsonl flags.
- * Returns the resolved format and the leftover positional / flag args.
- *
- * Unknown --<flag> strings cause a usage error so typos fail loud.
  */
 export function parseFormatFlags<F extends string>(
   argv: string[],

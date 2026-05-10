@@ -2,23 +2,11 @@
 /**
  * server/cli/index.ts
  *
- * `huko` CLI entry point — and the **single** `process.exit()` site
- * in the entire CLI. Everything else returns an exit code or throws
- * `CliExitError`. That way commands are testable, embeddable in a
- * future REPL or daemon, and composable.
- *
- * This file is deliberately small. Its only job is:
- *   1. Read argv
- *   2. Find the right per-resource dispatcher in `dispatch/`
- *   3. Hand off and forward the exit code
- *
- * Argv parsing for each resource lives next to that resource in
- * `server/cli/dispatch/<resource>.ts`. Help text + shared format-flag
- * parsing lives in `server/cli/dispatch/shared.ts`. Per-resource
- * command bodies (DB ops, etc.) live in `server/cli/commands/<resource>.ts`.
+ * `huko` CLI entry point — the single process.exit() site.
  */
 
 import { dispatchConfig } from "./dispatch/config.js";
+import { dispatchDebug } from "./dispatch/debug.js";
 import { dispatchKeys } from "./dispatch/keys.js";
 import { dispatchModel } from "./dispatch/model.js";
 import { dispatchProvider } from "./dispatch/provider.js";
@@ -39,6 +27,7 @@ const DISPATCH: Record<string, Dispatcher> = {
   config: dispatchConfig,
   info: dispatchInfo,
   setup: dispatchSetup,
+  debug: dispatchDebug,
 };
 
 async function main(): Promise<number> {
