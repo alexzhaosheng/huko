@@ -243,6 +243,7 @@ function projectToLLMMessage(r: EntryRow): LLMMessage | null {
     ...(r.toolCallId ? { toolCallId: r.toolCallId } : {}),
     ...(r.thinking ? { thinking: r.thinking } : {}),
     _entryId: r.id,
+    _entryKind: r.kind as EntryKind,
   };
 }
 

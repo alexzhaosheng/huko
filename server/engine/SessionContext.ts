@@ -373,6 +373,7 @@ export class SessionContext {
 
 function toMessage(
   opts: {
+    kind: EntryKind;
     role: LLMMessage["role"];
     content: string;
     toolCalls?: ToolCall[];
@@ -388,6 +389,7 @@ function toMessage(
     ...(opts.toolCallId ? { toolCallId: opts.toolCallId } : {}),
     ...(opts.thinking ? { thinking: opts.thinking } : {}),
     _entryId: entryId,
+    _entryKind: opts.kind,
   };
 }
 

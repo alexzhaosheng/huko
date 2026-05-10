@@ -52,6 +52,7 @@ export async function dispatchModel(rest: string[]): Promise<number> {
     let displayName: string | undefined;
     let thinkLevel: ThinkLevel | undefined;
     let toolCallMode: ToolCallMode | undefined;
+    let contextWindow: number | undefined;
     let setCurrent = false;
     let project = false;
     for (const arg of rest.slice(1)) {
@@ -59,7 +60,15 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       if (arg.startsWith("--provider=")) provider = arg.slice("--provider=".length);
       else if (arg.startsWith("--model-id=")) modelId = arg.slice("--model-id=".length);
       else if (arg.startsWith("--display-name=")) displayName = arg.slice("--display-name=".length);
-      else if (arg.startsWith("--think-level=")) {
+      else if (arg.startsWith("--context-window=")) {
+        const raw = arg.slice("--context-window=".length);
+        const n = Number(raw);
+        if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+          process.stderr.write(`huko model add: invalid --context-window: ${raw}\n`);
+          usage();
+        }
+        contextWindow = n;
+      } else if (arg.startsWith("--think-level=")) {
         const v = arg.slice("--think-level=".length);
         if (v !== "off" && v !== "low" && v !== "medium" && v !== "high") {
           process.stderr.write(`huko model add: invalid --think-level: ${v}\n`);
@@ -92,6 +101,7 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       ...(displayName !== undefined ? { displayName } : {}),
       ...(thinkLevel !== undefined ? { thinkLevel } : {}),
       ...(toolCallMode !== undefined ? { toolCallMode } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(setCurrent ? { setCurrent: true } : {}),
       ...(project ? { project: true } : {}),
     });

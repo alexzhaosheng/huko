@@ -26,14 +26,17 @@ export type {
 } from "../../../shared/llm-protocol.js";
 
 import type { Role, Tool, ToolCall, TokenUsage } from "../../../shared/llm-protocol.js";
+import type { EntryKind } from "../../../shared/types.js";
 
 // ─── Server-internal types ───────────────────────────────────────────────────
 
 /**
  * A single message in the LLM context window.
  *
- * `_entryId` is a back-reference to the DB row — used by compaction to
- * identify which messages to evict. Never sent to the LLM provider.
+ * `_entryId` and `_entryKind` are back-references to the DB row — used
+ * by compaction (which messages to evict, how to summarise them) and
+ * orphan recovery. Both are stripped before the message is sent to the
+ * LLM provider.
  */
 export type LLMMessage = {
   role: Role;
@@ -50,6 +53,14 @@ export type LLMMessage = {
   thinking?: string;
   /** Internal: DB entry ID for compaction tracking. */
   _entryId?: number;
+  /**
+   * Internal: the persisted entry kind. Lets compaction distinguish a
+   * real user_message (a new goal from the user) from a system_reminder
+   * (which carries role:"user" too in our schema). Without this, both
+   * look identical at the LLMMessage layer and the elision digest
+   * can't truthfully describe what was dropped.
+   */
+  _entryKind?: EntryKind;
 };
 
 /**

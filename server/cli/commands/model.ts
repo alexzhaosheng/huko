@@ -45,6 +45,12 @@ export type ModelAddArgs = {
   displayName?: string;
   thinkLevel?: ThinkLevel;
   toolCallMode?: ToolCallMode;
+  /**
+   * Per-model context-window override (in tokens). Overrides the
+   * heuristic table in `core/llm/model-context-window.ts`. Tied to the
+   * model so changing model = changing window.
+   */
+  contextWindow?: number;
   /** When true, also set this model as default. */
   setCurrent?: boolean;
   /** When true, write to <cwd>/.huko/providers.json instead of global. */
@@ -130,6 +136,7 @@ export async function modelAddCommand(args: ModelAddArgs): Promise<number> {
       displayName: args.displayName ?? args.modelId,
       ...(args.thinkLevel !== undefined ? { defaultThinkLevel: args.thinkLevel } : {}),
       ...(args.toolCallMode !== undefined ? { defaultToolCallMode: args.toolCallMode } : {}),
+      ...(args.contextWindow !== undefined ? { contextWindow: args.contextWindow } : {}),
     };
     if (idx >= 0) {
       next.models[idx] = model;
@@ -343,6 +350,7 @@ function serialise(m: ResolvedModel, defaultRef: string | null): {
   displayName: string;
   thinkLevel: string;
   toolCallMode: string;
+  contextWindow: number | null;
   source: string;
   isDefault: boolean;
 } {
@@ -353,9 +361,23 @@ function serialise(m: ResolvedModel, defaultRef: string | null): {
     displayName: m.displayName,
     thinkLevel: m.defaultThinkLevel ?? "off",
     toolCallMode: m.defaultToolCallMode ?? "native",
+    contextWindow: m.contextWindow ?? null,
     source: m.source,
     isDefault: ref === defaultRef,
   };
+}
+
+/**
+ * Format a context-window number as a compact human-readable string
+ * (e.g. 200000 -> "200k", 1000000 -> "1m"). Empty when no override is
+ * set on the model — the heuristic estimator owns that case and it'd
+ * be misleading to print a number that's not authoritative.
+ */
+function fmtCtx(n: number | undefined): string {
+  if (n === undefined) return "";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}m`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
 }
 
 function printTable(rows: ResolvedModel[], defaultRef: string | null): void {
@@ -368,15 +390,17 @@ function printTable(rows: ResolvedModel[], defaultRef: string | null): void {
     return;
   }
 
-  const headerCells = ["PROVIDER", "MODEL ID", "DISPLAY", "THINK", "TOOL", "SOURCE", "CURRENT"];
+  const headerCells = ["PROVIDER", "MODEL ID", "DISPLAY", "THINK", "TOOL", "CTX", "SOURCE", "CURRENT"];
   const raw: string[][] = [];
   const styled: string[][] = [];
   for (const m of rows) {
     const ref = `${m.providerName}/${m.modelId}`;
     const isCurrent = ref === defaultRef;
+    const ctx = fmtCtx(m.contextWindow);
     raw.push([
       m.providerName, m.modelId, m.displayName,
       m.defaultThinkLevel ?? "off", m.defaultToolCallMode ?? "native",
+      ctx,
       m.source, isCurrent ? "*" : "",
     ]);
     styled.push([
@@ -385,6 +409,7 @@ function printTable(rows: ResolvedModel[], defaultRef: string | null): void {
       m.displayName,
       m.defaultThinkLevel ?? "off",
       m.defaultToolCallMode ?? "native",
+      ctx === "" ? dim("—") : ctx,
       source(m.source, m.source),
       isCurrent ? cyan("*") : "",
     ]);
@@ -402,8 +427,4 @@ function printTable(rows: ResolvedModel[], defaultRef: string | null): void {
     lines.push(row.map((cell, i) => padVisible(cell, widths[i]!)).join(sep));
   }
   process.stdout.write(lines.join("\n") + "\n");
-}
-
-function pad(s: string, width: number): string {
-  return s.length >= width ? s : s + " ".repeat(width - s.length);
 }

@@ -87,6 +87,7 @@ export function usage(exitCode: number = 3): never {
       row("--display-name=<text>", "Defaults to --model-id"),
       rowWithDefault("--think-level=<lvl>", "off | low | medium | high", "(default: off)"),
       rowWithDefault("--tool-call-mode=<mode>", "native | xml", "(default: native)"),
+      row("--context-window=<n>", "Per-model token budget (overrides heuristic table)"),
       row("--current", "Also set as the current model (paired with provider)"),
       row("--project", "Write to <cwd>/.huko/providers.json instead"),
       "",

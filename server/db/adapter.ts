@@ -129,7 +129,8 @@ export async function loadSessionLLMContext(
  *   - Returns null for non-LLM-visible entries (StatusNotice).
  *   - Pulls `metadata.toolCalls` back into the structured `toolCalls`
  *     field — symmetric with how `SessionContext.append()` writes it.
- *   - Carries `_entryId` for compaction and orphan-recovery routines.
+ *   - Carries `_entryId` and `_entryKind` for compaction (which messages
+ *     to evict, how to summarise them) and orphan-recovery routines.
  */
 export function dbEntryToLLMMessage(
   row: typeof taskContext.$inferSelect,
@@ -146,5 +147,6 @@ export function dbEntryToLLMMessage(
     ...(row.toolCallId ? { toolCallId: row.toolCallId } : {}),
     ...(row.thinking ? { thinking: row.thinking } : {}),
     _entryId: row.id,
+    _entryKind: row.kind as EntryKind,
   };
 }
