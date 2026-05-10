@@ -36,6 +36,17 @@ export type TaskRunSummary = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Subset of `promptTokens` billed as prompt-cache READS by the
+   * provider. 0 when the provider doesn't break it down (most
+   * non-Anthropic, non-OpenAI servers).
+   */
+  cachedTokens: number;
+  /**
+   * Tokens written into the prompt cache (Anthropic specific). 0
+   * elsewhere.
+   */
+  cacheCreationTokens: number;
   elapsedMs: number;
 };
 

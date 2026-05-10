@@ -251,11 +251,27 @@ function parseArgs(raw: string): Record<string, unknown> {
 }
 
 function normalizeUsage(u: ChatCompletionUsage | undefined): TokenUsage {
-  return {
+  const usage: TokenUsage = {
     promptTokens: u?.prompt_tokens ?? 0,
     completionTokens: u?.completion_tokens ?? 0,
     totalTokens: u?.total_tokens ?? 0,
   };
+  // Cache breakdown — extracted when the provider populates it.
+  // OpenAI exposes `prompt_tokens_details.cached_tokens`; Anthropic-via-
+  // OpenAI-shim and DeepSeek expose `cache_read_input_tokens` /
+  // `cache_creation_input_tokens` at the top level. We accept both shapes.
+  const cachedRead =
+    u?.prompt_tokens_details?.cached_tokens ??
+    u?.cache_read_input_tokens ??
+    undefined;
+  if (typeof cachedRead === "number" && cachedRead > 0) {
+    usage.cachedTokens = cachedRead;
+  }
+  const cachedWrite = u?.cache_creation_input_tokens ?? undefined;
+  if (typeof cachedWrite === "number" && cachedWrite > 0) {
+    usage.cacheCreationTokens = cachedWrite;
+  }
+  return usage;
 }
 
 function joinUrl(base: string, path: string): string {
@@ -281,6 +297,13 @@ interface ChatCompletionUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  /** OpenAI shape: nested cached_tokens under prompt_tokens_details. */
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+  };
+  /** Anthropic-style flat fields, surfaced by some compatible servers. */
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
 }
 
 interface ChatCompletionResponse {

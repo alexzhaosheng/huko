@@ -26,6 +26,7 @@ export async function dispatchRun(rest: string[]): Promise<number> {
   // CLI flag overrides env. The flag exposes the LLM to a smaller
   // tool surface (no `message(type=ask)`) so it doesn't try to ask.
   let interactive = process.env["HUKO_NON_INTERACTIVE"] !== "1";
+  let showTokens = false;
   const filtered: string[] = [];
   for (const arg of rest) {
     if (arg.startsWith("--title=")) {
@@ -46,6 +47,10 @@ export async function dispatchRun(rest: string[]): Promise<number> {
     }
     if (arg === "--no-interaction" || arg === "-y") {
       interactive = false;
+      continue;
+    }
+    if (arg === "--show-tokens") {
+      showTokens = true;
       continue;
     }
     if (arg.startsWith("--session=")) {
@@ -82,5 +87,6 @@ export async function dispatchRun(rest: string[]): Promise<number> {
     ...(newSession ? { newSession: true } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),
     ...(interactive ? {} : { interactive: false }),
+    ...(showTokens ? { showTokens: true } : {}),
   });
 }

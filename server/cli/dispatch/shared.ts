@@ -70,6 +70,7 @@ export function usage(exitCode: number = 3): never {
       row("--new", "Force a fresh session and switch active to it"),
       row("--session=<id>", "One-off send to <id>; active pointer untouched"),
       row("--no-interaction, -y", "Disable mid-task user prompts (drops message(type=ask))"),
+      row("--show-tokens", "Print input / cache / output token breakdown after run"),
       "",
       h("Options for `provider add`:"),
       row("--name=<text>", "Provider name (required)"),

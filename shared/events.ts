@@ -226,6 +226,10 @@ export type TaskSummary = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Subset of `promptTokens` billed as prompt-cache READS. Optional. */
+  cachedTokens?: number;
+  /** Tokens written into the prompt cache (Anthropic). Optional. */
+  cacheCreationTokens?: number;
   elapsedMs: number;
 };
 

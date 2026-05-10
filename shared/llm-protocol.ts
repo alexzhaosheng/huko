@@ -35,6 +35,21 @@ export type TokenUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Subset of `promptTokens` that came from prompt-cache reads. Only
+   * surfaced when the provider reports it: OpenAI exposes this as
+   * `usage.prompt_tokens_details.cached_tokens`; Anthropic (via its
+   * native API) reports it as `cache_read_input_tokens`. Omitted when
+   * the provider doesn't break down the prompt.
+   */
+  cachedTokens?: number;
+  /**
+   * Tokens written into the prompt cache during this call (Anthropic
+   * specific — `cache_creation_input_tokens`). 0 / omitted when the
+   * provider doesn't have a write-side concept (e.g. OpenAI's
+   * automatic prefix cache is read-only from a billing perspective).
+   */
+  cacheCreationTokens?: number;
 };
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────

@@ -4,36 +4,19 @@
  * `huko debug llm-log` — render the current session's LLM calls into a
  * reader-friendly HTML report.
  *
- * Why this exists: when a task misbehaves, the only useful artefact is
- * the actual sequence of (system + history) → (assistant response) round
- * trips. The DB has all the raw entries; this command turns them into a
- * page you open in a browser to follow the conversation, see each call's
- * delta vs the previous call, and inspect tool_calls / tool_results /
- * thinking / usage at a glance.
+ * Per call we render:
+ *   - inputs delta (entries new since previous call)
+ *   - assistant response (content / thinking / tool_calls / usage)
+ *   - "View raw payload" button → opens a <dialog> showing the JSON
+ *     `{model, messages: [...], tools?: [...]}` shape that the OpenAI
+ *     adapter would have sent. Built by reconstructing from the
+ *     persisted system_prompt + every LLM-visible entry up to this call.
  *
- * Per-task vs per-call:
- *   - One task = one row in `tasks` table.
- *   - One LLM call = one assistant entry (`kind=ai_message`). The inputs
- *     to that call were: system_prompt + every LLM-visible entry up to
- *     (but not including) that ai_message.
- *
- * Delta display: for the second and subsequent LLM calls within a task,
- * we only render the entries added since the previous call (which is
- * usually the previous assistant turn + tool_results + maybe a
- * system_reminder + maybe an interjected user message). Saves a ton of
- * scrolling.
- *
- * Output is `<cwd>/huko_llm_log.html`. We stamp a "generated at" header
- * and never overwrite without the user knowing — the path is the only
- * place we write to.
- *
- * No HTML libraries. The renderer is plain template strings + a small
- * escapeHtml; pure ESM, no deps.
+ * Output is `<cwd>/huko_llm_log.html`.
  */
 
-import { writeFileSync } from "node:fs";
+import { writeFileSync, existsSync } from "node:fs";
 import * as path from "node:path";
-import { existsSync } from "node:fs";
 import {
   SqliteSessionPersistence,
   type SessionPersistence,
@@ -42,9 +25,7 @@ import type { ChatSessionRow, EntryRow, TaskRow } from "../../persistence/types.
 import { getActiveSessionId } from "../state.js";
 
 export type DebugLlmLogArgs = {
-  /** Session id to dump. When omitted, falls back to the active session. */
   sessionId?: number;
-  /** Output path. Defaults to `<cwd>/huko_llm_log.html`. */
   outPath?: string;
 };
 
@@ -93,7 +74,7 @@ export async function debugLlmLogCommand(args: DebugLlmLogArgs): Promise<number>
 
     const callCount = entries.filter((e) => e.kind === "ai_message").length;
     process.stdout.write(
-      `huko debug llm-log: wrote ${callCount} LLM call(s) across ${tasks.length} task(s) → ${outPath}\n`,
+      `huko debug llm-log: wrote ${callCount} LLM call(s) across ${tasks.length} task(s) -> ${outPath}\n`,
     );
     return 0;
   } catch (err) {
@@ -120,18 +101,12 @@ export type RenderInput = {
   generatedAt: Date;
 };
 
-/**
- * Compose the entire HTML document. Pure function — no I/O.
- * Walks entries grouping by task, then within each task identifies LLM
- * call points (one per `ai_message`) and renders inputs as deltas.
- */
 export function renderLlmLogHtml(input: RenderInput): string {
   const { session, tasks, entries, generatedAt } = input;
 
   const taskById = new Map<number, TaskRow>();
   for (const t of tasks) taskById.set(t.id, t);
 
-  // Group entries by task, preserving order.
   const entriesByTask = new Map<number, EntryRow[]>();
   for (const e of entries) {
     const arr = entriesByTask.get(e.taskId);
@@ -140,7 +115,6 @@ export function renderLlmLogHtml(input: RenderInput): string {
   }
 
   const taskHtml: string[] = [];
-  // Render in task-id order so the page reads chronologically.
   const orderedTaskIds = [...entriesByTask.keys()].sort((a, b) => a - b);
   for (const taskId of orderedTaskIds) {
     const task = taskById.get(taskId);
@@ -182,17 +156,8 @@ function renderTask(task: TaskRow | null, entries: EntryRow[]): string {
   if (entries.length === 0) return "";
   const taskId = entries[0]!.taskId;
 
-  // Find LLM call boundaries (each ai_message is the response of one call).
-  // For each call, slice the inputs that came BEFORE this ai_message in
-  // task order. The system_prompt entry, if persisted, is the same for
-  // all calls; we extract it once and render collapsibly.
   const systemPromptEntry = entries.find((e) => e.kind === "system_prompt");
 
-  // Filter to LLM-visible entries for the input-history reconstruction.
-  // tool_call entries are an artefact of the assistant turn; we render
-  // them under that turn rather than as standalone history rows. So
-  // for "input history" we exclude ai_message itself (it's the call
-  // we're rendering) and tool_call rows (folded into the prior assistant).
   const callIndices: number[] = [];
   for (let i = 0; i < entries.length; i++) {
     if (entries[i]!.kind === "ai_message") callIndices.push(i);
@@ -203,20 +168,35 @@ function renderTask(task: TaskRow | null, entries: EntryRow[]): string {
   for (let n = 0; n < callIndices.length; n++) {
     const idx = callIndices[n]!;
     const callEntry = entries[idx]!;
-    // Inputs since the previous call's boundary (exclusive of the current
-    // ai_message itself).
     const newInputs = entries
       .slice(prevCallEndIdx + 1, idx)
-      // Don't echo the system_prompt as a history row — it's surfaced
-      // separately at the top of the task block.
       .filter((e) => e.kind !== "system_prompt");
-    callsHtml.push(renderCall({ index: n + 1, callEntry, newInputs, isFirst: n === 0 }));
+
+    // Reconstruct the raw OpenAI-shaped payload for THIS call: the
+    // system prompt (if persisted) + every LLM-visible entry strictly
+    // before this ai_message + the tools array (if known). We don't
+    // persist the tools list, so we omit it here and the dialog notes
+    // that the tools array is unknown.
+    const historyBeforeCall = entries.slice(0, idx);
+    const rawPayload = buildRawPayload({
+      task,
+      systemPromptEntry: systemPromptEntry ?? null,
+      historyEntries: historyBeforeCall,
+    });
+
+    callsHtml.push(
+      renderCall({
+        index: n + 1,
+        callEntry,
+        newInputs,
+        isFirst: n === 0,
+        rawPayload,
+        dialogId: `payload-task${taskId}-call${n + 1}`,
+      }),
+    );
     prevCallEndIdx = idx;
   }
 
-  // Trailing tool_results / reminders after the last LLM call (these
-  // were inputs to a call that hasn't happened yet, or are leftover
-  // from a task that ended right after a tool).
   const tail = entries.slice(prevCallEndIdx + 1).filter((e) => e.kind !== "system_prompt");
   const tailHtml =
     tail.length > 0
@@ -236,7 +216,7 @@ function renderTask(task: TaskRow | null, entries: EntryRow[]): string {
     ? `<details class="system-prompt"><summary>System prompt (${systemPromptEntry.content.length} chars)</summary>
         <pre>${escapeHtml(systemPromptEntry.content)}</pre>
       </details>`
-    : "";
+    : `<p class="dim system-prompt-missing">(System prompt not persisted for this task — older session?)</p>`;
 
   return `
 <section class="task" id="task-${taskId}">
@@ -255,8 +235,10 @@ function renderCall(opts: {
   callEntry: EntryRow;
   newInputs: EntryRow[];
   isFirst: boolean;
+  rawPayload: RawPayload;
+  dialogId: string;
 }): string {
-  const { index, callEntry, newInputs, isFirst } = opts;
+  const { index, callEntry, newInputs, isFirst, rawPayload, dialogId } = opts;
   const meta = (callEntry.metadata ?? {}) as Record<string, unknown>;
   const usage = isUsage(meta["usage"]) ? meta["usage"] : null;
   const thinking =
@@ -276,6 +258,8 @@ function renderCall(opts: {
   const usageBadge = usage
     ? `<span class="badge dim">${usage.totalTokens} tok</span>`
     : "";
+
+  const rawBtn = `<button type="button" class="raw-btn" data-dialog="${escapeAttr(dialogId)}">View raw payload</button>`;
 
   const thinkingHtml = thinking
     ? `<details class="thinking"><summary>Thinking (${thinking.length} chars)</summary>
@@ -300,11 +284,14 @@ function renderCall(opts: {
     ? `<div class="usage dim">prompt=${usage.promptTokens} · completion=${usage.completionTokens} · total=${usage.totalTokens}</div>`
     : "";
 
+  const dialogHtml = renderPayloadDialog(dialogId, rawPayload, index);
+
   return `
 <article class="llm-call">
   <header class="call-header">
     <h3>LLM call #${index}</h3>
     ${usageBadge}
+    ${rawBtn}
   </header>
   ${inputsHtml}
   <div class="call-output">
@@ -314,6 +301,7 @@ function renderCall(opts: {
     ${toolCallsHtml}
     ${usageDetail}
   </div>
+  ${dialogHtml}
 </article>`.trim();
 }
 
@@ -322,7 +310,6 @@ function renderEntry(entry: EntryRow): string {
     case "user_message":
       return `<div class="entry user"><span class="role">user</span><pre>${escapeHtml(entry.content)}</pre></div>`;
     case "ai_message": {
-      // Should rarely appear here — calls are folded above. Render a compact summary.
       return `<div class="entry assistant"><span class="role">assistant</span><pre>${escapeHtml(entry.content || "(empty)")}</pre></div>`;
     }
     case "tool_result": {
@@ -340,9 +327,6 @@ function renderEntry(entry: EntryRow): string {
       </div>`;
     }
     case "tool_call": {
-      // tool_call rows that survived as standalone entries — shouldn't
-      // happen in current code (we fold them under the assistant turn),
-      // but render defensively.
       return `<div class="entry tool-call"><span class="role">tool_call</span><pre>${escapeHtml(entry.content)}</pre></div>`;
     }
     case "system_reminder":
@@ -350,7 +334,6 @@ function renderEntry(entry: EntryRow): string {
     case "status_notice":
       return `<div class="entry status"><span class="role">status</span><pre>${escapeHtml(entry.content)}</pre></div>`;
     case "system_prompt":
-      // Should be filtered out before reaching here; defensive.
       return `<div class="entry system"><span class="role">system_prompt</span><pre>${escapeHtml(entry.content.slice(0, 200))}…</pre></div>`;
     default:
       return `<div class="entry unknown"><span class="role">${escapeHtml(entry.kind)}</span><pre>${escapeHtml(entry.content)}</pre></div>`;
@@ -373,6 +356,138 @@ function renderToolArgs(args: unknown): string {
   const json = prettyJson(args);
   if (json === "{}" || json === "null") return "";
   return `<details class="tool-args"><summary>arguments</summary><pre>${escapeHtml(json)}</pre></details>`;
+}
+
+// ─── Raw payload reconstruction + dialog ───────────────────────────────────
+
+export type RawPayload = {
+  /** Modelled on the OpenAI Chat Completions request body shape. */
+  model: string | null;
+  messages: Array<Record<string, unknown>>;
+  /**
+   * Note rendered in the dialog explaining what we DON'T know
+   * (e.g. tools array, sampling params). Helps the reader avoid
+   * mistaking the reconstruction for a literal HTTP capture.
+   */
+  notes: string[];
+};
+
+/**
+ * Rebuild the OpenAI-shaped messages payload for a given LLM call.
+ * Pure: takes the system prompt entry + the history entries that
+ * preceded the call and folds them into `{role, content, ...}` shapes
+ * compatible with OpenAI Chat Completions / most compatible servers.
+ *
+ * Exported for tests so the reconstruction can be pinned independently
+ * of the rendering layer.
+ */
+export function buildRawPayload(opts: {
+  task: TaskRow | null;
+  systemPromptEntry: EntryRow | null;
+  historyEntries: EntryRow[];
+}): RawPayload {
+  const { task, systemPromptEntry, historyEntries } = opts;
+  const messages: Array<Record<string, unknown>> = [];
+
+  if (systemPromptEntry) {
+    messages.push({
+      role: "system",
+      content: systemPromptEntry.content,
+    });
+  }
+
+  for (const e of historyEntries) {
+    if (e.kind === "system_prompt") continue; // already handled
+    if (e.kind === "status_notice") continue; // not LLM-visible
+    if (e.kind === "tool_call") continue;     // folded into ai_message metadata
+
+    if (e.kind === "user_message") {
+      messages.push({ role: "user", content: e.content });
+      continue;
+    }
+
+    if (e.kind === "ai_message") {
+      const meta = (e.metadata ?? {}) as Record<string, unknown>;
+      const toolCalls = Array.isArray(meta["toolCalls"]) ? meta["toolCalls"] : [];
+      const msg: Record<string, unknown> = {
+        role: "assistant",
+        content: e.content,
+      };
+      if (toolCalls.length > 0) {
+        msg["tool_calls"] = toolCalls.map((tc) => {
+          const o = tc as Record<string, unknown>;
+          return {
+            id: typeof o["id"] === "string" ? o["id"] : "",
+            type: "function",
+            function: {
+              name: typeof o["name"] === "string" ? o["name"] : "",
+              arguments: prettyJson(o["arguments"] ?? {}),
+            },
+          };
+        });
+      }
+      messages.push(msg);
+      continue;
+    }
+
+    if (e.kind === "tool_result") {
+      messages.push({
+        role: "tool",
+        tool_call_id: e.toolCallId ?? "",
+        content: e.content,
+      });
+      continue;
+    }
+
+    if (e.kind === "system_reminder") {
+      // SessionContext.appendReminder persists with role="user"; the
+      // wire shape is the same.
+      messages.push({ role: "user", content: e.content });
+      continue;
+    }
+  }
+
+  const notes: string[] = [];
+  if (!systemPromptEntry) {
+    notes.push(
+      "system_prompt not persisted for this task — the actual prompt was passed to the provider but is missing from the DB. Older session?",
+    );
+  }
+  notes.push(
+    "Reconstructed from persisted entries. The `tools` array, sampling params, and provider-specific options are not recorded and therefore omitted here.",
+  );
+
+  return {
+    model: task?.modelId ?? null,
+    messages,
+    notes,
+  };
+}
+
+function renderPayloadDialog(
+  dialogId: string,
+  payload: RawPayload,
+  callIndex: number,
+): string {
+  const obj: Record<string, unknown> = { messages: payload.messages };
+  if (payload.model !== null) obj["model"] = payload.model;
+  const json = prettyJson(obj);
+
+  const notesHtml = payload.notes
+    .map((n) => `<li>${escapeHtml(n)}</li>`)
+    .join("");
+
+  return `
+<dialog class="raw-dialog" id="${escapeAttr(dialogId)}">
+  <div class="raw-dialog-inner">
+    <header class="raw-dialog-header">
+      <strong>Raw payload — call #${callIndex}</strong>
+      <button type="button" class="raw-dialog-close" data-close="${escapeAttr(dialogId)}" aria-label="Close">×</button>
+    </header>
+    <ul class="raw-dialog-notes">${notesHtml}</ul>
+    <pre class="raw-dialog-json">${escapeHtml(json)}</pre>
+  </div>
+</dialog>`.trim();
 }
 
 // ─── Persistence helpers ───────────────────────────────────────────────────
@@ -445,7 +560,7 @@ function isUsage(x: unknown): x is { promptTokens: number; completionTokens: num
   );
 }
 
-// ─── Document wrapper + stylesheet ─────────────────────────────────────────
+// ─── Document wrapper + stylesheet + tiny dialog script ───────────────────
 
 function wrapDocument(opts: { title: string; header: string; body: string }): string {
   return `<!doctype html>
@@ -458,10 +573,55 @@ function wrapDocument(opts: { title: string; header: string; body: string }): st
 <body>
 ${opts.header}
 ${opts.body}
+<script>${DIALOG_SCRIPT}</script>
 </body>
 </html>
 `;
 }
+
+const DIALOG_SCRIPT = `
+(function() {
+  function bind() {
+    document.querySelectorAll('button.raw-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var id = btn.getAttribute('data-dialog');
+        var dlg = document.getElementById(id);
+        if (dlg && typeof dlg.showModal === 'function') {
+          dlg.showModal();
+        } else if (dlg) {
+          // Old browsers without <dialog> — fall back to display: block
+          dlg.setAttribute('open', '');
+        }
+      });
+    });
+    document.querySelectorAll('button.raw-dialog-close').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var id = btn.getAttribute('data-close');
+        var dlg = document.getElementById(id);
+        if (dlg && typeof dlg.close === 'function') {
+          dlg.close();
+        } else if (dlg) {
+          dlg.removeAttribute('open');
+        }
+      });
+    });
+    // Click on backdrop closes too.
+    document.querySelectorAll('dialog.raw-dialog').forEach(function(dlg) {
+      dlg.addEventListener('click', function(ev) {
+        if (ev.target === dlg) {
+          if (typeof dlg.close === 'function') dlg.close();
+          else dlg.removeAttribute('open');
+        }
+      });
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bind);
+  } else {
+    bind();
+  }
+})();
+`.trim();
 
 const STYLES = `
 :root {
@@ -542,7 +702,6 @@ h4 { font-size: 0.95rem; margin: 0.5rem 0 0.25rem; color: var(--muted); }
 h5 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; color: var(--muted); }
 .dim { color: var(--muted); }
 
-/* page header */
 .page-header {
   border-bottom: 1px solid var(--border);
   padding-bottom: 1rem;
@@ -558,7 +717,6 @@ h5 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; color: var(--muted); }
 .page-header dt { font-weight: 600; color: var(--muted); }
 .page-header dd { margin: 0; }
 
-/* task block */
 .task {
   border: 1px solid var(--border);
   border-left: 4px solid var(--task-band);
@@ -588,18 +746,15 @@ h5 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; color: var(--muted); }
 .badge.model { background: var(--user-bg); color: var(--user-fg); }
 .badge.dim   { background: transparent; color: var(--muted); padding-left: 0; }
 
-/* system prompt collapsible */
-.system-prompt {
-  margin: 0.5rem 0 1rem;
-}
+.system-prompt { margin: 0.5rem 0 1rem; }
 .system-prompt summary {
   cursor: pointer;
   color: var(--muted);
   font-size: 0.9rem;
   user-select: none;
 }
+.system-prompt-missing { font-size: 0.85rem; margin: 0.25rem 0 1rem; }
 
-/* one LLM call */
 .llm-call {
   margin: 1rem 0 0;
   padding-top: 0.6rem;
@@ -614,7 +769,20 @@ h5 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; color: var(--muted); }
 }
 .call-inputs.empty p { font-style: italic; }
 
-/* entries */
+button.raw-btn {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--accent);
+  font-size: 0.8rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button.raw-btn:hover {
+  background: rgba(37, 99, 235, 0.1);
+}
+
 .entry {
   display: block;
   padding: 0.5rem 0.75rem;
@@ -653,7 +821,6 @@ h5 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; color: var(--muted); }
 .tool-args summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
 .tool-args[open] { margin-top: 0.25rem; }
 
-/* assistant response */
 .call-output {
   background: var(--assistant-bg);
   color: var(--assistant-fg);
@@ -678,6 +845,59 @@ h5 { font-size: 0.9rem; margin: 0.5rem 0 0.25rem; color: var(--muted); }
 }
 .usage { margin-top: 0.5rem; font-size: 0.78rem; }
 
-/* trailing entries */
 .trailing-entries { margin-top: 1rem; padding-top: 0.6rem; border-top: 1px dashed var(--border); }
+
+/* dialog */
+dialog.raw-dialog {
+  max-width: 90vw;
+  width: 900px;
+  max-height: 85vh;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+dialog.raw-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+.raw-dialog-inner {
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+}
+.raw-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--tool-bg);
+  color: var(--tool-fg);
+}
+.raw-dialog-close {
+  border: none;
+  background: transparent;
+  font-size: 1.4rem;
+  cursor: pointer;
+  color: var(--muted);
+  line-height: 1;
+  padding: 0 0.3rem;
+}
+.raw-dialog-close:hover { color: var(--fg); }
+.raw-dialog-notes {
+  margin: 0;
+  padding: 0.5rem 1.5rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.raw-dialog-notes li { margin: 0.15rem 0; }
+.raw-dialog-json {
+  margin: 0;
+  border-radius: 0;
+  overflow: auto;
+  flex: 1;
+  font-size: 12px;
+}
 `.trim();

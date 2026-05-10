@@ -266,6 +266,18 @@ export class TaskOrchestrator {
       toolHints: getToolPromptHints(toolFilter),
     });
 
+    // Persist the system prompt as its own entry so debug tooling can
+    // reconstruct the raw payload sent to the LLM. `isLLMVisible` skips
+    // SystemPrompt entries so this does NOT pollute llmContext (the
+    // prompt is passed separately by callLLM as the `system` field).
+    await sessionContext.append({
+      taskId,
+      kind: EntryKind.SystemPrompt,
+      role: "system",
+      content: systemPrompt,
+      metadata: { roleName: role.name },
+    });
+
     const contextWindow =
       config.contextWindow ?? estimateContextWindow(config.modelId);
 
@@ -477,7 +489,7 @@ function isTerminalForEvent(s: TaskStatus): s is "done" | "failed" | "stopped" {
 }
 
 function toTaskSummary(s: TaskRunSummary): TaskSummary {
-  return {
+  const out: TaskSummary = {
     finalResult: s.finalResult,
     hasExplicitResult: s.hasExplicitResult,
     toolCallCount: s.toolCallCount,
@@ -487,6 +499,9 @@ function toTaskSummary(s: TaskRunSummary): TaskSummary {
     totalTokens: s.totalTokens,
     elapsedMs: s.elapsedMs,
   };
+  if (s.cachedTokens > 0) out.cachedTokens = s.cachedTokens;
+  if (s.cacheCreationTokens > 0) out.cacheCreationTokens = s.cacheCreationTokens;
+  return out;
 }
 
 function summaryFromRow(row: TaskRow): TaskRunSummary {
@@ -500,6 +515,11 @@ function summaryFromRow(row: TaskRow): TaskRunSummary {
     promptTokens: row.promptTokens,
     completionTokens: row.completionTokens,
     totalTokens: row.totalTokens,
+    // Cache fields are only meaningful for live runs — the DB schema
+    // doesn't have columns for them yet, so reconstructed summaries
+    // surface zero. Adding columns is a future migration.
+    cachedTokens: 0,
+    cacheCreationTokens: 0,
     elapsedMs: 0,
   };
 }

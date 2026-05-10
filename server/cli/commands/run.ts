@@ -31,6 +31,7 @@
  *   5  — couldn't acquire per-cwd lock within timeout
  */
 
+import type { TaskRunSummary } from "../../task/task-loop.js";
 import { bootstrap } from "../bootstrap.js";
 import { attachAskHandler } from "./run-ask.js";
 import { makeFormatter, type FormatName } from "../formatters/index.js";
@@ -63,6 +64,12 @@ export type RunArgs = {
    * / `-y`. Env: `HUKO_NON_INTERACTIVE=1`. Defaults to true.
    */
   interactive?: boolean;
+  /**
+   * Print a per-bucket token-usage breakdown (input / cache read /
+   * cache write / output / total) after the run completes. CLI flag:
+   * `--show-tokens`. Defaults to false.
+   */
+  showTokens?: boolean;
 };
 
 /**
@@ -243,6 +250,9 @@ export async function runCommand(args: RunArgs): Promise<number> {
 
     const summary = await result.completion;
     formatter.onSummary(summary);
+    if (args.showTokens) {
+      process.stderr.write(formatTokenBreakdown(summary) + "\n");
+    }
     exitCode =
       summary.status === "done" ? 0 : summary.status === "stopped" ? 2 : 1;
   } catch (err) {
@@ -256,4 +266,49 @@ export async function runCommand(args: RunArgs): Promise<number> {
   }
 
   return exitCode;
+}
+
+// ─── Token breakdown formatter ──────────────────────────────────────────────
+
+/**
+ * Render the token-usage breakdown shown after a `--show-tokens` run.
+ *
+ * Output (rows for cache read / cache write are only emitted when the
+ * provider populated them):
+ *
+ *   Token usage:
+ *     input          12,345
+ *     cache read      3,456
+ *     cache write       789
+ *     output          1,234
+ *     total          17,824
+ *
+ * Numbers are right-aligned to the widest value. The breakdown writes
+ * to stderr so a piped `huko run --json` consumer still gets clean
+ * stdout JSON.
+ *
+ * Exported so tests can lock the format.
+ */
+export function formatTokenBreakdown(summary: TaskRunSummary): string {
+  const rows: Array<[string, number]> = [
+    ["input", summary.promptTokens],
+  ];
+  if (summary.cachedTokens > 0) rows.push(["cache read", summary.cachedTokens]);
+  if (summary.cacheCreationTokens > 0) {
+    rows.push(["cache write", summary.cacheCreationTokens]);
+  }
+  rows.push(["output", summary.completionTokens]);
+  rows.push(["total", summary.totalTokens]);
+
+  const fmt = (n: number) => n.toLocaleString("en-US");
+  const numWidth = Math.max(...rows.map(([, n]) => fmt(n).length));
+  const labelWidth = Math.max(...rows.map(([l]) => l.length));
+
+  const lines = ["Token usage:"];
+  for (const [label, n] of rows) {
+    lines.push(
+      `  ${label.padEnd(labelWidth, " ")}  ${fmt(n).padStart(numWidth, " ")}`,
+    );
+  }
+  return lines.join("\n");
 }

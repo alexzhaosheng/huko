@@ -1,22 +1,8 @@
 /**
  * tests/persistence-suite.ts
  *
- * Shared spec for `SessionPersistence` so the SQLite and Memory
- * backends are tested by literally the same code,
- * not two parallel copies. Add a behavioural test once, both backends
- * inherit it.
- *
- * Each backend test file calls `runInfraSuite` / `runSessionSuite` with
- * a factory:
- *
- *   runSessionSuite("memory", () => ({
- *     instance: new MemorySessionPersistence(),
- *     teardown: () => {},
- *   }));
- *
- * SQLite-only behaviour (transaction rollback under failure, on-disk
- * artifacts) stays in the SQLite test file — not every contract is
- * shared, only the behavioural one.
+ * Shared spec for SessionPersistence so the SQLite and Memory backends
+ * are tested by literally the same code, not two parallel copies.
  */
 
 import { describe, it, beforeEach, afterEach } from "node:test";
@@ -24,9 +10,6 @@ import { strict as assert } from "node:assert";
 import type { SessionPersistence } from "../server/persistence/index.js";
 import { EntryKind, type TaskStatus } from "../shared/types.js";
 
-// A factory's return: the backend instance + a teardown to call
-// after each test. Teardown is the place to close DB handles, drop
-// tmp directories, etc.
 export type Harness<T> = {
   instance: T;
   teardown: () => Promise<void> | void;
@@ -85,10 +68,6 @@ export function runSessionSuite(label: string, factory: SessionFactory): void {
       });
 
       it("list returns every persisted session", async () => {
-        // We don't assert *order* — both backends quantise updatedAt
-        // (SQLite to seconds, Memory to ms-but-flaky-on-Windows), so
-        // back-to-back inserts can tie. Order across a second is
-        // implicit; here we just verify membership.
         const a = await session.sessions.create({ title: "a" });
         const b = await session.sessions.create({ title: "b" });
         const ids = (await session.sessions.list())
@@ -252,7 +231,12 @@ export function runSessionSuite(label: string, factory: SessionFactory): void {
     });
 
     describe("loadLLMContext", () => {
-      it("includes LLM-visible kinds in id order", async () => {
+      it("includes LLM-visible kinds in id order, excluding system_prompt", async () => {
+        // system_prompt is persisted (so debug tooling can show what
+        // was sent) but is NOT pushed onto the in-memory llmContext —
+        // the LLM-call pipeline passes the prompt separately as the
+        // `system` field. Including it here would let the model see
+        // the prompt twice.
         const sid = await session.sessions.create({ title: "s" });
         const tid = await session.tasks.create(taskSpec(sid));
         await session.entries.persist({
@@ -269,7 +253,7 @@ export function runSessionSuite(label: string, factory: SessionFactory): void {
         });
         const ctx = await session.entries.loadLLMContext(sid, "chat");
         const contents = ctx.map((m) => m.content);
-        assert.deepEqual(contents, ["you are huko", "hi", "hello"]);
+        assert.deepEqual(contents, ["hi", "hello"]);
       });
 
       it("excludes status_notice (UI-only kind)", async () => {

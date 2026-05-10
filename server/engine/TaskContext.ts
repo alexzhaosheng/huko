@@ -2,18 +2,6 @@
  * server/engine/TaskContext.ts
  *
  * Task-scoped state container. One instance per task run.
- *
- * TaskContext holds everything specific to a single task execution:
- *   - Identifiers (taskId, sessionId, ...)
- *   - LLM call configuration (protocol, baseUrl, model, headers, ...)
- *   - Tools & system prompt
- *   - Runtime callbacks (executeTool, requestApproval, waitForReply)
- *   - Execution accumulators (token counts, tool call count)
- *   - Task outcome (finalResult, status flags)
- *   - Abort plumbing (masterAbort, currentLlmAbort, currentToolPromise)
- *   - Deferred tool-call queue (single-step enforcement)
- *   - Plan state (planState)
- *   - Behaviour counters (behavior) + working language (workingLanguage)
  */
 
 import type { Protocol, ThinkLevel, Tool, ToolCall, ToolCallMode } from "../core/llm/types.js";
@@ -31,9 +19,6 @@ export type WorkstationExecutor = (
 
 export type ApprovalCallback = (message: string) => Promise<boolean>;
 
-/**
- * Block until the user replies to a `message(type=ask)` call.
- */
 export type WaitForReplyCallback = (payload: {
   toolCallId: string;
   question: string;
@@ -45,7 +30,6 @@ export type WaitForReplyCallback = (payload: {
 
 export type TaskContextOptions = SessionOwnership & {
   taskId: number;
-
   protocol: Protocol;
   modelId: string;
   baseUrl: string;
@@ -55,15 +39,12 @@ export type TaskContextOptions = SessionOwnership & {
   contextWindow: number;
   headers?: Record<string, string>;
   extras?: Record<string, unknown>;
-
   tools: Tool[];
   systemPrompt: string;
   sessionContext: SessionContext;
-
   executeTool?: WorkstationExecutor;
   requestApproval?: ApprovalCallback;
   waitForReply?: WaitForReplyCallback;
-
   externalAbortSignal?: AbortSignal;
 };
 
@@ -94,13 +75,16 @@ export class TaskContext {
 
   readonly masterAbort: AbortController;
   currentLlmAbort: AbortController | null = null;
-
   currentToolPromise: Promise<unknown> | null = null;
 
   toolCallCount: number = 0;
   promptTokens: number = 0;
   completionTokens: number = 0;
   totalTokens: number = 0;
+  /** Subset of promptTokens billed as cache reads (provider-reported). */
+  cachedTokens: number = 0;
+  /** Subset written into the prompt cache during this task (Anthropic). */
+  cacheCreationTokens: number = 0;
   iterationCount: number = 0;
 
   deferredCalls: ToolCall[] = [];
@@ -112,24 +96,8 @@ export class TaskContext {
 
   interjected: boolean = false;
 
-  /**
-   * Current plan state. null when the LLM has not yet called plan(update).
-   * Rebuildable from tool_result entries' metadata.planEvents on resume.
-   */
   planState: PlanState | null = null;
-
-  /**
-   * Per-task behaviour counters (consecutive_info, empty_turn).
-   * Orchestrator calls behavior.resetOnUserInteraction() on interjection.
-   */
   readonly behavior: BehaviorGuard = new BehaviorGuard();
-
-  /**
-   * Working language label (e.g. "中文", "English"). Used by
-   * language-reminder.ts to detect script drift in the context tail.
-   * Auto-detected from the first user message at task start;
-   * null disables drift detection.
-   */
   workingLanguage: string | null = null;
 
   readonly startTime: number = Date.now();
@@ -188,10 +156,18 @@ export class TaskContext {
     return this.masterAbort.signal.aborted;
   }
 
-  addTokens(usage: { promptTokens: number; completionTokens: number; totalTokens: number }): void {
+  addTokens(usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cachedTokens?: number;
+    cacheCreationTokens?: number;
+  }): void {
     this.promptTokens += usage.promptTokens;
     this.completionTokens += usage.completionTokens;
     this.totalTokens += usage.totalTokens;
+    if (usage.cachedTokens) this.cachedTokens += usage.cachedTokens;
+    if (usage.cacheCreationTokens) this.cacheCreationTokens += usage.cacheCreationTokens;
   }
 
   summary(): {
@@ -199,6 +175,8 @@ export class TaskContext {
     totalTokens: number;
     promptTokens: number;
     completionTokens: number;
+    cachedTokens: number;
+    cacheCreationTokens: number;
     iterationCount: number;
     elapsedMs: number;
   } {
@@ -207,6 +185,8 @@ export class TaskContext {
       totalTokens: this.totalTokens,
       promptTokens: this.promptTokens,
       completionTokens: this.completionTokens,
+      cachedTokens: this.cachedTokens,
+      cacheCreationTokens: this.cacheCreationTokens,
       iterationCount: this.iterationCount,
       elapsedMs: this.elapsedMs,
     };
