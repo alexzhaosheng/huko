@@ -5,24 +5,14 @@
  *
  * Responsibilities:
  *   1. Look up the call's tool in the registry.
- *   2. Coerce arguments against the declared schema (best-effort).
- *   3. Dispatch:
- *        - server tool      -> in-process handler invocation
- *        - workstation tool -> ctx.executeTool callback (Socket.IO route)
- *   4. Wrap with Promise.race against ctx.masterAbort so the loop can
- *      cancel mid-tool. The tool may keep running in the background;
- *      we just stop awaiting it.
- *   5. Persist a `tool_result` entry through `sessionContext.append()`.
- *      In native mode the LLM context auto-includes it because role is
- *      "tool" and toolCallId is set.
- *   6. Bump TaskContext.toolCallCount.
- *   7. Honor `ToolHandlerResult.finalResult` / `shouldBreak` / etc. by
- *      lifting them onto the task outcome and surfacing a "break"
- *      outcome to the loop.
- *
- * Errors are caught and surfaced as a tool-result entry with an
- * `error` flag — the LLM can react to them on the next turn rather
- * than the whole task crashing.
+ *   2. Coerce arguments against the declared schema.
+ *   3. Dispatch (server / workstation tool).
+ *   4. Race against masterAbort.
+ *   5. Persist tool_result via sessionContext.append.
+ *   6. Bump counters; lift finalResult / shouldBreak.
+ *   7. Drain postReminders + BehaviorGuard.afterToolExecution AFTER the
+ *      tool_result entry lands so the assistant(tool_use) -> tool(result)
+ *      adjacency Anthropic requires stays intact.
  */
 
 import type { TaskContext } from "../../engine/TaskContext.js";
@@ -33,6 +23,7 @@ import {
   getTool,
   isLegacyServerToolResult,
   isToolHandlerResult,
+  type PostReminder,
   type ServerToolResult,
   type ToolAttachment,
   type ToolHandlerResult,
@@ -55,6 +46,7 @@ type Normalised = {
   shouldBreak?: boolean;
   summary?: string;
   attachments?: ToolAttachment[];
+  postReminders?: PostReminder[];
 };
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -67,21 +59,15 @@ export async function executeAndPersist(
 
   const tool = getTool(call.name);
 
-  // ── 1. Unknown tool → record the error so the LLM can correct itself ─────
   if (!tool) {
     const error = `Tool "${call.name}" is not registered.`;
     const entryId = await persistResult(ctx, call, "", error, { unknownTool: true });
     return { kind: "error", entryId, error };
   }
 
-  // ── 2. Coerce args (best-effort) ─────────────────────────────────────────
   const coerced = coerceArgs(call.name, call.arguments);
   const coercedCall: ToolCall = { ...call, arguments: coerced };
 
-  // ── 3. Execute (race against masterAbort) ────────────────────────────────
-  // Track the in-flight tool promise on TaskContext so the orchestrator's
-  // interject path can await it before appending user_message — preserves
-  // assistant(tool_use) → tool(result) adjacency required by Anthropic.
   let outcome: Normalised;
   const racePromise = raceAbort(ctx, () => runTool(ctx, coercedCall, tool));
   ctx.currentToolPromise = racePromise.catch(() => undefined);
@@ -99,13 +85,11 @@ export async function executeAndPersist(
 
   if (ctx.isAborted) return { kind: "aborted" };
 
-  // ── 4. Lift finalResult onto TaskContext ─────────────────────────────────
   if (outcome.finalResult !== undefined && outcome.finalResult.length > 0) {
     ctx.finalResult = outcome.finalResult;
     ctx.hasExplicitResult = true;
   }
 
-  // ── 5. Persist ───────────────────────────────────────────────────────────
   const extraMeta: Record<string, unknown> = {};
   if (outcome.metadata) Object.assign(extraMeta, outcome.metadata);
   if (outcome.summary !== undefined) extraMeta["summary"] = outcome.summary;
@@ -116,6 +100,28 @@ export async function executeAndPersist(
   const entryId = await persistResult(ctx, coercedCall, outcome.result, outcome.error, extraMeta);
 
   ctx.toolCallCount += 1;
+
+  // Post-reminders: tool-emitted then BehaviorGuard. Both go via
+  // appendReminder so the LLM sees a uniform <system_reminder> tag.
+  const allReminders: PostReminder[] = [];
+  if (outcome.postReminders && outcome.postReminders.length > 0) {
+    allReminders.push(...outcome.postReminders);
+  }
+  const guardReminders = ctx.behavior.afterToolExecution(
+    coercedCall.name,
+    coercedCall.arguments,
+    outcome.error !== null,
+  );
+  if (guardReminders.length > 0) {
+    allReminders.push(...guardReminders);
+  }
+  for (const r of allReminders) {
+    await ctx.sessionContext.appendReminder({
+      taskId: ctx.taskId,
+      reason: r.reason,
+      content: r.content,
+    });
+  }
 
   if (outcome.error) {
     return { kind: "error", entryId, error: outcome.error };
@@ -150,9 +156,6 @@ async function runTool(
     return res;
   }
 
-  // server tool — pass through the LLM's tool call id so handlers that
-  // need it (e.g. `message(type=ask)` keying its waitForReply Promise)
-  // can use a stable per-call key.
   const handlerOutput = await Promise.resolve(
     tool.handler(call.arguments, ctx, { toolCallId: call.id }),
   );
@@ -175,6 +178,7 @@ function normaliseHandlerOutput(
     if (out.shouldBreak) n.shouldBreak = true;
     if (out.summary !== undefined) n.summary = out.summary;
     if (out.attachments) n.attachments = out.attachments;
+    if (out.postReminders && out.postReminders.length > 0) n.postReminders = out.postReminders;
     return n;
   }
   if (isLegacyServerToolResult(out)) {
@@ -185,7 +189,6 @@ function normaliseHandlerOutput(
     if (out.metadata) n.metadata = out.metadata;
     return n;
   }
-  // Should never happen — handler returned something exotic.
   return { result: String(out), error: null };
 }
 
@@ -217,11 +220,6 @@ async function persistResult(
 
 // ─── Internal: abort race ────────────────────────────────────────────────────
 
-/**
- * Run `fn()` and reject with an Error("aborted") as soon as the master
- * abort fires. The underlying tool may keep running in the background;
- * we stop awaiting it so the loop can move on.
- */
 function raceAbort<T>(ctx: TaskContext, fn: () => Promise<T>): Promise<T> {
   if (ctx.isAborted) return Promise.reject(makeAbortError());
   return new Promise<T>((resolve, reject) => {

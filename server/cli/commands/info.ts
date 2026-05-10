@@ -10,7 +10,11 @@
  *   - `huko info global`    same shape, but for what global's pointers
  *                           would set (regardless of project overrides).
  *   - `huko info project`   what project's pointers set (often empty).
- *   - `huko info builtin`   what huko ships with.
+ *
+ * No `builtin` scope: huko's built-in defaults are already visible in
+ * the merged view (the source column says `builtin` when a layer's
+ * pointer wasn't set). To see the full set of built-in entries, use
+ * `huko provider list` / `huko model list`.
  *
  * Provider/model LISTS aren't shown here — `huko provider list` and
  * `huko model list` already cover those. `info` is the focused view:
@@ -49,10 +53,6 @@ import {
   readProjectConfigFile,
 } from "../../config/infra-config.js";
 import {
-  BUILTIN_CURRENT_MODEL,
-  BUILTIN_CURRENT_PROVIDER,
-} from "../../config/builtin-providers.js";
-import {
   bold,
   dim,
   emphasis,
@@ -66,7 +66,7 @@ import {
 
 export type OutputFormat = "text" | "jsonl" | "json";
 
-export type InfoScope = "all" | "global" | "project" | "builtin";
+export type InfoScope = "all" | "global" | "project";
 
 export type InfoArgs = {
   scope: InfoScope;
@@ -127,7 +127,6 @@ export async function infoCommand(args: InfoArgs): Promise<number> {
  *                 nothing if the user hasn't written `currentProvider`
  *                 / `currentModel` there).
  *   - `project` → same for `<cwd>/.huko/providers.json`.
- *   - `builtin` → the hard-coded BUILTIN_CURRENT_*.
  *
  * In each case we still resolve the names against the FULL merged
  * provider/model set so the user sees full details (URL, protocol,
@@ -152,15 +151,12 @@ function effectiveForScope(cfg: InfraConfig, scope: InfoScope, cwd: string): Eff
     const file = readGlobalConfigFile();
     providerName = file.currentProvider;
     modelId = file.currentModel;
-  } else if (scope === "project") {
+  } else {
+    // scope === "project"
     layer = "project";
     const file = readProjectConfigFile(cwd);
     providerName = file.currentProvider;
     modelId = file.currentModel;
-  } else {
-    layer = "builtin";
-    providerName = BUILTIN_CURRENT_PROVIDER;
-    modelId = BUILTIN_CURRENT_MODEL;
   }
 
   const currentProvider =

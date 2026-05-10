@@ -12,10 +12,14 @@
  *   - Task outcome (finalResult, status flags)
  *   - Abort plumbing (masterAbort, currentLlmAbort, currentToolPromise)
  *   - Deferred tool-call queue (single-step enforcement)
+ *   - Plan state (planState)
+ *   - Behaviour counters (behavior) + working language (workingLanguage)
  */
 
 import type { Protocol, ThinkLevel, Tool, ToolCall, ToolCallMode } from "../core/llm/types.js";
 import type { SessionOwnership, TaskStatus, UserAttachment } from "../../shared/types.js";
+import type { PlanState } from "../../shared/plan-types.js";
+import { BehaviorGuard } from "../task/behavior-guard.js";
 import type { SessionContext } from "./SessionContext.js";
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
@@ -28,18 +32,7 @@ export type WorkstationExecutor = (
 export type ApprovalCallback = (message: string) => Promise<boolean>;
 
 /**
- * Block until the user replies to a `message(type=ask)` call. The
- * orchestrator wires this up; tool handlers call it to wait for a
- * reply.
- *
- * Keying: `toolCallId` is the LLM-assigned unique id of the assistant's
- * tool call. The orchestrator's resolver registry uses this as the key,
- * so multiple concurrent asks (future daemon mode, agents, etc.) never
- * collide. The resolution channel is whatever the frontend wires up —
- * stdin in CLI, Socket.IO + tRPC mutation in daemon mode.
- *
- * Return value: `{ content, attachments? }`. `content` becomes the
- * tool_result text the LLM sees on the next turn.
+ * Block until the user replies to a `message(type=ask)` call.
  */
 export type WaitForReplyCallback = (payload: {
   toolCallId: string;
@@ -59,11 +52,6 @@ export type TaskContextOptions = SessionOwnership & {
   apiKey: string;
   toolCallMode: ToolCallMode;
   thinkLevel: ThinkLevel;
-  /**
-   * The model's context window in tokens. Used by `pipeline/context-manage.ts`
-   * to scale compaction thresholds. Required — orchestrator fills via
-   * `estimateContextWindow(modelId)` when persistence has no value.
-   */
   contextWindow: number;
   headers?: Record<string, string>;
   extras?: Record<string, unknown>;
@@ -104,20 +92,9 @@ export class TaskContext {
   readonly requestApproval?: ApprovalCallback;
   readonly waitForReply?: WaitForReplyCallback;
 
-  // ── Abort plumbing ───────────────────────────────────────────────────────────
   readonly masterAbort: AbortController;
-  /** Current LLM call's abort, set by pipeline before each call, cleared after. */
   currentLlmAbort: AbortController | null = null;
 
-  /**
-   * Current in-flight tool execution. Tool-execute sets this before the
-   * await and clears it after. Used by orchestrator.sendUserMessage to
-   * defer user-message append until the tool_result has landed —
-   * Anthropic requires assistant(tool_use) -> tool(result) to remain
-   * adjacent. Without this, an interjection mid-tool produces:
-   *   assistant(tool_use) -> user(text) -> tool(result)
-   * which the next LLM call rejects with a 400.
-   */
   currentToolPromise: Promise<unknown> | null = null;
 
   toolCallCount: number = 0;
@@ -126,11 +103,6 @@ export class TaskContext {
   totalTokens: number = 0;
   iterationCount: number = 0;
 
-  /**
-   * When the LLM emits multiple tool calls in one turn, only the first
-   * is executed immediately; the rest land here and are drained one per
-   * loop iteration before the next LLM call.
-   */
   deferredCalls: ToolCall[] = [];
 
   finalResult: string = "";
@@ -138,8 +110,27 @@ export class TaskContext {
   taskFailed: boolean = false;
   taskStopped: boolean = false;
 
-  /** True if the user has interjected since the last consumption. */
   interjected: boolean = false;
+
+  /**
+   * Current plan state. null when the LLM has not yet called plan(update).
+   * Rebuildable from tool_result entries' metadata.planEvents on resume.
+   */
+  planState: PlanState | null = null;
+
+  /**
+   * Per-task behaviour counters (consecutive_info, empty_turn).
+   * Orchestrator calls behavior.resetOnUserInteraction() on interjection.
+   */
+  readonly behavior: BehaviorGuard = new BehaviorGuard();
+
+  /**
+   * Working language label (e.g. "中文", "English"). Used by
+   * language-reminder.ts to detect script drift in the context tail.
+   * Auto-detected from the first user message at task start;
+   * null disables drift detection.
+   */
+  workingLanguage: string | null = null;
 
   readonly startTime: number = Date.now();
 

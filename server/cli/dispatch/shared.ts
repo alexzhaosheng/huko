@@ -2,24 +2,17 @@
  * server/cli/dispatch/shared.ts
  *
  * Shared bits used by multiple per-resource dispatchers:
- *   - `usage(exitCode)`: prints the global help text and **throws**
- *     `CliExitError`. The single `process.exit()` site lives in
- *     `index.ts`; everywhere else, "exit now" is a typed exception
- *     so tests / embedders / future REPL composition aren't killed
- *     by deep stack frames.
- *   - `parseFormatFlags<F>(argv, validFormats, defaultFormat)`: pulls
- *     the standard `--format / --json / --jsonl` set out of argv.
- *     Used by `run`, `sessions list`, `provider list`, `model list`.
- *
- * Per-resource argv parsing is in the sibling `dispatch/<resource>.ts`
- * files; index.ts keeps only the top-level routing table.
+ *   - usage(exitCode): prints global help text and **throws**
+ *     CliExitError. The single process.exit() site is in index.ts;
+ *     everywhere else uses a typed exception so tests / embedders /
+ *     future REPL composition aren't killed by deep stack frames.
+ *   - parseFormatFlags<F>(argv, validFormats, defaultFormat): pulls
+ *     --format / --json / --jsonl out of argv. Used by run, sessions
+ *     list, provider list, model list.
  */
 
 import { bold, type ColorStream, cyan, dim } from "../colors.js";
 
-/**
- * Thrown by `usage()` and similar "stop now with this exit code" sites.
- */
 export class CliExitError extends Error {
   readonly code: number;
   constructor(code: number, message?: string) {
@@ -30,36 +23,21 @@ export class CliExitError extends Error {
 }
 
 /**
- * Print the global help text and abort with `CliExitError(exitCode)`.
+ * Print the global help text and abort with CliExitError(exitCode).
  *
- * `exitCode === 0` (user asked for `-h`/`--help`) → help goes to
- * **stdout** so it can be piped into `less`. Any other code is treated
- * as a usage error → help goes to **stderr** so stdout stays usable
- * for whatever the caller was trying to capture.
- *
- * Help text is colored when the relevant stream is a TTY:
- *   - section headers (`Commands:`, `Options for X:`, ...) bold
- *   - command names (`setup`, `run`, `sessions list`) cyan
- *   - flag prefixes (`--memory`, `--format=`) cyan
- *   - example comments (`# ...`) dim
- *   - exit code numbers cyan
- *
- * Pipes / `huko --help | less` strip the colors automatically.
+ * exitCode === 0 (user asked for -h/--help) -> help goes to stdout so
+ * it can be piped into less. Any other code is treated as a usage
+ * error -> help goes to stderr so stdout stays usable for whatever
+ * the caller was trying to capture.
  */
 export function usage(exitCode: number = 3): never {
   const out = exitCode === 0 ? process.stdout : process.stderr;
   const stream: ColorStream = exitCode === 0 ? "stdout" : "stderr";
 
-  // Local helpers that capture the right stream.
   const h = (s: string) => bold(s, stream);
   const c = (s: string) => cyan(s, stream);
   const d = (s: string) => dim(s, stream);
 
-  /**
-   * Format a "command" or "option" row: pad the indent + cyan-paint the
-   * name, leave the description plain. Width is fixed (30 cols) to match
-   * the existing layout.
-   */
   const COL = 30;
   function pad(s: string, w: number): string {
     return s.length >= w ? s + " " : s + " ".repeat(w - s.length);
@@ -67,7 +45,6 @@ export function usage(exitCode: number = 3): never {
   function row(name: string, desc: string): string {
     return `  ${c(pad(name, COL - 2))} ${desc}`;
   }
-  /** Same as row(), but the description has a "default" tail to dim. */
   function rowWithDefault(name: string, desc: string, def: string): string {
     return `  ${c(pad(name, COL - 2))} ${desc} ${d(def)}`;
   }
@@ -96,17 +73,17 @@ export function usage(exitCode: number = 3): never {
       row("keys unset <ref>", "Remove a key from project keys.json"),
       row("keys list", "Show every ref + which layer resolves it"),
       row("config show", "Print the resolved huko config (layered)"),
-      row("info [scope]", `Show full configuration (scope: ${c("global")} | ${c("project")} | ${c("builtin")})`),
+      row("info [scope]", `Show full configuration (scope: ${c("global")} | ${c("project")})`),
       "",
       h("Options for `run`:"),
       rowWithDefault("--format=<fmt>", "text | jsonl | json", "(default: text)"),
       row("--json | --jsonl", "Shortcuts for --format=..."),
       row("--title=<text>", "Title for the NEW session (if one is created)"),
       row("--memory", "Session DB in memory; state.json untouched"),
-      rowWithDefault("--role=<name>", "Role", "(default: coding)"),
+      rowWithDefault("--role=<name>", "Role", "(default: general)"),
       row("--new", "Force a fresh session and switch active to it"),
       row("--session=<id>", "One-off send to <id>; active pointer untouched"),
-      row("--no-interaction, -y", "Disable mid-task user prompts (drops `message(type=ask)`)"),
+      row("--no-interaction, -y", "Disable mid-task user prompts (drops message(type=ask))"),
       "",
       h("Options for `provider add`:"),
       row("--name=<text>", "Provider name (required)"),
@@ -158,7 +135,7 @@ export function usage(exitCode: number = 3): never {
  * Walk argv pulling out --format / --json / --jsonl flags.
  * Returns the resolved format and the leftover positional / flag args.
  *
- * Unknown `--<flag>` strings cause a usage error so typos fail loud.
+ * Unknown --<flag> strings cause a usage error so typos fail loud.
  */
 export function parseFormatFlags<F extends string>(
   argv: string[],

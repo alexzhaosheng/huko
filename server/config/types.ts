@@ -95,7 +95,7 @@ export const DEFAULT_CONFIG: HukoConfig = {
     charsPerToken: 4,
   },
   role: {
-    default: "coding",
+    default: "general",
   },
   tools: {
     webFetch: {

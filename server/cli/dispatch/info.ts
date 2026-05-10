@@ -3,14 +3,19 @@
  *
  * `huko info [scope]` — argv parser + handoff to commands/info.
  *
- * Optional positional: `global` | `project` | `builtin`. Defaults to
- * the merged view. `--format=text|json|jsonl` (or shortcuts) supported.
+ * Optional positional: `global` | `project`. Defaults to the merged
+ * view. `--format=text|json|jsonl` (or shortcuts) supported.
+ *
+ * Note: there's no `builtin` scope. `huko info` (merged) already labels
+ * pointers from the builtin layer via the source column; if you want to
+ * see exactly what huko ships with, run `huko provider list` /
+ * `huko model list` and look for the `builtin` source.
  */
 
 import { infoCommand, type InfoScope, type OutputFormat } from "../commands/info.js";
 import { parseFormatFlags, usage } from "./shared.js";
 
-const SCOPES = ["global", "project", "builtin"] as const;
+const SCOPES = ["global", "project"] as const;
 
 export async function dispatchInfo(rest: string[]): Promise<number> {
   const { format, positional } = parseFormatFlags<OutputFormat>(

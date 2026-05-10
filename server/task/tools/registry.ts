@@ -18,7 +18,7 @@
  * v2 additions (lifted from WeavesAI's battle-tested implementation):
  *   - `ToolHandlerResult` — handlers can return rich semantic outcomes
  *       beyond a plain string: finalResult / shouldBreak / metadata /
- *       attachments / summary / error.
+ *       attachments / summary / error / postReminders.
  *   - `coerceArgs(name, args)` — runtime type coercion for tool arguments,
  *       so an LLM that hands us `"true"` instead of `true` for a boolean
  *       parameter is patched up before the handler runs.
@@ -47,6 +47,12 @@ import type { TaskContext } from "../../engine/TaskContext.js";
  * - `attachments` — files produced by the tool (paths the user can open).
  * - `error`       — non-null marks this as an error result (the LLM still
  *                   sees `content`, but the entry is flagged).
+ * - `postReminders` — system reminders to inject AFTER the tool_result
+ *                   entry is persisted. Required when a handler wants
+ *                   to nudge the LLM about future behaviour: emitting
+ *                   the reminder inline before tool_result would break
+ *                   Anthropic's `assistant(tool_use) -> tool(result)`
+ *                   adjacency.
  */
 export type ToolHandlerResult = {
   content: string;
@@ -56,6 +62,15 @@ export type ToolHandlerResult = {
   summary?: string;
   attachments?: ToolAttachment[];
   error?: string | null;
+  postReminders?: PostReminder[];
+};
+
+/** A system reminder to be appended right after the tool_result entry. */
+export type PostReminder = {
+  /** Stable identifier (e.g. `plan_update_followup`). Used for metadata + future de-dup. */
+  reason: string;
+  /** Free-form body (no <system_reminder> tag — SessionContext wraps it). */
+  content: string;
 };
 
 export type ToolAttachment = {
@@ -74,7 +89,7 @@ export type ToolAttachment = {
  * Optional 3rd parameter so existing handlers don't have to be touched.
  */
 export type ToolCallMeta = {
-  /** Stable id of this tool call (from the LLM\'s response). */
+  /** Stable id of this tool call (from the LLM's response). */
   toolCallId: string;
 };
 
@@ -203,48 +218,13 @@ export function isWorkstationTool(name: string): boolean {
 
 // ─── Building the tool list for the LLM ──────────────────────────────────────
 
-/**
- * Filter passed to `getToolsForLLM`. Multiple sources of restriction —
- * role frontmatter today, future per-user toggles tomorrow, future
- * per-task overrides further out — compose by merging fields BEFORE
- * the call:
- *
- *   - `allowedTools`: intersect across layers (each layer narrows further).
- *     `undefined` means "this layer doesn't restrict"; an empty array
- *     means "this layer allows nothing".
- *   - `deniedTools` : union across layers (any layer can ban a tool).
- *   - `predicate`   : compose by `&&` (`a(name,k) && b(name,k)`).
- *
- * The merger isn't built yet — wire one when the second layer lands.
- * For now the orchestrator only constructs this from `role.frontmatter.tools`.
- */
 export type ToolFilterContext = {
-  /**
-   * If set, ONLY these tool names pass. Empty array → no tools visible.
-   * Omit to leave tool visibility untouched by this layer.
-   */
   allowedTools?: string[];
-  /** Tools that always fail. Wins ties against `allowedTools`. */
   deniedTools?: string[];
-  /** Custom predicate — final word, applied AFTER allow/deny. */
   predicate?: (name: string, kind: "server" | "workstation") => boolean;
-  /**
-   * Whether the user is reachable for interactive prompts during this
-   * task. When `false`, `message(type=ask)` is removed from the
-   * `message` tool's schema so the LLM literally can't request user
-   * input. Defaults to `true`.
-   *
-   * Wired from `huko run --no-interaction` (CLI), or per-task in
-   * future daemon / web flows.
-   */
   interactive?: boolean;
 };
 
-/**
- * Subset of ToolFilterContext that's relevant for schema/description
- * materialisation. Tools' `parametersFor(ctx)` / `descriptionFor(ctx)`
- * see this — they don't need allow/deny lists.
- */
 export type ToolMaterializeContext = {
   interactive: boolean;
 };

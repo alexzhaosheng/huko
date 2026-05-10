@@ -51,7 +51,7 @@ export type RunArgs = {
   title?: string;
   /** When true, run with Memory persistences — state.json untouched, lock skipped. */
   ephemeral?: boolean;
-  /** Role name (loaded from server/roles/ etc.). Defaults to "coding". */
+  /** Role name (loaded from server/roles/ etc.). Defaults to "general". */
   role?: string;
   /** Force a brand-new session and switch the active pointer to it. */
   newSession?: boolean;

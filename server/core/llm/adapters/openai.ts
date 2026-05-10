@@ -8,22 +8,11 @@
  * DeepSeek, Together, Groq, vLLM, Ollama, and most "we speak OpenAI"
  * providers.
  *
- * Streaming
- * ─────────
- * If `options.onPartial` is set we use SSE. Content and reasoning deltas
- * are pushed through the callback as they arrive; tool-call argument
- * deltas are accumulated internally and surfaced in one piece on the
- * final result. The promise resolves only after `[DONE]` (or stream end).
- *
- * Reasoning
- * ─────────
- * The field name varies by upstream model:
- *   - DeepSeek-style: `reasoning_content`
- *   - OpenRouter normalized: `reasoning`
- * Both are accepted and unified into `LLMTurnResult.thinking`.
- *
- * Reasoning effort is sent as `reasoning_effort` (OpenAI o-series, also
- * understood by OpenRouter as a passthrough).
+ * Strips SYSTEM_PROMPT_CACHE_BOUNDARY from system messages — OpenAI's
+ * automatic prefix cache already benefits from the volatile current-date
+ * line being at the very end of the system prompt; the boundary marker
+ * exists for a future native Anthropic adapter that splits the system
+ * text into cached + uncached blocks at this seam.
  */
 
 import type { ProtocolAdapter } from "../protocol.js";
@@ -35,6 +24,7 @@ import type {
   ToolCall,
   TokenUsage,
 } from "../types.js";
+import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../../../services/build-system-prompt.js";
 
 export const openaiAdapter: ProtocolAdapter = {
   protocol: "openai",
@@ -83,8 +73,6 @@ function buildBody(options: LLMCallOptions, stream: boolean): Record<string, unk
     body["reasoning_effort"] = options.thinkLevel;
   }
 
-  // Provider-specific extras win over defaults — escape hatch for
-  // non-portable knobs. Applied last so callers can override anything.
   if (options.extras) {
     for (const [k, v] of Object.entries(options.extras)) body[k] = v;
   }
@@ -103,7 +91,6 @@ function toApiMessage(m: LLMMessage): Record<string, unknown> {
   if (m.role === "assistant") {
     const out: Record<string, unknown> = {
       role: "assistant",
-      // OpenAI accepts `content: null` when only tool_calls are present.
       content: m.content === "" && m.toolCalls && m.toolCalls.length > 0 ? null : m.content,
     };
     if (m.toolCalls && m.toolCalls.length > 0) {
@@ -114,6 +101,12 @@ function toApiMessage(m: LLMMessage): Record<string, unknown> {
       }));
     }
     return out;
+  }
+  if (m.role === "system") {
+    return {
+      role: "system",
+      content: m.content.split(SYSTEM_PROMPT_CACHE_BOUNDARY).join(""),
+    };
   }
   return { role: m.role, content: m.content };
 }
@@ -161,7 +154,6 @@ async function readStream(res: Response, options: LLMCallOptions): Promise<LLMTu
 
   let content = "";
   let thinking = "";
-  /** Tool calls accumulate by index — args arrive as JSON-string deltas. */
   const tcAcc = new Map<number, { id?: string; name?: string; args: string }>();
   let usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
@@ -174,16 +166,13 @@ async function readStream(res: Response, options: LLMCallOptions): Promise<LLMTu
 
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE messages are separated by blank lines; within a message, lines
-      // start with `data: `. We process line-by-line for simplicity — most
-      // OpenAI-compatible servers emit one `data:` line per event.
       let nl: number;
       while ((nl = buffer.indexOf("\n")) !== -1) {
         const rawLine = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
         const line = rawLine.replace(/\r$/, "").trim();
 
-        if (!line || line.startsWith(":")) continue; // keep-alive comments
+        if (!line || line.startsWith(":")) continue;
         if (!line.startsWith("data:")) continue;
 
         const payload = line.slice(5).trim();
@@ -222,7 +211,6 @@ async function readStream(res: Response, options: LLMCallOptions): Promise<LLMTu
       }
     }
   } finally {
-    // Best-effort release. Ignore errors — the body may already be closed.
     try {
       reader.releaseLock();
     } catch {
@@ -287,7 +275,7 @@ export class LLMHttpError extends Error {
   }
 }
 
-// ─── Wire types (minimal subset of the OpenAI API) ───────────────────────────
+// ─── Wire types ─────────────────────────────────────────────────────────────
 
 interface ChatCompletionUsage {
   prompt_tokens?: number;

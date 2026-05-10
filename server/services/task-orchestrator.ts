@@ -3,24 +3,8 @@
  *
  * Glue layer between transport (HTTP/WS, CLI) and the engine.
  *
- * The orchestrator speaks two interfaces:
- *
- *   - `SessionPersistence` for per-project state (chat sessions, tasks,
- *     entry log). One instance per `<cwd>/.huko/huko.db`.
- *
- *   - `EmitterFactory` for outgoing `HukoEvent`s. The factory hands back
- *     an Emitter for a given room id; the orchestrator never knows
- *     whether it's Socket.IO, an in-memory collector, or stdout.
- *
- * Provider/model selection happens BEFORE the orchestrator is called —
- * the caller pre-resolves a `ResolvedModel` from `loadInfraConfig({ cwd })`
- * and passes it via `SendMessageInput.model`. The orchestrator does not
- * touch infra config, never has a "default model" of its own.
- *
- * Out of scope:
- *   - Auth / users (huko is single-user)
- *   - Resume / orphan recovery (separate flow)
- *   - Routing decisions ABOVE the engine (those live in tRPC routers / CLI)
+ * Speaks SessionPersistence + EmitterFactory; never touches infra config
+ * (caller pre-resolves a ResolvedModel and hands it via SendMessageInput).
  */
 
 // Side-effect: register all built-in tools so getToolsForLLM() works.
@@ -46,24 +30,15 @@ import { loadRole } from "../roles/index.js";
 import { getConfig } from "../config/index.js";
 import { buildSystemPrompt } from "./build-system-prompt.js";
 import { recoverOrphans, type RecoveryReport } from "../task/resume.js";
+import { detectWorkingLanguage } from "../task/language-reminder.js";
 import { estimateContextWindow } from "../core/llm/model-context-window.js";
 import { resolveApiKey } from "../security/keys.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
-/** Build an Emitter for the given room id (e.g. "chat:42"). */
 export type EmitterFactory = (room: string) => Emitter;
 
 export type OrchestratorOptions = {
-  /**
-   * Per-project session DB: this project's chat sessions, tasks, and
-   * the LLM-visible entry log.
-   *
-   * Provider/model selection is done by the CALLER (CLI / future router)
-   * before calling sendUserMessage — see SendMessageInput.model. The
-   * orchestrator no longer touches infra config; it just consumes the
-   * pre-resolved ResolvedModel.
-   */
   session: SessionPersistence;
   emitterFactory: EmitterFactory;
 };
@@ -72,21 +47,9 @@ export type SendMessageInput = {
   chatSessionId: number;
   content: string;
   attachments?: UserAttachment[];
-  /**
-   * Pre-resolved model + provider. Caller resolves this from
-   * `loadInfraConfig({ cwd })` (or equivalent). Required — orchestrator
-   * does not fall back to a default.
-   */
   model: ResolvedModel;
-  /** Role name (loaded from server/roles/ etc.). Defaults to `coding`. */
   role?: string;
-  /** Working directory for this task — used to resolve project CLAUDE.md. */
   cwd?: string;
-  /**
-   * Whether the user is reachable for `message(type=ask)` prompts.
-   * When false, the registry hides `ask` from the message tool's
-   * schema so the LLM never tries to ask. Defaults to `true`.
-   */
   interactive?: boolean;
 };
 
@@ -107,19 +70,7 @@ export class TaskOrchestrator {
   private readonly liveLoops = new Map<number, TaskLoop>();
   private readonly sessionToLoop = new Map<string, number>();
   private readonly taskCompletions = new Map<number, Promise<TaskRunSummary>>();
-  /**
-   * Pending `message(type=ask)` invocations waiting on a user reply.
-   * Keyed by toolCallId (LLM-assigned, unique per call). Each entry
-   * carries `taskId` so we can mass-reject when a task is stopped.
-   *
-   * Resolved by `respondToAsk(toolCallId, reply)` — the reply text
-   * becomes the tool result the LLM sees on the next turn.
-   *
-   * Architecture note: this Map is the kernel-side registry for ALL
-   * frontends. CLI calls respondToAsk in-process; future daemon mode
-   * exposes a tRPC mutation that does the same. The wait Promise is
-   * frontend-agnostic.
-   */
+
   private readonly askResolvers = new Map<
     string,
     {
@@ -136,15 +87,6 @@ export class TaskOrchestrator {
 
   // ─── Public entry points ───────────────────────────────────────────────────
 
-  /**
-   * Scan for orphan tasks (non-terminal status from a crashed previous
-   * process) and heal them — inject synthetic tool_results for dangling
-   * tool_calls, mark the tasks as `failed`. Idempotent.
-   *
-   * Should be called once at startup, before any sendUserMessage. CLI
-   * bootstrap and daemon entry both call this. Safe to skip in
-   * `--memory` ephemeral mode (memory backend has no orphans to find).
-   */
   async recoverOrphans(): Promise<RecoveryReport> {
     return recoverOrphans(this.session);
   }
@@ -164,12 +106,6 @@ export class TaskOrchestrator {
     if (liveTaskId !== undefined) {
       const loop = this.liveLoops.get(liveTaskId);
       if (loop) {
-        // Anthropic pairing constraint: assistant(tool_use) -> tool(result)
-        // must be adjacent. If a tool is in flight when the user interjects,
-        // wait for it to complete (and its tool_result to land via
-        // tool-execute) before appending the user message. Otherwise the
-        // next LLM call would see assistant(tc) -> user -> tool(result)
-        // which provider validators reject.
         if (loop.ctx.currentToolPromise) {
           await loop.ctx.currentToolPromise;
         }
@@ -196,22 +132,11 @@ export class TaskOrchestrator {
   stop(taskId: number): boolean {
     const loop = this.liveLoops.get(taskId);
     if (!loop) return false;
-    // Reject any pending ask the task was waiting on so the message
-    // tool returns an error instead of hanging forever.
     this.abortAsksForTask(taskId, new Error("Task stopped while waiting for user reply"));
     loop.stop();
     return true;
   }
 
-  /**
-   * Submit a user reply to a pending `message(type=ask)`. Returns true
-   * when a matching pending ask was found and resolved, false when no
-   * such toolCallId is waiting.
-   *
-   * Frontends (CLI, daemon tRPC mutation, web UI) all funnel through
-   * here. `reply.content` becomes the tool_result text the LLM sees on
-   * the next turn.
-   */
   respondToAsk(
     toolCallId: string,
     reply: { content: string; attachments?: UserAttachment[] },
@@ -223,10 +148,6 @@ export class TaskOrchestrator {
     return true;
   }
 
-  /**
-   * List every pending ask for diagnostics (e.g. `huko info`, daemon
-   * health endpoints). Read-only snapshot.
-   */
   pendingAsks(): Array<{ toolCallId: string; taskId: number }> {
     return [...this.askResolvers.entries()].map(([toolCallId, v]) => ({
       toolCallId,
@@ -284,19 +205,9 @@ export class TaskOrchestrator {
   ): Promise<SendMessageResult> {
     const config = flattenModel(input.model);
 
-    // Resolve the provider's API-key ref into the actual secret BEFORE
-    // we touch the DB or build TaskContext - fail fast on missing key.
-    // The cwd is also used below for role / CLAUDE.md discovery.
     const cwd = input.cwd ?? process.cwd();
     const apiKey = resolveApiKey(config.apiKeyRef, { cwd });
 
-    // Atomic: insert task + initial user-message entry in one SQLite
-    // transaction (SessionPersistence.tasks.createWithInitialEntry).
-    // Avoids the "task row but no user message" ghost state that would
-    // otherwise appear if the process died between two separate inserts.
-    // We then notify SessionContext via append(..., { knownEntryId })
-    // so the wire event fires and llmContext gets updated WITHOUT a
-    // second DB write.
     const userMetadata: Record<string, unknown> | undefined =
       input.attachments?.length ? { attachments: input.attachments } : undefined;
     const { taskId, entryId } = await this.session.tasks.createWithInitialEntry({
@@ -334,25 +245,22 @@ export class TaskOrchestrator {
         ? ({ sessionType: "chat", chatSessionId: sessionId } as const)
         : ({ sessionType: "agent", agentSessionId: sessionId } as const);
 
-    // Role-driven system prompt. --role flag (CLI) -> input.role.
-    // Defaults to coding. cwd selects the project root for CLAUDE.md
-    // discovery; falls back to process.cwd() so non-CLI callers do not
-    // have to pass anything.
     const roleName = input.role ?? getConfig().role.default;
     const role = await loadRole(roleName, cwd);
-    const systemPrompt = await buildSystemPrompt({ role, cwd });
 
-    // TODO(role-model): if role.frontmatter.model is set, prefer it
-    // over input.modelId / app_config.default_model_id. Needs a
-    // persistence.models.findByLogicalId(string): Promise<number|null>
-    // method first - the orchestrator can not go from "claude-sonnet-4"
-    // to a numeric models.id without that. Until then we silently
-    // ignore role.frontmatter.model.
+    // Detect working language up-front so the system prompt's <language>
+    // block can lock onto it, and so the language-drift reminder has the
+    // same value to compare against. Falls back to null for too-short or
+    // mixed input — the prompt then says "use the user's first message"
+    // and the drift detector becomes a no-op.
+    const workingLanguage = detectWorkingLanguage(input.content);
 
-    // Per-role tool gating from frontmatter. The current shape is the
-    // single composition layer; future per-user / per-task toggles will
-    // merge into the same ToolFilterContext (intersect allow, union
-    // deny) BEFORE the call. See registry.ts ToolFilterContext docstring.
+    const systemPrompt = await buildSystemPrompt({
+      role,
+      cwd,
+      workingLanguage,
+    });
+
     const toolFilter: ToolFilterContext = {
       interactive: input.interactive ?? true,
     };
@@ -363,26 +271,9 @@ export class TaskOrchestrator {
       toolFilter.deniedTools = role.frontmatter.tools.deny;
     }
 
-    // Context window: prefer the value carried by ResolvedModelConfig
-    // (which a future models.context_window column would supply);
-    // fall back to a string-pattern heuristic on the model id.
     const contextWindow =
       config.contextWindow ?? estimateContextWindow(config.modelId);
 
-    // Build the `waitForReply` callback that the `message(type=ask)`
-    // tool handler invokes. Steps when called:
-    //   1. flip task status to `waiting_for_reply` so a subsequent
-    //      orphan recovery (or `huko info` peek) can see this task is
-    //      paused awaiting a human, not stuck in a loop;
-    //   2. emit an `ask_user` HukoEvent so frontends can render the
-    //      question + options;
-    //   3. await a Promise resolved (later) by `respondToAsk(toolCallId)`;
-    //   4. flip the task back to `running` and return the reply.
-    //
-    // Cleanup paths: `stop(taskId)` rejects every pending ask for that
-    // task; the message tool surfaces the rejection as an error result.
-    // If the process dies while waiting, orphan recovery sees the
-    // `waiting_for_reply` status and marks the task failed.
     const askResolvers = this.askResolvers;
     const sessionPersistence = this.session;
     const waitForReply: NonNullable<ConstructorParameters<typeof TaskContext>[0]["waitForReply"]> =
@@ -406,8 +297,6 @@ export class TaskOrchestrator {
           });
         } finally {
           askResolvers.delete(payload.toolCallId);
-          // Restore status. If the task was stopped mid-wait the loop
-          // will overwrite this shortly with "stopped"; harmless either way.
           try {
             await sessionPersistence.tasks.update(taskId, { status: "running" });
           } catch {
@@ -432,6 +321,10 @@ export class TaskOrchestrator {
       sessionContext,
       waitForReply,
     });
+
+    // Reuse the language detected for the system prompt. Drift detector
+    // in llm-call.ts compares context against this value.
+    taskContext.workingLanguage = workingLanguage;
 
     const loop = new TaskLoop(taskContext);
     const sessionKey = sessionKeyOf(sessionType, sessionId);
@@ -553,14 +446,6 @@ export class TaskOrchestrator {
 
 // ─── Helpers: model flattening ──────────────────────────────────────────────
 
-/**
- * Adapt the layered-config `ResolvedModel` (provider nested) into the
- * flat shape the rest of the orchestrator + TaskContext expect. This
- * exists because the TaskContext / engine were written against the old
- * `ResolvedModelConfig` shape; flattening here keeps the engine
- * unchanged. If we later refactor the engine to consume ResolvedModel
- * directly, this helper goes away.
- */
 function flattenModel(m: ResolvedModel): {
   modelId: string;
   protocol: import("../../shared/llm-protocol.js").Protocol;

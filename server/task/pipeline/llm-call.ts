@@ -4,27 +4,23 @@
  * The LLM call step of the task loop.
  *
  * What happens inside a single call:
- *   1. Build messages: system prompt + session LLM context.
- *   2. `appendDraft` an empty assistant entry → triggers `assistant_started`
- *      HukoEvent and gives us an entryId for streaming.
+ *   1. Build messages: system prompt + session LLM context + maybe a
+ *      transient language-drift reminder.
+ *   2. appendDraft an empty assistant entry -> assistant_started event.
  *   3. Wire dual abort signals (master + currentLlmAbort).
- *   4. Invoke the LLM with `onPartial`. Each delta is emitted DIRECTLY
- *      as a `HukoEvent` (`assistant_content_delta` / `assistant_thinking_delta`)
- *      via `sessionContext.emit(...)`. The DB row is throttled-synced.
- *   5. Drain any in-flight partial flush (race-safe even on async backends).
- *   6. After the call returns, write the final state via `update({final:true})`
- *      — that triggers `assistant_complete` emit.
- *   7. `commitToContext` — push to LLM context for next turn.
+ *   4. Invoke the LLM with onPartial. Each delta emitted as a HukoEvent
+ *      and the DB row throttled-synced.
+ *   5. Drain any in-flight partial flush.
+ *   6. Final write via update({final:true}) -> assistant_complete.
+ *   7. commitToContext.
  *   8. Token bookkeeping.
- *
- * Aborts: an `AbortError` becomes `{kind:"aborted", reason:"stopped"|"interjected"}`.
- * The TaskLoop decides what that means.
  */
 
 import { invoke } from "../../core/llm/invoke.js";
 import type { LLMCallOptions, LLMTurnResult, PartialEvent } from "../../core/llm/types.js";
 import type { TaskContext } from "../../engine/TaskContext.js";
 import { EntryKind } from "../../../shared/types.js";
+import { maybeBuildLanguageDriftReminder } from "../language-reminder.js";
 
 // ─── Result type ──────────────────────────────────────────────────────────────
 
@@ -34,7 +30,6 @@ export type LLMCallOutcome =
 
 // ─── Streaming throttle ───────────────────────────────────────────────────────
 
-/** Min ms between DB writes during streaming. The wire deltas are not throttled. */
 const DB_FLUSH_MS = 100;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -43,12 +38,22 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
   const sc = ctx.sessionContext;
 
   // ── 1. Build messages ────────────────────────────────────────────────────
+  // Includes a transient language-drift reminder when the recent context
+  // tail is dominated by content in a different script than the task's
+  // working language. The reminder is NOT persisted and NOT pushed onto
+  // SessionContext.llmContext — each call recomputes whether to inject.
+  const baseMessages = sc.getMessages();
+  const driftReminder = maybeBuildLanguageDriftReminder(
+    baseMessages,
+    ctx.workingLanguage,
+  );
   const messages = [
     { role: "system" as const, content: ctx.systemPrompt },
-    ...sc.getMessages(),
+    ...baseMessages,
+    ...(driftReminder ? [driftReminder] : []),
   ];
 
-  // ── 2. Draft assistant entry — emits `assistant_started` ─────────────────
+  // ── 2. Draft assistant entry ─────────────────────────────────────────────
   const entryId = await sc.appendDraft({
     taskId: ctx.taskId,
     kind: EntryKind.AiMessage,
@@ -72,14 +77,6 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
   let dbDirty = false;
   let lastDbFlush = 0;
   let pendingDbFlush: ReturnType<typeof setTimeout> | null = null;
-  /**
-   * The most recent in-flight partial flush. We await this before the
-   * final update so an async-DB backend (e.g. Postgres over TCP) can
-   * never reorder a stale partial write AFTER the authoritative final
-   * write. With today's synchronous backends (Memory / SqlitePersistence
-   * via better-sqlite3) the work is already done by the time this
-   * promise is created, so the await is a no-op fast path.
-   */
   let inflightFlush: Promise<void> | null = null;
 
   const flushDb = (): void => {
@@ -156,7 +153,6 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     ctx.masterAbort.signal.removeEventListener("abort", onMasterAbort);
     ctx.currentLlmAbort = null;
 
-    // Drain in-flight partial flush; flushDb already .catch()es so this can't reject.
     if (inflightFlush) {
       await inflightFlush;
       inflightFlush = null;
@@ -175,16 +171,12 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
   ctx.masterAbort.signal.removeEventListener("abort", onMasterAbort);
   ctx.currentLlmAbort = null;
 
-  // Drain the most recent in-flight partial flush BEFORE the final write.
-  // Synchronous backends already settled this; an async backend would
-  // otherwise risk a stale partial landing AFTER the final and clobbering
-  // it. See `inflightFlush` declaration for full rationale.
   if (inflightFlush) {
     await inflightFlush;
     inflightFlush = null;
   }
 
-  // ── 6. Final flush — DB authoritative + assistant_complete emit ──────────
+  // ── 6. Final flush ──────────────────────────────────────────────────────
   const finalMetadata: Record<string, unknown> = {};
   if (result.thinking) finalMetadata["thinking"] = result.thinking;
   if (result.toolCalls.length > 0) finalMetadata["toolCalls"] = result.toolCalls;
