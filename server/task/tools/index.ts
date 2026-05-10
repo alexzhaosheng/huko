@@ -1,18 +1,11 @@
 /**
  * server/task/tools/index.ts
  *
- * Tool barrel + side-effect aggregator.
- *
- * Importing this module triggers registration of every built-in tool
- * via the `import "./xxx.js"` lines below. Tool files call
- * `registerServerTool(...)` / `registerWorkstationTool(...)` at module
- * top level, so a side-effect import is enough.
- *
- * To add a new tool: write the file under `./server/` or `./workstation/`,
- * then add one `import "./..."` line here. No other file changes.
+ * Tool barrel + side-effect aggregator. Importing this module triggers
+ * registration of every built-in tool. Adding a new tool: create the
+ * file under ./server/, then add one `import "./..."` line below.
  */
 
-// ── Re-export the public API surface of the registry ─────────────────────────
 export {
   registerServerTool,
   registerWorkstationTool,
@@ -21,6 +14,7 @@ export {
   setToolPolicy,
   isWorkstationTool,
   getToolsForLLM,
+  getToolPromptHints,
   listToolNames,
   coerceArgs,
   isToolHandlerResult,
@@ -38,17 +32,16 @@ export {
   type ToolFilterContext,
 } from "./registry.js";
 
-// ── Built-in tools — populated as tools land ─────────────────────────────────
 import "./server/message.js";
 import "./server/plan.js";
 import "./server/web-fetch.js";
+import "./server/web-search.js";
 import "./server/read-file.js";
 import "./server/list-dir.js";
 import "./server/glob.js";
 import "./server/grep.js";
 import "./server/write-file.js";
 import "./server/edit-file.js";
+import "./server/delete-file.js";
+import "./server/move-file.js";
 import "./server/bash.js";
-// Workstation tools land in subsequent rounds:
-//   import "./workstation/shell.js";
-//   import "./workstation/file.js";

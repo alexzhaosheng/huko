@@ -1,32 +1,12 @@
 /**
  * server/task/tools/registry.ts
  *
- * Tool registry — v2.
+ * Tool registry. Two registration entry points:
+ *   - registerServerTool(def, handler) — runs in-process
+ *   - registerWorkstationTool(def)     — dispatched via ctx.executeTool
  *
- * Two registration entry points:
- *   - `registerServerTool(def, handler)`     — runs in-process on the server
- *   - `registerWorkstationTool(def)`         — dispatched to the user's local
- *                                              machine via the executeTool
- *                                              callback on TaskContext
- *
- * Tool files self-register at module load time. `tools/index.ts` does
- * side-effect imports of every tool file; importing `tools/index.ts`
- * once at TaskLoop startup populates the registry.
- *
- * `getToolsForLLM(filter)` builds the tool list passed to the LLM.
- *
- * v2 additions (lifted from WeavesAI's battle-tested implementation):
- *   - `ToolHandlerResult` — handlers can return rich semantic outcomes
- *       beyond a plain string: finalResult / shouldBreak / metadata /
- *       attachments / summary / error / postReminders.
- *   - `coerceArgs(name, args)` — runtime type coercion for tool arguments,
- *       so an LLM that hands us `"true"` instead of `true` for a boolean
- *       parameter is patched up before the handler runs.
- *   - `setToolPolicy(name, meta)` / `getToolPolicy(name)` — danger-level
- *       and admin metadata, used by the pipeline for filtering and
- *       (later) approval.
- *   - `ServerToolDefinition` — extends Tool with optional platformNotes
- *       + dangerLevel, again following WeavesAI.
+ * Tool files self-register at module load time via tools/index.ts side-
+ * effect imports. Adding a new tool is a one-file change.
  */
 
 import type { Tool, ToolParameterSchema } from "../../core/llm/types.js";
@@ -34,26 +14,6 @@ import type { TaskContext } from "../../engine/TaskContext.js";
 
 // ─── ToolHandlerResult ────────────────────────────────────────────────────────
 
-/**
- * Rich return value from a server tool handler.
- *
- * - `content`     — the string the LLM sees as the tool result.
- * - `metadata`    — extra structured data attached to the tool_result entry.
- * - `finalResult` — when set, becomes the task's `finalResult`.
- *                   Used by `message` (mode=result) and `agent` (return).
- * - `shouldBreak` — when true, TaskLoop exits cleanly (status=done) AFTER
- *                   the current tool persists. No further LLM call.
- * - `summary`     — short human-readable summary, for UI compaction.
- * - `attachments` — files produced by the tool (paths the user can open).
- * - `error`       — non-null marks this as an error result (the LLM still
- *                   sees `content`, but the entry is flagged).
- * - `postReminders` — system reminders to inject AFTER the tool_result
- *                   entry is persisted. Required when a handler wants
- *                   to nudge the LLM about future behaviour: emitting
- *                   the reminder inline before tool_result would break
- *                   Anthropic's `assistant(tool_use) -> tool(result)`
- *                   adjacency.
- */
 export type ToolHandlerResult = {
   content: string;
   metadata?: Record<string, unknown>;
@@ -65,11 +25,8 @@ export type ToolHandlerResult = {
   postReminders?: PostReminder[];
 };
 
-/** A system reminder to be appended right after the tool_result entry. */
 export type PostReminder = {
-  /** Stable identifier (e.g. `plan_update_followup`). Used for metadata + future de-dup. */
   reason: string;
-  /** Free-form body (no <system_reminder> tag — SessionContext wraps it). */
   content: string;
 };
 
@@ -77,31 +34,13 @@ export type ToolAttachment = {
   filename: string;
   mimeType: string;
   size?: number;
-  /** Server-relative or absolute path. The UI / CLI render will pick this up. */
   path: string;
 };
 
-/**
- * Per-call metadata passed to handlers that need to know about the
- * specific tool_use the LLM emitted — currently used by `message`'s
- * `ask` mode to key its waitForReply Promise on `toolCallId`.
- *
- * Optional 3rd parameter so existing handlers don't have to be touched.
- */
 export type ToolCallMeta = {
-  /** Stable id of this tool call (from the LLM's response). */
   toolCallId: string;
 };
 
-/**
- * Server-tool handler. Runs in the same process as TaskLoop.
- *
- * Allowed return shapes:
- *   - `string`              — fast path: just the tool result.
- *   - `ServerToolResult`    — backwards-compatible structured result.
- *   - `ToolHandlerResult`   — full v2 semantic result.
- *   - throwing              — caught and converted to an error result.
- */
 export type ServerToolHandler = (
   args: Record<string, unknown>,
   ctx: TaskContext,
@@ -111,10 +50,6 @@ export type ServerToolHandler = (
   | ServerToolResult
   | ToolHandlerResult;
 
-/**
- * Backwards-compatible shape — kept so old tools (none today, but the
- * type was exposed) still type-check.
- */
 export type ServerToolResult = {
   result: string;
   error?: string | null;
@@ -124,26 +59,21 @@ export type ServerToolResult = {
 // ─── Tool definition (v2) ────────────────────────────────────────────────────
 
 export type ServerToolDefinition = Tool & {
-  /** Per-platform instruction blocks appended to `description` at filter time. */
   platformNotes?: Partial<Record<NodeJS.Platform, string>>;
   dangerLevel?: ToolDangerLevel;
-  /**
-   * Generate a per-call JSON schema based on the filter context (e.g.
-   * `interactive: false` → drop the `ask` mode from the `message`
-   * tool's allowed `type` values). When omitted, the static
-   * `parameters` is used unchanged.
-   *
-   * Called by `getToolsForLLM` at LLM-call time, NOT at tool execution
-   * time — the schema goes into the LLM payload, the handler still
-   * receives raw args from the LLM and decides what to do with them.
-   */
   parametersFor?: (ctx: ToolMaterializeContext) => Tool["parameters"];
-  /**
-   * Generate a per-call description supplement (appended after the
-   * static description + platform note). Useful when ask-only
-   * instructions should be dropped along with the schema field.
-   */
   descriptionFor?: (ctx: ToolMaterializeContext) => string | undefined;
+  /**
+   * Optional system-prompt guidance contributed by this tool, spliced
+   * into the <tool_use> block at build time. Use sparingly — only when
+   * the rule is about INTER-TOOL coordination or workflow that doesn't
+   * fit in this tool's `description`. Single-tool usage rules belong
+   * in `description`.
+   *
+   * Hints from filtered-out tools are NOT included, so a role that
+   * disables a tool also drops its prompt guidance automatically.
+   */
+  promptHint?: string;
 };
 
 export type WorkstationToolDefinition = ServerToolDefinition;
@@ -271,6 +201,28 @@ function materialise(
 /** All registered tool names. Useful for diagnostics. */
 export function listToolNames(): string[] {
   return [...registry.keys()];
+}
+
+/**
+ * Collect promptHint strings from every tool that survives the same
+ * filter applied to getToolsForLLM. Returns hints in registration
+ * order (matches import order in tools/index.ts).
+ */
+export function getToolPromptHints(
+  filter?: ToolFilter | ToolFilterContext,
+): string[] {
+  const ctx = normaliseFilter(filter);
+  const out: string[] = [];
+  for (const [name, t] of registry) {
+    if (ctx.allowedTools !== undefined && !ctx.allowedTools.includes(name)) continue;
+    if (ctx.deniedTools?.includes(name)) continue;
+    if (ctx.predicate && !ctx.predicate(name, t.kind)) continue;
+    const hint = t.definition.promptHint;
+    if (hint && hint.trim().length > 0) {
+      out.push(hint.trim());
+    }
+  }
+  return out;
 }
 
 // ─── coerceArgs ───────────────────────────────────────────────────────────────

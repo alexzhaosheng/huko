@@ -7,10 +7,13 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// Side-effect: register all built-in tools so getToolPromptHints() returns them.
+import "../server/task/tools/index.js";
 import {
   buildSystemPrompt,
   SYSTEM_PROMPT_CACHE_BOUNDARY,
 } from "../server/services/build-system-prompt.js";
+import { getToolPromptHints } from "../server/task/tools/registry.js";
 import { loadRole } from "../server/roles/index.js";
 import type { LLMCallOptions, LLMMessage } from "../server/core/llm/types.js";
 
@@ -21,12 +24,14 @@ async function buildWith(opts: {
   cwd?: string;
   workingLanguage?: string | null;
   currentDate?: Date;
+  toolHints?: string[];
 }): Promise<string> {
   const role = await loadRole(opts.roleName ?? "general", opts.cwd ?? "/tmp");
   const built: Parameters<typeof buildSystemPrompt>[0] = {
     role,
     cwd: opts.cwd ?? "/tmp",
     currentDate: opts.currentDate ?? new Date("2026-05-10T12:00:00Z"),
+    toolHints: opts.toolHints ?? getToolPromptHints(),
   };
   if (opts.workingLanguage !== undefined) built.workingLanguage = opts.workingLanguage;
   return buildSystemPrompt(built);

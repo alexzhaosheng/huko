@@ -4,20 +4,14 @@
  * The single channel for the assistant to talk to the user.
  *
  * Modes:
- *   - `info`   — progress updates / acknowledgements; no break
- *   - `ask`    — block until user replies; reply text is the tool result
- *   - `result` — final deliverable; sets ctx.finalResult and ends the task
+ *   - info   — progress updates / acknowledgements; no break
+ *   - ask    — block until user replies; reply text is the tool result
+ *   - result — final deliverable; sets ctx.finalResult and ends the task
  *
  * `ask` mode requires the orchestrator to have wired
- * `TaskContext.waitForReply`. When the user runs `huko run --no-interaction`,
- * the registry materialises this tool's schema WITHOUT `ask` — the LLM
- * literally can't request user input.
- *
- * v1 doesn't accept attachments yet. Once the file/fs tools land we can
- * revisit and add an `attachments: string[]` parameter.
- *
- * Description copy mirrors WeavesAI's, trimmed and adjusted to huko's
- * three modes. (See `WeavesAI/server/task/tools/server/message.ts`.)
+ * TaskContext.waitForReply. When the user runs `huko run --no-interaction`,
+ * the registry materialises this tool's schema WITHOUT `ask` so the LLM
+ * literally cannot request user input.
  */
 
 import {
@@ -63,7 +57,15 @@ const NON_INTERACTIVE_NOTE =
   "This task is running non-interactively — the `ask` type is NOT available. Make decisions yourself based on available context, or use `result` to surface a question for the next turn instead of trying to ask in-task.\n" +
   "</non_interactive_mode>";
 
-/** Schema generator — drops `ask` from the type enum when interactive=false. */
+const MESSAGE_PROMPT_HINT = [
+  "Talking to the user (`message` tool):",
+  "- Use `message` for ALL user-facing communication. Never reply in plain text.",
+  "- `message(type=info)` — progress / acknowledgement; the task continues without waiting.",
+  "- `message(type=ask)` — block until the user replies; use only when you genuinely need their input.",
+  "- `message(type=result)` — final delivery; ENDS the task. Do not keep talking after.",
+  "- AVOID consecutive info messages without action — after ~3 in a row a system_reminder will tell you to actually run a tool, ask, or deliver.",
+].join("\n");
+
 function buildSchema(ctx: ToolMaterializeContext) {
   const types: MessageToolType[] = ctx.interactive
     ? ["info", "ask", "result"]
@@ -105,6 +107,7 @@ registerServerTool(
     parametersFor: (ctx) => buildSchema(ctx),
     descriptionFor: (ctx) => (ctx.interactive ? undefined : NON_INTERACTIVE_NOTE),
     dangerLevel: "safe",
+    promptHint: MESSAGE_PROMPT_HINT,
   },
   async (args, ctx, callMeta): Promise<ToolHandlerResult> => {
     const rawType = String(args["type"] ?? "info");
@@ -129,7 +132,6 @@ registerServerTool(
       return await handleAsk(args, ctx, callMeta?.toolCallId, msgText);
     }
 
-    // info — fire and forget; no break
     return {
       content: "Message sent to user.",
       summary: `message(type=info)`,
@@ -144,8 +146,6 @@ async function handleAsk(
   toolCallId: string | undefined,
   question: string,
 ): Promise<ToolHandlerResult> {
-  // Defensive: this branch shouldn't be reachable when interactive=false
-  // (the schema doesn't even include "ask"), but the LLM is what it is.
   if (!ctx.waitForReply) {
     return {
       content:
@@ -156,7 +156,6 @@ async function handleAsk(
     };
   }
   if (!toolCallId) {
-    // Should never happen — every tool call has an id — but be defensive.
     return {
       content: "Error: ask requires a tool call id but none was provided.",
       error: "missing_tool_call_id",

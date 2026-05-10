@@ -2,9 +2,6 @@
  * server/services/task-orchestrator.ts
  *
  * Glue layer between transport (HTTP/WS, CLI) and the engine.
- *
- * Speaks SessionPersistence + EmitterFactory; never touches infra config
- * (caller pre-resolves a ResolvedModel and hands it via SendMessageInput).
  */
 
 // Side-effect: register all built-in tools so getToolsForLLM() works.
@@ -13,7 +10,7 @@ import "../task/tools/index.js";
 import { SessionContext, type Emitter } from "../engine/SessionContext.js";
 import { TaskContext } from "../engine/TaskContext.js";
 import { TaskLoop, type TaskRunSummary } from "../task/task-loop.js";
-import { getToolsForLLM, type ToolFilterContext } from "../task/tools/registry.js";
+import { getToolsForLLM, getToolPromptHints, type ToolFilterContext } from "../task/tools/registry.js";
 import {
   EntryKind,
   type SessionType,
@@ -84,8 +81,6 @@ export class TaskOrchestrator {
     this.session = opts.session;
     this.emitterFactory = opts.emitterFactory;
   }
-
-  // ─── Public entry points ───────────────────────────────────────────────────
 
   async recoverOrphans(): Promise<RecoveryReport> {
     return recoverOrphans(this.session);
@@ -248,19 +243,12 @@ export class TaskOrchestrator {
     const roleName = input.role ?? getConfig().role.default;
     const role = await loadRole(roleName, cwd);
 
-    // Detect working language up-front so the system prompt's <language>
-    // block can lock onto it, and so the language-drift reminder has the
-    // same value to compare against. Falls back to null for too-short or
-    // mixed input — the prompt then says "use the user's first message"
-    // and the drift detector becomes a no-op.
     const workingLanguage = detectWorkingLanguage(input.content);
 
-    const systemPrompt = await buildSystemPrompt({
-      role,
-      cwd,
-      workingLanguage,
-    });
-
+    // Build the toolFilter BEFORE the system prompt so we can hand the
+    // matching tool-prompt hints to buildSystemPrompt. A role that
+    // disables a tool also drops its prompt guidance — symmetry is
+    // automatic via the same filter.
     const toolFilter: ToolFilterContext = {
       interactive: input.interactive ?? true,
     };
@@ -270,6 +258,13 @@ export class TaskOrchestrator {
     if (role.frontmatter.tools?.deny !== undefined) {
       toolFilter.deniedTools = role.frontmatter.tools.deny;
     }
+
+    const systemPrompt = await buildSystemPrompt({
+      role,
+      cwd,
+      workingLanguage,
+      toolHints: getToolPromptHints(toolFilter),
+    });
 
     const contextWindow =
       config.contextWindow ?? estimateContextWindow(config.modelId);
@@ -322,8 +317,6 @@ export class TaskOrchestrator {
       waitForReply,
     });
 
-    // Reuse the language detected for the system prompt. Drift detector
-    // in llm-call.ts compares context against this value.
     taskContext.workingLanguage = workingLanguage;
 
     const loop = new TaskLoop(taskContext);
@@ -412,8 +405,6 @@ export class TaskOrchestrator {
     }
   }
 
-  // ─── Internals: session context lookup ────────────────────────────────────
-
   private async getOrCreateSessionContext(
     sessionType: SessionType,
     sessionId: number,
@@ -441,10 +432,9 @@ export class TaskOrchestrator {
     this.liveSessionEmitters.set(key, emitter);
     return sc;
   }
-
 }
 
-// ─── Helpers: model flattening ──────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function flattenModel(m: ResolvedModel): {
   modelId: string;
@@ -467,8 +457,6 @@ function flattenModel(m: ResolvedModel): {
     ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
   };
 }
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function sessionKeyOf(type: SessionType, id: number): string {
   return `${type}:${id}`;

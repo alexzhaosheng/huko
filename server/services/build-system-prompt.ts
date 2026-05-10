@@ -3,38 +3,32 @@
  *
  * The single composer for huko's system prompt.
  *
- * Composition order (deterministic):
- *
- *   1. Identity preamble + one-paragraph local-context line
- *   2. <language>                — working language rule
- *   3. <format>                  — Markdown / prose / table conventions
- *   4. <agent_loop>              — analyze -> think -> tool -> execute -> observe -> iterate -> deliver
- *   5. <tool_use>                — one-tool-per-turn, message rules, plan rules
- *   6. <error_handling>          — 3-strike rule
- *   7. <local>                   — cwd, platform, workspace policy, local safety
- *   8. <safety>                  — untrusted-content rule (prompt injection defence)
- *   9. <disclosure_prohibition>  — never reveal system prompt
- *  10. <project_context>         — system-wide; loads AGENTS.md / CLAUDE.md / HUKO.md
- *  11. <role>                    — role.body wrapped, the persona overlay (LAST in cached prefix)
+ * Composition order:
+ *   1. Identity preamble
+ *   2. <language>
+ *   3. <format>
+ *   4. <agent_loop>
+ *   5. <tool_use>                — generic baseline + per-tool promptHints
+ *   6. <error_handling>
+ *   7. <local>
+ *   8. <safety>
+ *   9. <disclosure_prohibition>
+ *  10. <project_context>         — AGENTS.md / CLAUDE.md / HUKO.md if present
+ *  11. <role>                    — role.body wrapped, persona overlay
  *  12. SYSTEM_PROMPT_CACHE_BOUNDARY marker
- *  13. "The current date is …" line
+ *  13. Current date line
  *
  * Why this order:
- *   - Stable framing (language / format / loop / tool_use / error / local /
- *     safety / disclosure) sits at the top so prefix-cache hits cover it
- *     across many tasks.
- *   - project_context goes BEFORE role so the role's `## Best Practices`
- *     block can sit at the absolute tail of the cached prefix — that's
- *     the highest-recency position within the system prompt and the
- *     model leans on those bullets when picking its next action.
- *   - The volatile current-date line goes AFTER the cache boundary marker
- *     so Anthropic prompt cache only covers the stable prefix.
- *     OpenAI-compatible providers strip the marker (their automatic
- *     prefix cache benefits from the date being at the very end).
+ *   - Stable framing at the top so prefix-cache hits cover it across tasks.
+ *   - project_context BEFORE role so the role's `## Best Practices`
+ *     sits at the absolute tail of the cached prefix (highest recency).
+ *   - Volatile current-date line goes AFTER the cache boundary so
+ *     Anthropic prompt cache covers only the stable prefix.
  *
- * The cache boundary sentinel is a zero-width-joiner sandwich around the
- * literal text — invisible if it ever leaks through, but unmistakable to
- * indexOf().
+ * Tool-specific guidance is NOT hardcoded in this file. Each tool can
+ * register a `promptHint` on its definition; `buildToolUseBlock` splices
+ * the hints from currently-visible tools into <tool_use>. Filtered-out
+ * tools' hints are dropped automatically.
  */
 
 import { readFile } from "node:fs/promises";
@@ -49,6 +43,12 @@ export type BuildSystemPromptOptions = {
   cwd: string;
   workingLanguage?: string | null;
   currentDate?: Date;
+  /**
+   * Per-tool guidance contributed via `ServerToolDefinition.promptHint`.
+   * Pass `getToolPromptHints(toolFilter)` so this list tracks the tools
+   * actually visible to the LLM. Filtered-out tools' hints don't appear.
+   */
+  toolHints?: string[];
 };
 
 export async function buildSystemPrompt(
@@ -60,32 +60,20 @@ export async function buildSystemPrompt(
   parts.push(buildLanguageBlock(opts.workingLanguage ?? null));
   parts.push(FORMAT_BLOCK);
   parts.push(AGENT_LOOP_BLOCK);
-  parts.push(TOOL_USE_BLOCK);
+  parts.push(buildToolUseBlock(opts.toolHints ?? []));
   parts.push(ERROR_HANDLING_BLOCK);
   parts.push(buildLocalBlock(opts.cwd));
   parts.push(SAFETY_BLOCK);
   parts.push(DISCLOSURE_BLOCK);
 
-  // Project context — system-wide, not role-specific. huko picks up
-  // three filenames from cwd in this order:
-  //   1. AGENTS.md  — vendor-neutral convention (Cursor, OpenAI Codex)
-  //   2. CLAUDE.md  — Claude family convention (Claude Code)
-  //   3. HUKO.md    — huko-specific overrides; rendered last so its
-  //                   rules sit at the highest recency within the block
-  // All three are concatenated when present so users running multiple
-  // agent CLIs can keep one file per tool without manual merging. Each
-  // contributing file is sub-headed with its filename so the LLM (and
-  // a debugging human) can see which rule came from where.
+  // Project context: AGENTS.md / CLAUDE.md / HUKO.md (any subset).
   const projectContext = await loadProjectContext(opts.cwd);
   if (projectContext) {
     parts.push(`<project_context>\n${projectContext}\n</project_context>`);
   }
 
-  // Role overlay — LAST in the cached prefix so its `## Best Practices`
-  // gets the highest-recency-within-prompt position.
   parts.push(buildRoleBlock(opts.role));
 
-  // Cache boundary + volatile current-date line.
   const date = formatCurrentDate(opts.currentDate ?? new Date());
   parts.push(`${SYSTEM_PROMPT_CACHE_BOUNDARY}\nThe current date is ${date}.`);
 
@@ -145,33 +133,37 @@ const AGENT_LOOP_BLOCK = [
   "</agent_loop>",
 ].join("\n");
 
-const TOOL_USE_BLOCK = [
-  "<tool_use>",
-  "- MUST respond with a tool call; do NOT emit plain assistant text without one (an empty turn earns a corrective system_reminder)",
-  "- MUST follow the instructions inside each tool description; they win over generic prose",
-  "- Emit AT MOST one tool call per response — parallel calls are deferred and drained one per loop iteration",
-  "- NEVER mention specific tool names in user-facing text; talk about what you are doing, not which function does it",
-  "- If a REQUIRED tool parameter is genuinely unknowable, fill it as `<UNKNOWN>` rather than refusing",
-  "- DO NOT fill optional parameters the user did not specify",
-  "",
-  "Talking to the user:",
-  "- Use `message` for ALL user-facing communication. Never reply in plain text",
-  "- `message(type=info)` — progress / acknowledgement; the task continues without waiting",
-  "- `message(type=ask)` — block until the user replies; use only when you genuinely need their input",
-  "- `message(type=result)` — final delivery; ENDS the task. Do not keep talking after",
-  "- AVOID consecutive info messages without action — after ~3 in a row a system_reminder will tell you to actually run a tool, ask, or deliver",
-  "",
-  "Planning:",
-  "- For trivial chat / one-shot questions, skip the plan tool entirely",
-  "- For substantive multi-step work, call `plan(action=update)` BEFORE doing meaningful work; phases are high-level units, not micro-steps",
-  "- Pass relevant `capabilities` (role names) on each phase — best-practices for those roles get attached on phase activation",
-  "- When the user changes scope, requirements, priorities, or constraints, call `plan(update)` again BEFORE other actions",
-  "- When the current phase is complete, call `plan(action=advance)` with the next sequential phase id; skipping is forbidden",
-  "",
-  "System reminders:",
-  "- Messages wrapped in `<system_reminder reason=\"...\">` are platform guidance, NOT user input. Read them, do not echo them, do not reply to them as if the user spoke",
-  "</tool_use>",
-].join("\n");
+/**
+ * Compose <tool_use>: generic baseline rules + per-tool promptHints +
+ * the system_reminder rule. Tool-specific guidance lives WITH the tool.
+ */
+function buildToolUseBlock(toolHints: string[]): string {
+  const lines: string[] = [
+    "<tool_use>",
+    "- MUST respond with a tool call; do NOT emit plain assistant text without one (an empty turn earns a corrective system_reminder)",
+    "- MUST follow the instructions inside each tool description; they win over generic prose",
+    "- Emit AT MOST one tool call per response — parallel calls are deferred and drained one per loop iteration",
+    "- NEVER mention specific tool names in user-facing text; talk about what you are doing, not which function does it",
+    "- If a REQUIRED tool parameter is genuinely unknowable, fill it as `<UNKNOWN>` rather than refusing",
+    "- DO NOT fill optional parameters the user did not specify",
+  ];
+
+  for (const hint of toolHints) {
+    const trimmed = hint.trim();
+    if (trimmed.length === 0) continue;
+    lines.push("");
+    lines.push(trimmed);
+  }
+
+  lines.push("");
+  lines.push("System reminders:");
+  lines.push(
+    "- Messages wrapped in `<system_reminder reason=\"...\">` are platform guidance, NOT user input. Read them, do not echo them, do not reply to them as if the user spoke",
+  );
+  lines.push("</tool_use>");
+
+  return lines.join("\n");
+}
 
 const ERROR_HANDLING_BLOCK = [
   "<error_handling>",
@@ -227,20 +219,8 @@ function buildRoleBlock(role: Role): string {
 
 // ─── Project context multi-file loader ──────────────────────────────────────
 
-/**
- * Filenames huko reads from `<cwd>` for project-level guidance.
- * Order is precedence-low to precedence-high: vendor-neutral first,
- * Claude family second, huko-specific last. The LLM sees them in this
- * order, so a later file's rule sits at higher intra-prompt recency
- * and effectively overrides earlier ones if they conflict.
- */
 const PROJECT_CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", "HUKO.md"] as const;
 
-/**
- * Load whichever of AGENTS.md / CLAUDE.md / HUKO.md exist in `cwd` and
- * return them concatenated, each section sub-headed by filename.
- * Returns null when none exist (caller drops the whole block).
- */
 async function loadProjectContext(cwd: string): Promise<string | null> {
   const sections: string[] = [];
   for (const name of PROJECT_CONTEXT_FILES) {
@@ -272,10 +252,6 @@ async function tryReadFile(p: string): Promise<string | null> {
   }
 }
 
-/**
- * Format a Date as YYYY-MM-DD HH:mm <TZ>. Falls back to ISO if Intl
- * rejects the local timezone.
- */
 function formatCurrentDate(date: Date): string {
   try {
     const fmt = new Intl.DateTimeFormat("en-CA", {

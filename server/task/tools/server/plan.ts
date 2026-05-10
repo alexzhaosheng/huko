@@ -1,33 +1,16 @@
 /**
  * Tool: plan
  *
- * Pure task-planning tool. Mirrors WeavesAI's plan tool but with
- * `capabilities` reshaped from a fixed boolean map to `string[]` of
- * role names — see `shared/plan-types.ts` for rationale.
+ * Two actions: update / advance. PlanState lives on TaskContext.planState
+ * (in memory). Each call emits PlanEvent(s) into tool_result metadata —
+ * the only persisted record. On resume, replay events to rebuild state.
  *
- * Two actions:
- *   - `update`   create / revise the plan
- *   - `advance`  move to the next phase
+ * Best-practices injection: on every transition that activates a phase
+ * (initial via update, next via advance), look up role bodies for each
+ * capability and append them to the tool result.
  *
- * State model:
- *   - PlanState lives on TaskContext.planState (in memory).
- *   - Each call emits `PlanEvent`s into the tool_result's
- *     `metadata.planEvents` array — the only persisted record.
- *   - On resume, replay events to rebuild the runtime state.
- *
- * Best-practices injection:
- *   - On every transition that activates a phase (initial phase from
- *     `update`, next phase from `advance`), look up role bodies for
- *     each capability and append them to the tool result.
- *   - Unknown role names are silently ignored.
- *
- * Post-update reminder:
- *   - After `update`, queue a system_reminder reinforcing
- *     "if user changes scope/requirements/priorities/constraints
- *      or reports a blocking issue, plan(update) again before doing
- *      anything else".
- *   - Fired by tool-execute.ts AFTER the tool_result lands so we don't
- *     break the assistant(tool_use) -> tool(result) adjacency.
+ * Post-update reminder: after `update`, queue a system_reminder
+ * reinforcing "if user changes scope, plan(update) again first".
  */
 
 import {
@@ -154,12 +137,22 @@ const PARAMETERS = {
 
 // ─── Register ────────────────────────────────────────────────────────────────
 
+const PLAN_PROMPT_HINT = [
+  "Planning (`plan` tool):",
+  "- For trivial chat / one-shot questions, skip the plan tool entirely.",
+  "- For substantive multi-step work, call `plan(action=update)` BEFORE doing meaningful work; phases are high-level units, not micro-steps.",
+  "- Pass relevant `capabilities` (role names) on each phase — best-practices for those roles get attached on phase activation.",
+  "- When the user changes scope, requirements, priorities, or constraints, call `plan(update)` again BEFORE other actions.",
+  "- When the current phase is complete, call `plan(action=advance)` with the next sequential phase id; skipping is forbidden.",
+].join("\n");
+
 registerServerTool(
   {
     name: "plan",
     description: PLAN_DESCRIPTION,
     parameters: PARAMETERS,
     dangerLevel: "safe",
+    promptHint: PLAN_PROMPT_HINT,
   },
   async (args, ctx): Promise<ToolHandlerResult> => {
     const action = String(args["action"] ?? "");
