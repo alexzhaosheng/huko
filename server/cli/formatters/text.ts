@@ -96,6 +96,25 @@ export function makeTextFormatter(): Formatter {
           break;
         }
 
+        case "ask_user": {
+          // Render a clearly-marked block so the user sees what's being
+          // asked even though run-ask.ts will also pop a prompt right
+          // after. The actual reading-from-stdin happens there; this
+          // is just the visual.
+          process.stderr.write("\n");
+          process.stderr.write(magentaErr("?  ") + event.question + "\n");
+          if (event.options && event.options.length > 0) {
+            const tag = event.selectionType === "multiple"
+              ? "(pick zero or more)"
+              : "(pick one)";
+            process.stderr.write(dimErr(`   ${tag}`) + "\n");
+            for (let i = 0; i < event.options.length; i++) {
+              process.stderr.write(dimErr(`   • ${event.options[i]!}`) + "\n");
+            }
+          }
+          break;
+        }
+
         case "task_terminated":
         case "task_error":
           // Handled in onSummary / onError.

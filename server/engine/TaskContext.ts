@@ -27,10 +27,25 @@ export type WorkstationExecutor = (
 
 export type ApprovalCallback = (message: string) => Promise<boolean>;
 
+/**
+ * Block until the user replies to a `message(type=ask)` call. The
+ * orchestrator wires this up; tool handlers call it to wait for a
+ * reply.
+ *
+ * Keying: `toolCallId` is the LLM-assigned unique id of the assistant's
+ * tool call. The orchestrator's resolver registry uses this as the key,
+ * so multiple concurrent asks (future daemon mode, agents, etc.) never
+ * collide. The resolution channel is whatever the frontend wires up —
+ * stdin in CLI, Socket.IO + tRPC mutation in daemon mode.
+ *
+ * Return value: `{ content, attachments? }`. `content` becomes the
+ * tool_result text the LLM sees on the next turn.
+ */
 export type WaitForReplyCallback = (payload: {
-  messageId: number;
-  content: string;
-  metadata?: Record<string, unknown>;
+  toolCallId: string;
+  question: string;
+  options?: string[];
+  selectionType?: "single" | "multiple";
 }) => Promise<{ content: string; attachments?: UserAttachment[] }>;
 
 // ─── TaskContext ──────────────────────────────────────────────────────────────

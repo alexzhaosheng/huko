@@ -82,6 +82,12 @@ export type SendMessageInput = {
   role?: string;
   /** Working directory for this task — used to resolve project CLAUDE.md. */
   cwd?: string;
+  /**
+   * Whether the user is reachable for `message(type=ask)` prompts.
+   * When false, the registry hides `ask` from the message tool's
+   * schema so the LLM never tries to ask. Defaults to `true`.
+   */
+  interactive?: boolean;
 };
 
 export type SendMessageResult = {
@@ -101,6 +107,27 @@ export class TaskOrchestrator {
   private readonly liveLoops = new Map<number, TaskLoop>();
   private readonly sessionToLoop = new Map<string, number>();
   private readonly taskCompletions = new Map<number, Promise<TaskRunSummary>>();
+  /**
+   * Pending `message(type=ask)` invocations waiting on a user reply.
+   * Keyed by toolCallId (LLM-assigned, unique per call). Each entry
+   * carries `taskId` so we can mass-reject when a task is stopped.
+   *
+   * Resolved by `respondToAsk(toolCallId, reply)` — the reply text
+   * becomes the tool result the LLM sees on the next turn.
+   *
+   * Architecture note: this Map is the kernel-side registry for ALL
+   * frontends. CLI calls respondToAsk in-process; future daemon mode
+   * exposes a tRPC mutation that does the same. The wait Promise is
+   * frontend-agnostic.
+   */
+  private readonly askResolvers = new Map<
+    string,
+    {
+      taskId: number;
+      resolve: (reply: { content: string; attachments?: UserAttachment[] }) => void;
+      reject: (err: Error) => void;
+    }
+  >();
 
   constructor(opts: OrchestratorOptions) {
     this.session = opts.session;
@@ -169,8 +196,50 @@ export class TaskOrchestrator {
   stop(taskId: number): boolean {
     const loop = this.liveLoops.get(taskId);
     if (!loop) return false;
+    // Reject any pending ask the task was waiting on so the message
+    // tool returns an error instead of hanging forever.
+    this.abortAsksForTask(taskId, new Error("Task stopped while waiting for user reply"));
     loop.stop();
     return true;
+  }
+
+  /**
+   * Submit a user reply to a pending `message(type=ask)`. Returns true
+   * when a matching pending ask was found and resolved, false when no
+   * such toolCallId is waiting.
+   *
+   * Frontends (CLI, daemon tRPC mutation, web UI) all funnel through
+   * here. `reply.content` becomes the tool_result text the LLM sees on
+   * the next turn.
+   */
+  respondToAsk(
+    toolCallId: string,
+    reply: { content: string; attachments?: UserAttachment[] },
+  ): boolean {
+    const r = this.askResolvers.get(toolCallId);
+    if (!r) return false;
+    this.askResolvers.delete(toolCallId);
+    r.resolve(reply);
+    return true;
+  }
+
+  /**
+   * List every pending ask for diagnostics (e.g. `huko info`, daemon
+   * health endpoints). Read-only snapshot.
+   */
+  pendingAsks(): Array<{ toolCallId: string; taskId: number }> {
+    return [...this.askResolvers.entries()].map(([toolCallId, v]) => ({
+      toolCallId,
+      taskId: v.taskId,
+    }));
+  }
+
+  private abortAsksForTask(taskId: number, err: Error): void {
+    for (const [toolCallId, r] of this.askResolvers) {
+      if (r.taskId !== taskId) continue;
+      this.askResolvers.delete(toolCallId);
+      r.reject(err);
+    }
   }
 
   async deleteChatSession(sessionId: number): Promise<void> {
@@ -284,7 +353,9 @@ export class TaskOrchestrator {
     // single composition layer; future per-user / per-task toggles will
     // merge into the same ToolFilterContext (intersect allow, union
     // deny) BEFORE the call. See registry.ts ToolFilterContext docstring.
-    const toolFilter: ToolFilterContext = {};
+    const toolFilter: ToolFilterContext = {
+      interactive: input.interactive ?? true,
+    };
     if (role.frontmatter.tools?.allow !== undefined) {
       toolFilter.allowedTools = role.frontmatter.tools.allow;
     }
@@ -297,6 +368,53 @@ export class TaskOrchestrator {
     // fall back to a string-pattern heuristic on the model id.
     const contextWindow =
       config.contextWindow ?? estimateContextWindow(config.modelId);
+
+    // Build the `waitForReply` callback that the `message(type=ask)`
+    // tool handler invokes. Steps when called:
+    //   1. flip task status to `waiting_for_reply` so a subsequent
+    //      orphan recovery (or `huko info` peek) can see this task is
+    //      paused awaiting a human, not stuck in a loop;
+    //   2. emit an `ask_user` HukoEvent so frontends can render the
+    //      question + options;
+    //   3. await a Promise resolved (later) by `respondToAsk(toolCallId)`;
+    //   4. flip the task back to `running` and return the reply.
+    //
+    // Cleanup paths: `stop(taskId)` rejects every pending ask for that
+    // task; the message tool surfaces the rejection as an error result.
+    // If the process dies while waiting, orphan recovery sees the
+    // `waiting_for_reply` status and marks the task failed.
+    const askResolvers = this.askResolvers;
+    const sessionPersistence = this.session;
+    const waitForReply: NonNullable<ConstructorParameters<typeof TaskContext>[0]["waitForReply"]> =
+      async (payload) => {
+        await sessionPersistence.tasks.update(taskId, { status: "waiting_for_reply" });
+        sessionContext.emit({
+          type: "ask_user",
+          taskId,
+          toolCallId: payload.toolCallId,
+          question: payload.question,
+          ...(payload.options ? { options: payload.options } : {}),
+          ...(payload.selectionType ? { selectionType: payload.selectionType } : {}),
+          ts: Date.now(),
+        });
+        try {
+          return await new Promise<{
+            content: string;
+            attachments?: UserAttachment[];
+          }>((resolve, reject) => {
+            askResolvers.set(payload.toolCallId, { taskId, resolve, reject });
+          });
+        } finally {
+          askResolvers.delete(payload.toolCallId);
+          // Restore status. If the task was stopped mid-wait the loop
+          // will overwrite this shortly with "stopped"; harmless either way.
+          try {
+            await sessionPersistence.tasks.update(taskId, { status: "running" });
+          } catch {
+            /* already terminal — ignore */
+          }
+        }
+      };
 
     const taskContext = new TaskContext({
       taskId,
@@ -312,6 +430,7 @@ export class TaskOrchestrator {
       tools: getToolsForLLM(toolFilter),
       systemPrompt,
       sessionContext,
+      waitForReply,
     });
 
     const loop = new TaskLoop(taskContext);

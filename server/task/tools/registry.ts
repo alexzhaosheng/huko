@@ -67,6 +67,18 @@ export type ToolAttachment = {
 };
 
 /**
+ * Per-call metadata passed to handlers that need to know about the
+ * specific tool_use the LLM emitted — currently used by `message`'s
+ * `ask` mode to key its waitForReply Promise on `toolCallId`.
+ *
+ * Optional 3rd parameter so existing handlers don't have to be touched.
+ */
+export type ToolCallMeta = {
+  /** Stable id of this tool call (from the LLM\'s response). */
+  toolCallId: string;
+};
+
+/**
  * Server-tool handler. Runs in the same process as TaskLoop.
  *
  * Allowed return shapes:
@@ -78,6 +90,7 @@ export type ToolAttachment = {
 export type ServerToolHandler = (
   args: Record<string, unknown>,
   ctx: TaskContext,
+  callMeta?: ToolCallMeta,
 ) => Promise<string | ServerToolResult | ToolHandlerResult>
   | string
   | ServerToolResult
@@ -99,6 +112,23 @@ export type ServerToolDefinition = Tool & {
   /** Per-platform instruction blocks appended to `description` at filter time. */
   platformNotes?: Partial<Record<NodeJS.Platform, string>>;
   dangerLevel?: ToolDangerLevel;
+  /**
+   * Generate a per-call JSON schema based on the filter context (e.g.
+   * `interactive: false` → drop the `ask` mode from the `message`
+   * tool's allowed `type` values). When omitted, the static
+   * `parameters` is used unchanged.
+   *
+   * Called by `getToolsForLLM` at LLM-call time, NOT at tool execution
+   * time — the schema goes into the LLM payload, the handler still
+   * receives raw args from the LLM and decides what to do with them.
+   */
+  parametersFor?: (ctx: ToolMaterializeContext) => Tool["parameters"];
+  /**
+   * Generate a per-call description supplement (appended after the
+   * static description + platform note). Useful when ask-only
+   * instructions should be dropped along with the schema field.
+   */
+  descriptionFor?: (ctx: ToolMaterializeContext) => string | undefined;
 };
 
 export type WorkstationToolDefinition = ServerToolDefinition;
@@ -198,18 +228,38 @@ export type ToolFilterContext = {
   deniedTools?: string[];
   /** Custom predicate — final word, applied AFTER allow/deny. */
   predicate?: (name: string, kind: "server" | "workstation") => boolean;
+  /**
+   * Whether the user is reachable for interactive prompts during this
+   * task. When `false`, `message(type=ask)` is removed from the
+   * `message` tool's schema so the LLM literally can't request user
+   * input. Defaults to `true`.
+   *
+   * Wired from `huko run --no-interaction` (CLI), or per-task in
+   * future daemon / web flows.
+   */
+  interactive?: boolean;
+};
+
+/**
+ * Subset of ToolFilterContext that's relevant for schema/description
+ * materialisation. Tools' `parametersFor(ctx)` / `descriptionFor(ctx)`
+ * see this — they don't need allow/deny lists.
+ */
+export type ToolMaterializeContext = {
+  interactive: boolean;
 };
 
 export type ToolFilter = (name: string, kind: "server" | "workstation") => boolean;
 
 export function getToolsForLLM(filter?: ToolFilter | ToolFilterContext): Tool[] {
   const ctx = normaliseFilter(filter);
+  const matCtx: ToolMaterializeContext = { interactive: ctx.interactive ?? true };
   const out: Tool[] = [];
   for (const [name, t] of registry) {
     if (ctx.allowedTools !== undefined && !ctx.allowedTools.includes(name)) continue;
     if (ctx.deniedTools?.includes(name)) continue;
     if (ctx.predicate && !ctx.predicate(name, t.kind)) continue;
-    out.push(materialise(t.definition));
+    out.push(materialise(t.definition, matCtx));
   }
   return out;
 }
@@ -222,15 +272,19 @@ function normaliseFilter(
   return filter;
 }
 
-function materialise(def: ServerToolDefinition): Tool {
+function materialise(
+  def: ServerToolDefinition,
+  matCtx: ToolMaterializeContext,
+): Tool {
   const platformNote = def.platformNotes?.[process.platform];
-  const description = platformNote
-    ? `${def.description}\n\n${platformNote}`
-    : def.description;
+  const dynamicNote = def.descriptionFor?.(matCtx);
+  const parts = [def.description];
+  if (platformNote) parts.push(platformNote);
+  if (dynamicNote) parts.push(dynamicNote);
   return {
     name: def.name,
-    description,
-    parameters: def.parameters,
+    description: parts.join("\n\n"),
+    parameters: def.parametersFor?.(matCtx) ?? def.parameters,
   };
 }
 

@@ -32,6 +32,7 @@
  */
 
 import { bootstrap } from "../bootstrap.js";
+import { attachAskHandler } from "./run-ask.js";
 import { makeFormatter, type FormatName } from "../formatters/index.js";
 import {
   acquireProjectLock,
@@ -56,6 +57,12 @@ export type RunArgs = {
   newSession?: boolean;
   /** One-off send to a specific session id; active pointer untouched. */
   sessionId?: number;
+  /**
+   * When false, drop `message(type=ask)` from the LLM's tool surface
+   * so it can't request user input mid-task. CLI flag: `--no-interaction`
+   * / `-y`. Env: `HUKO_NON_INTERACTIVE=1`. Defaults to true.
+   */
+  interactive?: boolean;
 };
 
 /**
@@ -146,6 +153,18 @@ export async function runCommand(args: RunArgs): Promise<number> {
 
   process.on("SIGINT", onSigint);
 
+  // Attach ask-user handler BEFORE bootstrap. The handler wraps
+  // formatter.emitter (which is what bootstrap will hand to the
+  // orchestrator), so every ask_user event is observed even if it
+  // races against bootstrap returning. `getOrchestrator` is a
+  // late-bound closure — `ctx` is set right after the bootstrap
+  // line below, before any tool call could run.
+  const askHandle = attachAskHandler({
+    formatter,
+    format: args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl",
+    getOrchestrator: () => ctx?.orchestrator ?? null,
+  });
+
   try {
     ctx = await bootstrap(formatter, {
       ...(args.ephemeral ? { ephemeral: true } : {}),
@@ -217,6 +236,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
       content: args.prompt,
       model,
       ...(args.role !== undefined ? { role: args.role } : {}),
+      ...(args.interactive === false ? { interactive: false } : {}),
     });
     runtime.activeTaskId = result.taskId;
     formatter.onTaskStarted?.(result.taskId);
@@ -230,6 +250,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
     exitCode = 1;
   } finally {
     process.off("SIGINT", onSigint);
+    askHandle.close();
     if (ctx) ctx.shutdown();
     if (lock) lock.release();
   }

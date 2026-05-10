@@ -169,6 +169,48 @@ export type OrphanRecoveredEvent = {
   danglingToolCount: number;
 };
 
+// ─── Ask-user (interactive question from the AI) ─────────────────────────────
+
+/**
+ * The AI invoked `message(type=ask, ...)` — it wants information from
+ * the user before continuing. Frontends render the question (and any
+ * predefined options) and call `orchestrator.respondToAsk(toolCallId, reply)`
+ * with the answer. The Promise the orchestrator is awaiting resolves;
+ * the answer becomes the tool_result that the LLM sees on the next turn.
+ *
+ * `toolCallId` is the unique id from the LLM's tool call — stable across
+ * the Promise's lifetime, used as the registry key on the orchestrator
+ * side so multiple concurrent asks (future daemon mode) don't collide.
+ *
+ * `selectionType`:
+ *   - `single`   — pick exactly one of `options`  (radio in a UI)
+ *   - `multiple` — pick zero or more of `options` (checkboxes)
+ *   - omitted    — free-form text reply
+ */
+export type AskUserEvent = {
+  type: "ask_user";
+  taskId: number;
+  /** Stable id of the tool call that triggered this ask. */
+  toolCallId: string;
+  question: string;
+  options?: string[];
+  selectionType?: "single" | "multiple";
+  ts: number;
+};
+
+/**
+ * The shape every frontend submits back to `orchestrator.respondToAsk`.
+ * `content` is the human-readable reply that becomes the tool_result.
+ * For multi-choice asks, frontends synthesise `content` themselves
+ * (e.g. join selected options with ", ") — keeping the reply
+ * representation uniform regardless of selectionType.
+ */
+export type AskUserReply = {
+  content: string;
+  /** Optional structured selection, when the user picked from `options`. */
+  selected?: string[];
+};
+
 // ─── Summary type (for task_terminated) ──────────────────────────────────────
 
 /**
@@ -200,7 +242,8 @@ export type HukoEvent =
   | SystemReminderEvent
   | TaskTerminatedEvent
   | TaskErrorEvent
-  | OrphanRecoveredEvent;
+  | OrphanRecoveredEvent
+  | AskUserEvent;
 
 // ─── Wire constants ──────────────────────────────────────────────────────────
 

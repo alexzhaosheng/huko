@@ -150,8 +150,12 @@ async function runTool(
     return res;
   }
 
-  // server tool
-  const handlerOutput = await Promise.resolve(tool.handler(call.arguments, ctx));
+  // server tool — pass through the LLM's tool call id so handlers that
+  // need it (e.g. `message(type=ask)` keying its waitForReply Promise)
+  // can use a stable per-call key.
+  const handlerOutput = await Promise.resolve(
+    tool.handler(call.arguments, ctx, { toolCallId: call.id }),
+  );
   return normaliseHandlerOutput(handlerOutput);
 }
 
