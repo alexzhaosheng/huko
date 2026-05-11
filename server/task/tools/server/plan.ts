@@ -49,8 +49,9 @@ const PLAN_DESCRIPTION =
   "- Phases should be high-level units of work, not individual steps\n" +
   "- Make delivering the result a separate phase, typically the last one\n" +
   "- Set `current_phase_id` on `update`; no need to `advance` separately right after creating the plan\n" +
-  "- When confident a phase is done, MUST `advance` to the next one\n" +
+  "- When confident an INTERMEDIATE phase is done, MUST `advance` to the next one\n" +
   "- `next_phase_id` MUST be the next sequential ID after the current one. Skipping or going backward is not allowed; revise via `update` if the plan is wrong\n" +
+  "- When the FINAL phase's work is done, deliver directly via `message(type=result)` — do NOT call `advance` past the last phase\n" +
   "- When a new phase activates, relevant best-practices are returned in the tool result. Read them before working\n" +
   "- DO NOT end the task early unless the user explicitly asks\n" +
   "</instructions>\n\n" +
@@ -120,7 +121,7 @@ const PARAMETERS = {
     next_phase_id: {
       type: "number" as const,
       description:
-        "ID of the phase the task is advancing to (>= 1). Required for `advance`. Must be the next sequential phase.",
+        "ID of the phase the task is advancing to (>= 1). Required for `advance` to an intermediate phase, and must be the next sequential id. Omitted (or absent) when the current phase is already the FINAL one — in that case do not call `advance` at all; deliver via `message(type=result)` instead.",
     },
     summary: {
       type: "string" as const,
@@ -143,7 +144,8 @@ const PLAN_PROMPT_HINT = [
   "- For substantive multi-step work, call `plan(action=update)` BEFORE doing meaningful work; phases are high-level units, not micro-steps.",
   "- Tag each phase's `capabilities` with the dominant expertise needed (coding / writing / research / analysis). This is the only way to invoke specialist guidance — there is no `--role` flag.",
   "- When the user changes scope, requirements, priorities, or constraints, call `plan(update)` again BEFORE other actions.",
-  "- When the current phase is complete, call `plan(action=advance)` with the next sequential phase id; skipping is forbidden.",
+  "- When an INTERMEDIATE phase is complete, call `plan(action=advance)` with the next sequential phase id; skipping is forbidden.",
+  "- When the FINAL phase is complete, do NOT call `advance` — deliver directly with `message(type=result)`.",
 ].join("\n");
 
 registerServerTool(
