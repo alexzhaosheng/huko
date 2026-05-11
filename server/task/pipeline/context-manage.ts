@@ -90,6 +90,15 @@ const TOOL_ARG_DIGEST_CHAR_LIMIT = 80;
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export async function manageContext(ctx: TaskContext): Promise<void> {
+  // Skip while parallel tool calls from the current assistant turn are
+  // still in flight. The task loop runs one tool per iteration; sibling
+  // calls from the same assistant message wait in `deferredCalls`. If
+  // we elide that assistant entry now, the late-arriving siblings'
+  // tool_results land AFTER the compaction reminder with no matching
+  // tool_call in scope — `loadLLMContext` can't pair them on rehydrate
+  // and strict APIs (DeepSeek) reject the orphan with HTTP 400.
+  if (ctx.deferredCalls.length > 0) return;
+
   const sc = ctx.sessionContext;
   const cfg = getConfig().compaction;
   const messages = sc.getMessages();
