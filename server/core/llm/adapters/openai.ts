@@ -139,6 +139,15 @@ function toApiMessage(m: LLMMessage): Record<string, unknown> {
         function: { name: c.name, arguments: JSON.stringify(c.arguments) },
       }));
     }
+    // Echo reasoning back so providers that require it (DeepSeek's
+    // thinking mode rejects the request with "reasoning_content must
+    // be passed back to the API" otherwise) stay happy. Providers that
+    // don't recognise the field ignore it. The value comes from the
+    // matching response's `reasoning_content` / `reasoning`, captured
+    // into LLMMessage.thinking by readNonStream / readStream below.
+    if (m.thinking) {
+      out["reasoning_content"] = m.thinking;
+    }
     return out;
   }
   if (m.role === "system") {
