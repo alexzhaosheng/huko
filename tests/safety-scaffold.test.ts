@@ -67,13 +67,29 @@ describe("buildSafetyTemplate", () => {
     }
   });
 
-  it("each tool entry has deny / allow / requireConfirm as empty arrays", () => {
+  it("non-bash tools have all three buckets empty", () => {
     const t = buildSafetyTemplate() as Record<string, unknown>;
     const rules = t["toolRules"] as Record<string, Record<string, unknown>>;
-    const bash = rules["bash"]!;
+    for (const name of ["write_file", "edit_file", "delete_file", "move_file"]) {
+      assert.deepEqual(rules[name]!["deny"], [], `${name}.deny should be empty`);
+      assert.deepEqual(rules[name]!["allow"], [], `${name}.allow should be empty`);
+      assert.deepEqual(rules[name]!["requireConfirm"], [], `${name}.requireConfirm should be empty`);
+    }
+  });
+
+  it("bash prefills allow with common read-only command prefixes", () => {
+    const t = buildSafetyTemplate() as Record<string, unknown>;
+    const bash = (t["toolRules"] as Record<string, Record<string, unknown>>)["bash"]!;
     assert.deepEqual(bash["deny"], []);
-    assert.deepEqual(bash["allow"], []);
     assert.deepEqual(bash["requireConfirm"], []);
+    const allow = bash["allow"] as string[];
+    // Spot-check a few of the prefilled patterns
+    assert.ok(allow.includes("re:^ls\\b"), `expected ls in allow, got ${JSON.stringify(allow)}`);
+    assert.ok(allow.includes("re:^cat\\b"));
+    assert.ok(allow.includes("re:^grep\\b"));
+    // Things we DELIBERATELY omitted should not be there
+    assert.ok(!allow.includes("re:^find\\b"), "find can delete via -delete; must not be in allow");
+    assert.ok(!allow.includes("re:^env\\b"), "env leaks env vars; must not be in allow");
   });
 
   it("ships `_comment*` keys (loader strips them on read)", () => {

@@ -212,6 +212,100 @@ describe("evaluatePolicy — per-tool rule precedence", () => {
   });
 });
 
+// ─── End-to-end: scaffold's bash read-allow list under realistic configs ───
+
+describe("evaluatePolicy — scaffold's read-only bash allow list", () => {
+  // Mirrors what `huko safety init` writes when the operator opts in:
+  // byDangerLevel.dangerous = "prompt" + bash.allow prefilled with the
+  // 14 read-only command prefixes. Pin the actual behavior on real-
+  // world command strings.
+
+  const POST_OPT_IN: HukoConfig["safety"] = {
+    byDangerLevel: { safe: "auto", moderate: "auto", dangerous: "prompt" },
+    toolRules: {
+      bash: {
+        deny: [],
+        allow: [
+          "re:^ls\\b",
+          "re:^cat\\b",
+          "re:^head\\b",
+          "re:^tail\\b",
+          "re:^wc\\b",
+          "re:^grep\\b",
+          "re:^pwd\\b",
+          "re:^echo\\b",
+          "re:^stat\\b",
+          "re:^file\\b",
+        ],
+        requireConfirm: [],
+      },
+    },
+  };
+
+  function decide(cmd: string) {
+    return evaluatePolicy({
+      toolName: "bash",
+      args: { command: cmd },
+      dangerLevel: "dangerous",
+      safety: POST_OPT_IN,
+    });
+  }
+
+  it("allows common read-only commands (auto, source=rule)", () => {
+    for (const cmd of [
+      "ls",
+      "ls -la /tmp",
+      "ls /tmp | wc -l",
+      "cat README.md",
+      "head -n 20 server/index.ts",
+      "grep -r foo .",
+      "pwd",
+      "echo hello",
+      "stat /tmp",
+    ]) {
+      const d = decide(cmd);
+      assert.equal(d.action, "auto", `expected auto for "${cmd}", got ${JSON.stringify(d)}`);
+      assert.equal(d.source, "rule");
+    }
+  });
+
+  it("does NOT confuse 'ls' allow with 'lsof' (\\b boundary matters)", () => {
+    const d = decide("lsof -i :3000");
+    // lsof matches `re:^ls\b`? No — \b is a word boundary. ls + o is
+    // still inside the same word. So lsof should NOT match.
+    assert.equal(d.action, "prompt", `lsof should fall to dangerLevel default`);
+  });
+
+  it("falls through (→ prompt) for chains starting with a non-read command", () => {
+    const d = decide("true && ls /tmp");
+    assert.equal(d.action, "prompt");
+    assert.equal(d.source, "default");
+  });
+
+  it("falls through (→ prompt) for write commands", () => {
+    for (const cmd of ["rm -rf foo", "mv a b", "cp x y", "sudo apt install foo"]) {
+      const d = decide(cmd);
+      assert.equal(d.action, "prompt", `${cmd} should fall to dangerLevel default`);
+    }
+  });
+});
+
+// ─── Zero-config: out-of-the-box default is fully permissive ────────────────
+
+describe("DEFAULT_CONFIG safety", () => {
+  it("zero-config defaults to auto for every dangerLevel (safety is opt-in)", async () => {
+    const { DEFAULT_CONFIG } = await import("../server/config/types.js");
+    assert.equal(DEFAULT_CONFIG.safety.byDangerLevel.safe, "auto");
+    assert.equal(DEFAULT_CONFIG.safety.byDangerLevel.moderate, "auto");
+    assert.equal(
+      DEFAULT_CONFIG.safety.byDangerLevel.dangerous,
+      "auto",
+      "default must be auto, not prompt — otherwise -y runs break for everyone post-upgrade",
+    );
+    assert.deepEqual(DEFAULT_CONFIG.safety.toolRules, {});
+  });
+});
+
 // ─── validateRules ─────────────────────────────────────────────────────────
 
 describe("validateRules", () => {

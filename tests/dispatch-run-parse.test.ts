@@ -229,6 +229,34 @@ describe("parseRunArgs — protocol enforcement", () => {
     if (r.kind !== "ok") return;
     assert.equal(r.args.mode, undefined);
   });
+
+  it("parses --verbose and emits verbose: true", () => {
+    const r = parseRunArgs(["--verbose", "--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.verbose, true);
+  });
+
+  it("parses -v short form", () => {
+    const r = parseRunArgs(["-v", "--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.verbose, true);
+  });
+
+  it("parses --quiet and emits verbose: false (forcing override)", () => {
+    const r = parseRunArgs(["--quiet", "--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.verbose, false);
+  });
+
+  it("omits verbose when neither flag is given (lets config decide)", () => {
+    const r = parseRunArgs(["--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.verbose, undefined);
+  });
 });
 
 // ─── help short-circuit ─────────────────────────────────────────────────────

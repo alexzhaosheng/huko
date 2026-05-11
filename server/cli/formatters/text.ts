@@ -8,13 +8,20 @@
  *           the answer, not the diagnostics.
  *   stderr: everything else — tool calls, tool results, reminders,
  *           thinking deltas (dim), final summary.
+ *
+ * Verbosity (`{verbose: boolean}`):
+ *   - false (default): tool_result is a one-liner ("← name: ok" or
+ *     "← name: error: <code>"); system_reminder collapses to its reason
+ *     attribute ("[reminder: compaction_done]"). Long tool-call args
+ *     truncate to ~80 chars. Keeps the terminal scan-friendly when the
+ *     LLM is busy reading files; the LLM still sees full content over
+ *     the wire.
+ *   - true: tool_result shows a 200-char preview; system_reminder body
+ *     is rendered verbatim; tool-call args are full JSON.
  */
 
 import type { Emitter } from "../../engine/SessionContext.js";
 import type { Formatter } from "./types.js";
-// Reuse the shared TTY-aware helpers — same colors as static CLI output,
-// stays plain when stderr/stdout aren't TTYs (so `huko run > out.txt`
-// captures clean text).
 import { dim, magenta, red, yellow } from "../colors.js";
 
 const dimErr = (s: string) => dim(s, "stderr");
@@ -22,7 +29,15 @@ const yellowErr = (s: string) => yellow(s, "stderr");
 const magentaErr = (s: string) => magenta(s, "stderr");
 const redErr = (s: string) => red(s, "stderr");
 
-export function makeTextFormatter(): Formatter {
+export type TextFormatterOptions = {
+  verbose: boolean;
+};
+
+const TOOL_CALL_ARGS_MAX = 80; // chars before collapsing in non-verbose
+const TOOL_RESULT_PREVIEW_MAX = 200; // chars when verbose
+
+export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false }): Formatter {
+  const verbose = opts.verbose;
   let assistantStreaming = false;
   const printedToolCallsFor = new Set<number>();
 
@@ -54,26 +69,62 @@ export function makeTextFormatter(): Formatter {
           if (event.toolCalls && event.toolCalls.length > 0 && !printedToolCallsFor.has(event.entryId)) {
             printedToolCallsFor.add(event.entryId);
             for (const c of event.toolCalls) {
+              const argsStr = JSON.stringify(c.arguments);
+              const collapsed =
+                verbose || argsStr.length <= TOOL_CALL_ARGS_MAX
+                  ? argsStr
+                  : argsStr.slice(0, TOOL_CALL_ARGS_MAX - 1) + "…";
               process.stderr.write(
-                dimErr(`  → ${c.name}(${JSON.stringify(c.arguments)})`) + "\n",
+                dimErr(`  → ${c.name}(${collapsed})`) + "\n",
               );
             }
           }
           break;
 
         case "tool_result": {
-          const preview =
-            event.content.length > 200 ? event.content.slice(0, 200) + "…" : event.content;
           if (event.error) {
-            process.stderr.write(redErr(`  ← ${event.toolName}: error: ${event.error}`) + "\n");
-          } else {
+            // Errors always shown — the LLM's recovery depends on them
+            // and the operator wants to notice. Verbose adds the full
+            // body; quiet shows just the short error code.
+            if (verbose) {
+              const preview =
+                event.content.length > TOOL_RESULT_PREVIEW_MAX
+                  ? event.content.slice(0, TOOL_RESULT_PREVIEW_MAX) + "…"
+                  : event.content;
+              process.stderr.write(redErr(`  ← ${event.toolName}: error: ${preview}`) + "\n");
+            } else {
+              process.stderr.write(redErr(`  ← ${event.toolName}: error: ${event.error}`) + "\n");
+            }
+          } else if (verbose) {
+            // Verbose: 200-char preview of the actual result body.
+            const preview =
+              event.content.length > TOOL_RESULT_PREVIEW_MAX
+                ? event.content.slice(0, TOOL_RESULT_PREVIEW_MAX) + "…"
+                : event.content;
             process.stderr.write(yellowErr(`  ← ${event.toolName}: ${preview}`) + "\n");
+          } else {
+            // Quiet: just acknowledge it ran. The LLM is the consumer
+            // of the content; the operator doesn't need to see file
+            // contents or `ls` output dumped to their terminal.
+            process.stderr.write(yellowErr(`  ← ${event.toolName}: ok`) + "\n");
           }
           break;
         }
 
         case "system_reminder":
-          process.stderr.write(magentaErr(`[reminder] ${event.content}`) + "\n");
+          // system_reminder is an internal kernel→LLM signal (compaction
+          // digests, language-drift nudges, ...). Operators almost never
+          // need to read it; the LLM is the audience. Quiet mode shows
+          // only the `reason="..."` attribute as a one-liner; verbose
+          // dumps the full body.
+          if (verbose) {
+            process.stderr.write(magentaErr(`[reminder] ${event.content}`) + "\n");
+          } else {
+            const reason = extractReminderReason(event.content);
+            process.stderr.write(
+              dimErr(`  [reminder: ${reason ?? "internal"}]`) + "\n",
+            );
+          }
           break;
 
         case "system_notice":
@@ -140,4 +191,14 @@ export function makeTextFormatter(): Formatter {
       process.stderr.write(redErr(`\n[error] ${msg}`) + "\n");
     },
   };
+}
+
+/**
+ * Pull `reason="..."` from a system_reminder body. The kernel formats
+ * these as `<system_reminder reason="compaction_done">...</system_reminder>`
+ * — we want just the reason for the quiet-mode one-liner.
+ */
+function extractReminderReason(content: string): string | null {
+  const m = /<system_reminder\s+reason="([^"]+)"/.exec(content);
+  return m ? m[1]! : null;
 }

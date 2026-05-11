@@ -62,10 +62,54 @@ export function buildSafetyTemplate(): Record<string, unknown> {
 }
 
 /**
+ * Built-in read-only bash command prefixes. Prefilled into the scaffold's
+ * `bash.allow` so an operator who opts into safety still gets transparent
+ * pass-through for the common "read what's there" commands, even under
+ * `-y` (where prompts fail-closed).
+ *
+ * Coverage rationale:
+ *   - Inspect filesystem:    ls, cat, head, tail, file, stat, wc
+ *   - Search / count:        grep
+ *   - Shell info:            pwd, echo, which, whoami, date, uname
+ *
+ * Deliberately omitted (each has a footgun):
+ *   - `find`  — `find . -delete` deletes files
+ *   - `env`   — dumps env vars to stdout; can leak secrets into LLM ctx
+ *   - `du`    — can spike CPU / disk I/O on huge trees
+ *   - `cd`    — common but stateful; chains like `cd /tmp && rm` would
+ *                still match by prefix and bypass the gate
+ *
+ * Prefix-match limit: patterns anchor at command START. Compound commands
+ * like `ls /tmp && rm -rf foo` start with `ls` and DO match — but they
+ * also DON'T match (the `\b` boundary stops at `&&`). The regex form
+ * `^ls\b` means the FIRST word must be `ls` standalone, then anything.
+ * Chains like `true && ls` fall through to byDangerLevel (no match).
+ */
+const DEFAULT_BASH_READ_ALLOW: readonly string[] = [
+  "re:^ls\\b",
+  "re:^cat\\b",
+  "re:^head\\b",
+  "re:^tail\\b",
+  "re:^wc\\b",
+  "re:^grep\\b",
+  "re:^pwd\\b",
+  "re:^echo\\b",
+  "re:^which\\b",
+  "re:^whoami\\b",
+  "re:^date\\b",
+  "re:^uname\\b",
+  "re:^stat\\b",
+  "re:^file\\b",
+];
+
+/**
  * Build the per-tool rule stubs. Walks the live tool registry and
  * includes only tools that (a) are registered AND (b) write or execute
  * something the operator might want a confirmation gate on. Read-only
  * tools fall through to `byDangerLevel.safe` and don't need stubs.
+ *
+ * Bash gets `DEFAULT_BASH_READ_ALLOW` prefilled so `-y` runs can still
+ * do `ls`, `cat`, etc. without tripping fail-closed.
  */
 function buildToolRulesTemplate(): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -74,15 +118,25 @@ function buildToolRulesTemplate(): Record<string, unknown> {
     if (!tool) continue;
     if (!isWritableTool(tool.definition)) continue;
     const fields = MATCH_FIELDS[name] ?? [];
-    out[name] = {
+    const base = {
       _comment:
         fields.length > 0
           ? `Patterns match against: ${fields.map((f) => "`" + f + "`").join(", ")}.`
           : "No matchable arguments — falls through to byDangerLevel.",
-      deny: [],
-      allow: [],
-      requireConfirm: [],
+      deny: [] as string[],
+      allow: [] as string[],
+      requireConfirm: [] as string[],
     };
+    if (name === "bash") {
+      out[name] = {
+        ...base,
+        _comment_allow:
+          "Pre-populated read-only command prefixes. Anchored at the FIRST word — chains like `ls && rm` fall through (\\b stops at &&).",
+        allow: [...DEFAULT_BASH_READ_ALLOW],
+      };
+    } else {
+      out[name] = base;
+    }
   }
   return out;
 }

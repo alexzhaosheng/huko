@@ -11,10 +11,15 @@ import { makeJsonFormatter } from "./json.js";
 
 export type { Formatter, FormatName } from "./types.js";
 
-export function makeFormatter(name: FormatName): Formatter {
+export type FormatterOptions = {
+  /** Show tool_result previews + full system_reminder bodies. Default false. */
+  verbose?: boolean;
+};
+
+export function makeFormatter(name: FormatName, opts: FormatterOptions = {}): Formatter {
   switch (name) {
     case "text":
-      return makeTextFormatter();
+      return makeTextFormatter({ verbose: opts.verbose ?? false });
     case "jsonl":
       return makeJsonlFormatter();
     case "json":

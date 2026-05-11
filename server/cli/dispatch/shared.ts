@@ -81,6 +81,8 @@ export function usage(exitCode: number = 3): never {
       row("--show-tokens", "Print input / cache / output token breakdown after run"),
       row("--lean", "One-call override: lean mode (minimal prompt + bash only)"),
       row("--full", "One-call override: full mode (overrides config.mode=lean)"),
+      row("--verbose, -v", "Show tool_result content + system_reminder bodies"),
+      row("--quiet", "Force quiet output (overrides config.cli.verbose=true)"),
       "",
       h("Options for `provider add`:"),
       row("--name=<text>", "Provider name (required)"),

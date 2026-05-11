@@ -67,6 +67,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let interactive = process.env["HUKO_NON_INTERACTIVE"] !== "1";
   let showTokens = false;
   let mode: "lean" | "full" | undefined;
+  let verbose: boolean | undefined;
   let format: FormatName = "text";
 
   for (const arg of flagArgs) {
@@ -90,6 +91,14 @@ export function parseRunArgs(rest: string[]): ParseResult {
     }
     if (arg === "--show-tokens") {
       showTokens = true;
+      continue;
+    }
+    if (arg === "--verbose" || arg === "-v") {
+      verbose = true;
+      continue;
+    }
+    if (arg === "--quiet") {
+      verbose = false;
       continue;
     }
     if (arg === "--lean") {
@@ -188,6 +197,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(interactive ? {} : { interactive: false }),
       ...(showTokens ? { showTokens: true } : {}),
       ...(mode !== undefined ? { mode } : {}),
+      ...(verbose !== undefined ? { verbose } : {}),
     },
   };
 }

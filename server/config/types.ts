@@ -109,6 +109,17 @@ export type HukoConfig = {
 
   cli: {
     format: "text" | "jsonl" | "json";
+    /**
+     * Default verbosity for the `text` formatter:
+     *   - false (default): tool_result content + system_reminder body
+     *     are hidden — too noisy and primarily useful to the LLM, not
+     *     the operator watching at a terminal.
+     *   - true:            full preview / full reminder body (parity
+     *     with how huko looked before the 2026-05 trim).
+     *
+     * Per-call `--verbose` / `-v` flag overrides this.
+     */
+    verbose: boolean;
   };
 
   daemon: {
@@ -144,21 +155,27 @@ export const DEFAULT_CONFIG: HukoConfig = {
   },
   cli: {
     format: "text",
+    verbose: false,
   },
   daemon: {
     port: 3000,
     host: "127.0.0.1",
   },
   safety: {
+    // Safety is OPT-IN. Zero-config huko behaves identically to pre-
+    // safety-layer huko: every tool just runs. Users who want safety
+    // explicitly call `huko safety init` (which scaffolds a template
+    // with `dangerous: "prompt"` + read-only bash allow-list) and
+    // tune from there.
+    //
+    // Why not default to prompt: a `-y` / non-interactive run with
+    // `dangerous: prompt` fails-closed for EVERY bash call (no port
+    // installed → deny). That'd silently break every CI/script that
+    // worked yesterday. Opt-in keeps the upgrade path clean.
     byDangerLevel: {
-      // Read-only ops auto-execute; write/exec ops auto-execute by
-      // default too — the new safety layer is opt-in. Users who want
-      // confirmation for write/exec set `moderate: "prompt"`.
       safe: "auto",
       moderate: "auto",
-      // `dangerous` exists for tools that should always pause unless
-      // explicitly bypassed (currently no tool ships at this level).
-      dangerous: "prompt",
+      dangerous: "auto",
     },
     toolRules: {},
   },

@@ -45,7 +45,7 @@ import {
   getActiveSessionId,
   setActiveSessionId,
 } from "../state.js";
-import { getConfig } from "../../config/index.js";
+import { getConfig, loadConfig } from "../../config/index.js";
 
 export type RunArgs = {
   prompt: string;
@@ -80,6 +80,15 @@ export type RunArgs = {
    * CLI flags `--lean` and `--full` populate this.
    */
   mode?: "lean" | "full";
+  /**
+   * Per-call verbosity override for the text formatter.
+   *   - true  — show tool_result content previews + system_reminder bodies
+   *   - false — collapse them (matches HukoConfig.cli.verbose=false default)
+   *   - undefined — inherit from HukoConfig.cli.verbose
+   *
+   * CLI: `--verbose` / `-v` sets true; `--quiet` forces false.
+   */
+  verbose?: boolean;
 };
 
 /**
@@ -135,7 +144,13 @@ export async function runCommand(args: RunArgs): Promise<number> {
     lock = result.lock;
   }
 
-  const formatter = makeFormatter(args.format);
+  // Effective verbosity: CLI flag wins, otherwise inherit HukoConfig.cli.verbose
+  // (default false). Only affects the `text` formatter; json/jsonl ignore it.
+  // Bootstrap also calls loadConfig later — idempotent, so calling here first
+  // is safe and lets the formatter see the on-disk verbose setting.
+  loadConfig({ cwd });
+  const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
+  const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
 
   // From here on, anything that can throw must run under try/finally so
   // the lock + persistence connections are cleaned up.
