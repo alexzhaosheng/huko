@@ -87,6 +87,22 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
     apiKeyRef: "qwen",
   },
   {
+    // Zhipu AI (智谱) OpenAI-compatible. Model IDs use the glm-*
+    // family; endpoint documented at docs.bigmodel.cn.
+    name: "zhipu",
+    protocol: "openai",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    apiKeyRef: "zhipu",
+  },
+  {
+    // MiniMax (稀宇) OpenAI-compatible. Model IDs use the MiniMax-M2.*
+    // family; endpoint documented at platform.minimax.io/docs.
+    name: "minimax",
+    protocol: "openai",
+    baseUrl: "https://api.minimax.io/v1",
+    apiKeyRef: "minimax",
+  },
+  {
     name: "ollama",
     protocol: "openai",
     baseUrl: "http://localhost:11434/v1",
@@ -251,6 +267,50 @@ export const BUILTIN_MODELS: ModelConfig[] = [
     providerName: "qwen",
     modelId: "qwen3-coder-plus",
     displayName: "Qwen3 Coder Plus",
+  },
+
+  // ── Zhipu AI (智谱) — direct via OpenAI-compatible endpoint ──
+  {
+    providerName: "zhipu",
+    modelId: "glm-5.1",
+    displayName: "GLM 5.1",
+  },
+  {
+    providerName: "zhipu",
+    modelId: "glm-5",
+    displayName: "GLM 5",
+  },
+  {
+    providerName: "zhipu",
+    modelId: "glm-4.7",
+    displayName: "GLM 4.7",
+  },
+  {
+    providerName: "zhipu",
+    modelId: "glm-4.6",
+    displayName: "GLM 4.6",
+  },
+
+  // ── MiniMax (稀宇) — direct via OpenAI-compatible endpoint ──
+  {
+    providerName: "minimax",
+    modelId: "MiniMax-M2.7",
+    displayName: "MiniMax M2.7",
+  },
+  {
+    providerName: "minimax",
+    modelId: "MiniMax-M2.5",
+    displayName: "MiniMax M2.5",
+  },
+  {
+    providerName: "minimax",
+    modelId: "MiniMax-M2.1",
+    displayName: "MiniMax M2.1",
+  },
+  {
+    providerName: "minimax",
+    modelId: "MiniMax-M2",
+    displayName: "MiniMax M2",
   },
 
   // ── Ollama — local ──

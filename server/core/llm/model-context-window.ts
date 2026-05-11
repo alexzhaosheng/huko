@@ -93,6 +93,23 @@ const HEURISTIC_TABLE: ReadonlyArray<readonly [string, number]> = [
   ["qwen-2.5", 128_000],
   ["qwen-2", 32_000],
   ["qwen", 32_000],
+
+  // ── Zhipu GLM ────────────────────────────────────────────────────────
+  // GLM-5.1 / GLM-5: 200K context window (docs.bigmodel.cn)
+  ["glm-5", 200_000],
+  // GLM-4.6 / GLM-4.7: 200K context window (docs.bigmodel.cn)
+  ["glm-4", 200_000],
+  ["glm", 128_000], // generic glm/* fallback
+
+  // ── MiniMax ───────────────────────────────────────────────────────────
+  // MiniMax-M2 family: 204,800 context window (platform.minimax.io)
+  ["minimax-m2", 204_800],
+  ["minimax", 204_800], // generic minimax/* fallback
+
+  // ── Moonshot / Kimi ───────────────────────────────────────────────────
+  // Kimi K2.6: 256K context; K2.5: 128K. Use 256K for the K2 family.
+  ["kimi-k2", 256_000],
+  ["kimi", 128_000], // generic kimi/* fallback
 ];
 
 /**
