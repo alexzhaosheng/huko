@@ -1,37 +1,40 @@
 /**
  * server/cli/dispatch/run.ts
  *
- * `huko [flags] <prompt>` — argv parser + handoff to runCommand.
+ * `huko [flags] -- <prompt>` — argv parser + handoff to runCommand.
  *
  * Protocol:
  *
  *   - Walk argv left-to-right. Initial mode: `flags`.
  *   - Each token starting with `-` while in flag mode is interpreted as
  *     a recognised flag. Unrecognised flags are a parse error.
- *   - The first non-flag (bare positional) token switches the parser
- *     to `prompt` mode. That token AND every subsequent token become
- *     prompt content, verbatim — including things that look like flags.
- *   - The explicit `--` token also switches to prompt mode but is NOT
- *     itself included. Use it when the prompt's first word begins with
- *     `-` (e.g. `huko -- -3 + 5 ?` or `huko -- --metric correctness`).
+ *   - The `--` sentinel switches the parser to `prompt` mode and is
+ *     NOT itself included. Everything after is prompt content,
+ *     verbatim — including things that look like flags.
+ *   - A bare (non-flag) positional token in flag mode is a parse error.
+ *     Prompt content MUST be introduced by `--` so that "first bare
+ *     word" stays unambiguously a subcommand-selector slot at the
+ *     index.ts level.
  *
  * Why this shape:
- *   - Most invocations are bare prompts (`huko fix the bug`). No
- *     ceremony, no sentinel.
- *   - Flag-modified prompts work without `--`: `huko --new fix it`.
- *   - The `--` sentinel survives as the escape hatch for prompts that
- *     would otherwise look like flags.
- *   - After the first positional, NO flag re-parsing — so prompts that
- *     casually mention `--no-interaction` or `--force` aren't ambiguous.
+ *   - Subcommand surface keeps growing (sessions / info / setup /
+ *     provider / model / keys / safety / config / debug / ...). Letting
+ *     the prompt overload "first bare word" means typo'd verbs like
+ *     `huko sesions list` get sent to the LLM as a prompt — confusing.
+ *     Forcing `--` cleanly separates the two namespaces forever.
+ *   - After `--`, NO flag re-parsing — prompts mentioning `--metric` or
+ *     `--no-interaction` are passed through as prompt content.
+ *   - Empty prompt is permitted: caller (runCommand) decides at runtime
+ *     whether to read stdin, drop into chat REPL, or surface an error.
  *
  * Examples:
- *   huko fix the bug                        # OK — prompt: "fix the bug"
- *   huko --new --title=X fix the bug        # OK — flags + prompt
- *   huko --new -- --metric correctness      # OK — explicit sentinel
- *   huko -- -3 + 5 = ?                      # OK — prompt starts with `-`
- *   huko --unknown-flag foo                 # ERROR — unknown flag
- *   huko --new                              # ERROR — no prompt
- *   huko --                                 # ERROR — empty prompt
+ *   huko -- fix the bug                     # OK — prompt: "fix the bug"
+ *   huko --new --title=X -- fix the bug     # OK — flags + sentinel + prompt
+ *   huko --new -- --metric correctness      # OK — `--metric` is prompt content
+ *   huko -- -3 + 5 = ?                      # OK — prompt may start with `-`
+ *   huko --unknown-flag                     # ERROR — unknown flag
+ *   huko --new fix the bug                  # ERROR — bare positional, missing `--`
+ *   huko --                                 # OK   — empty prompt; runCommand decides
  *
  * Returns the exit code from `runCommand` (0..5). On parse error the
  * dispatcher writes a diagnostic and throws `CliExitError` via usage().
@@ -79,9 +82,19 @@ export function parseRunArgs(rest: string[]): ParseResult {
       break;
     }
     if (!arg.startsWith("-")) {
-      // First bare positional — this IS prompt start. Don't increment;
-      // prompt collection below will pick it up.
-      break;
+      // Bare positional in flag mode — under the new contract prompts
+      // MUST be introduced by `--`. Without this rule, `huko --new fix
+      // the bug` would be ambiguous with `huko --new sesions list`
+      // (typo'd subcommand silently sent to the LLM). Tell the user
+      // exactly how to spell what they likely meant.
+      const tail = rest.slice(i).join(" ");
+      return {
+        kind: "error",
+        message:
+          `huko: unexpected positional argument: ${arg}\n` +
+          `       Use \`--\` to separate flags from your prompt:\n` +
+          `       huko ${rest.slice(0, i).join(" ")}${i > 0 ? " " : ""}-- ${tail}\n`,
+      };
     }
 
     if (arg === "-h" || arg === "--help") return { kind: "help" };

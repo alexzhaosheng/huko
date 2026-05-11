@@ -8,17 +8,24 @@
  *   - argv[0] is `-h` / `--help`                      → usage
  *   - argv[0] is a known noun (sessions, provider,    → that subcommand
  *     model, keys, config, info, setup, debug, safety)
- *   - anything else                                   → free-form prompt
+ *   - argv[0] starts with `-` (flag) or is `--`       → prompt pipeline
+ *   - argv[0] is a bare word, not a known subcommand  → error (typo'd
+ *                                                       subcommand)
  *
- * The "free-form prompt" path is the most common: `huko fix the bug`,
- * `huko --new fix the bug`, `huko -- --rare-edge-case-prompt`. The
- * prompt parser (dispatch/run.ts) walks argv left-to-right; the first
- * non-flag positional switches to prompt mode and everything after is
- * verbatim. The `--` sentinel is the escape hatch for prompts that
- * happen to start with `-`.
+ * The `--` sentinel is REQUIRED to send a free-form prompt. This keeps
+ * "first bare word" unambiguously a subcommand selector — typo'd verbs
+ * (`huko sesions list`) error out instead of being silently sent to the
+ * LLM as `sesions list`. Examples:
  *
- * There is intentionally NO `run` verb. The agent IS huko's primary
- * action — typing it would be redundant.
+ *   huko sessions list                  → subcommand
+ *   huko -- 你是谁？                     → prompt
+ *   huko --new -- explain prompt cache  → flags + sentinel + prompt
+ *   huko sesions list                   → ERROR: unknown subcommand
+ *   huko 你是谁？                        → ERROR: unknown subcommand
+ *
+ * There is intentionally NO `run` verb — the prompt pipeline IS huko's
+ * primary action; `--` is the dividing line between huko's argv and the
+ * user's prompt content.
  */
 
 import { dispatchConfig } from "./dispatch/config.js";
@@ -71,8 +78,22 @@ async function main(): Promise<number> {
       return await handler(argv.slice(1));
     }
 
-    // Otherwise — flags, bare prompts, anything else — goes to the
-    // prompt pipeline. The parser handles flag-vs-positional disambiguation.
+    // Bare word that ISN'T a known subcommand → typo'd verb. Catch it
+    // here instead of silently treating it as the start of a prompt:
+    // the design contract is "subcommand goes first, prompt goes after
+    // `--`", which keeps the two namespaces from colliding as the
+    // subcommand surface grows.
+    if (!head.startsWith("-")) {
+      process.stderr.write(
+        `huko: unknown subcommand: ${head}\n` +
+          `       Run \`huko --help\` to see all subcommands.\n` +
+          `       To send this as a prompt to the agent: huko -- ${argv.join(" ")}\n`,
+      );
+      return 3;
+    }
+
+    // Flags or `--` sentinel → prompt pipeline. parseRunArgs enforces
+    // the same rule downstream (no bare positional after flags either).
     return await dispatchRun(argv);
   } catch (err) {
     if (err instanceof CliExitError) return err.code;

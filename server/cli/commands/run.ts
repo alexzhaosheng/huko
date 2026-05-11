@@ -155,7 +155,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
     if (process.stdin.isTTY) {
       process.stderr.write(
         "huko: prompt is required.\n" +
-          "       Try: huko fix the bug in main.ts\n" +
+          "       Try: huko -- fix the bug in main.ts\n" +
           "       Pipe: echo '...' | huko        (handles shell special chars safely)\n" +
           "       File: huko < prompt.txt\n" +
           "       REPL: huko --chat\n",

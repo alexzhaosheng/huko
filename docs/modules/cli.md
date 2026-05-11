@@ -42,7 +42,7 @@ resource 一个 dispatcher 函数（`dispatchSessions` / `dispatchProvider`
 
 | 命令 | 干啥 |
 |---|---|
-| `huko [flags] <prompt>` | append 到 active session（没就建一个） |
+| `huko [flags] -- <prompt>` | append 到 active session（没就建一个） |
 | `huko sessions list` | 列本地项目 DB 的所有 chat sessions |
 | `huko sessions delete <id>` | 级联删除 session + tasks + entries |
 | `huko sessions current` | 显示当前 cwd 的 active session |
@@ -83,21 +83,23 @@ huko model add --provider=OpenRouter \
                --model-id=anthropic/claude-3.5-haiku --default
 
 # 4. 跑！
-huko hello
+huko -- hello
 ```
 
 ---
 
 ## 命令细节
 
-### `huko [flags] <prompt>`
+### `huko [flags] -- <prompt>`
 
-**Argv 协议**：Flag 放前面，第一个非 flag 的 positional 参数**开始 prompt**，其后所有内容逐字成为 prompt。`--` sentinel 可用于 prompt 以 `-` 开头的情况。这意味着：
+**Argv 协议**：Flag 放最前面；`--` sentinel **必填**，后面所有内容逐字成为 prompt（包括 `--xxx` 形式的内容）。强制 `--` 是为了让"第一个 bare word"始终明确归属于 subcommand 选择，typo 的子命令（如 `huko sesions list`）不会被静默吞成 prompt 发给 LLM。这意味着：
 
-- `huko --new explain --no-interaction works` — 合法，prompt 含 `--no-interaction`
-- `huko hello` — 合法，prompt = "hello"
-- `huko --new` — 错误：缺少 prompt
-- `huko -- -3 + 5 = ?` — 使用 `--` sentinel 处理以 `-` 开头的 prompt
+- `huko --new -- explain --no-interaction works` — 合法，prompt 含 `--no-interaction`
+- `huko -- hello` — 合法，prompt = "hello"
+- `huko --new` — 合法（空 prompt → runCommand 决定：读 stdin / 报错）
+- `huko -- -3 + 5 = ?` — 合法，prompt 可以以 `-` 开头
+- `huko --new fix the bug` — **错误**：bare positional 没有 `--` 引导
+- `huko sesions list` — **错误**：unknown subcommand（不会被当作 prompt）
 
 
 #### Session 选择规则
