@@ -1,7 +1,7 @@
 /**
  * server/cli/commands/run.ts
  *
- * `huko run [flags] -- <prompt>` — append to the active session by default.
+ * `huko [flags] <prompt>` — append to the active session by default.
  *
  * Session selection:
  *   1. `--session=<id>`   one-off send to that session; active pointer
@@ -73,13 +73,12 @@ export type RunArgs = {
   /**
    * Per-call mode override.
    *   - "lean" — minimal system prompt + bash-only tool surface.
-   *   - "full" — the default agent profile.
    *   - undefined — inherit whatever is set via HukoConfig.mode
    *     (`huko config set mode lean|full`, layered global → project).
    *
-   * CLI flags `--lean` and `--full` populate this.
+   * CLI flag `--lean` populates this.
    */
-  mode?: "lean" | "full";
+  mode?: "lean";
   /**
    * Per-call verbosity override for the text formatter.
    *   - true  — show tool_result content previews + system_reminder bodies
@@ -116,9 +115,26 @@ function deriveTitleFromPrompt(prompt: string, max: number = 40): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + "…";
 }
 
+/**
+ * Drain stdin and return its full contents as a UTF-8 string. Used
+ * when the operator pipes a prompt in: `echo '...' | huko` or
+ * `huko < prompt.txt`. Trim is left to the caller.
+ *
+ * After this resolves stdin is exhausted — interactive `message(type=ask)`
+ * etc. won't be answerable, which is why runCommand auto-disables
+ * interaction when stdinFed is true.
+ */
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export async function runCommand(args: RunArgs): Promise<number> {
   if (args.newSession && args.sessionId !== undefined) {
-    process.stderr.write("huko run: --new and --session=<id> are mutually exclusive\n");
+    process.stderr.write("huko: --new and --session=<id> are mutually exclusive\n");
     return 3;
   }
 
@@ -129,6 +145,36 @@ export async function runCommand(args: RunArgs): Promise<number> {
     const { chatCommand } = await import("./chat.js");
     return await chatCommand(args);
   }
+
+  // Resolve prompt source. argv-given prompt wins; otherwise read
+  // stdin if it's piped (e.g. `echo "..." | huko`, `huko < prompt.txt`);
+  // otherwise error.
+  let effectivePrompt = args.prompt;
+  let stdinFed = false;
+  if (effectivePrompt.length === 0) {
+    if (process.stdin.isTTY) {
+      process.stderr.write(
+        "huko: prompt is required.\n" +
+          "       Try: huko fix the bug in main.ts\n" +
+          "       Pipe: echo '...' | huko        (handles shell special chars safely)\n" +
+          "       File: huko < prompt.txt\n" +
+          "       REPL: huko --chat\n",
+      );
+      return 3;
+    }
+    effectivePrompt = (await readAllStdin()).trim();
+    stdinFed = true;
+    if (effectivePrompt.length === 0) {
+      process.stderr.write("huko: stdin was empty; no prompt provided\n");
+      return 3;
+    }
+  }
+  // When prompt came from stdin, stdin is exhausted — `message(type=ask)`
+  // and safety-policy prompts can't be answered, so drop interaction.
+  // The operator can override by passing `--chat` instead of piping.
+  const effectiveInteractive: boolean | undefined = stdinFed
+    ? false
+    : args.interactive;
 
   const cwd = process.cwd();
 
@@ -263,17 +309,17 @@ export async function runCommand(args: RunArgs): Promise<number> {
     let chatSessionId: number;
 
     if (args.ephemeral) {
-      const sessionTitle = args.title ?? deriveTitleFromPrompt(args.prompt);
+      const sessionTitle = args.title ?? deriveTitleFromPrompt(effectivePrompt);
       chatSessionId = await ctx.orchestrator.createChatSession(sessionTitle);
     } else if (args.sessionId !== undefined) {
       const exists = await ctx.session.sessions.get(args.sessionId);
       if (!exists) {
-        process.stderr.write(`huko run: session ${args.sessionId} not found\n`);
+        process.stderr.write(`huko: session ${args.sessionId} not found\n`);
         return 4;
       }
       chatSessionId = args.sessionId;
     } else if (args.newSession) {
-      const sessionTitle = args.title ?? deriveTitleFromPrompt(args.prompt);
+      const sessionTitle = args.title ?? deriveTitleFromPrompt(effectivePrompt);
       chatSessionId = await ctx.orchestrator.createChatSession(sessionTitle);
       setActiveSessionId(cwd, chatSessionId);
       process.stderr.write(
@@ -290,7 +336,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
       if (useActive && active !== null) {
         chatSessionId = active;
       } else {
-        const sessionTitle = args.title ?? deriveTitleFromPrompt(args.prompt);
+        const sessionTitle = args.title ?? deriveTitleFromPrompt(effectivePrompt);
         chatSessionId = await ctx.orchestrator.createChatSession(sessionTitle);
         setActiveSessionId(cwd, chatSessionId);
         process.stderr.write(
@@ -308,9 +354,9 @@ export async function runCommand(args: RunArgs): Promise<number> {
 
     const result = await ctx.orchestrator.sendUserMessage({
       chatSessionId,
-      content: args.prompt,
+      content: effectivePrompt,
       model,
-      ...(args.interactive === false ? { interactive: false } : {}),
+      ...(effectiveInteractive === false ? { interactive: false } : {}),
       ...(lean ? { lean: true } : {}),
     });
     runtime.activeTaskId = result.taskId;
@@ -353,7 +399,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
  *     total          17,824
  *
  * Numbers are right-aligned to the widest value. The breakdown writes
- * to stderr so a piped `huko run --json` consumer still gets clean
+ * to stderr so a piped `huko --json` consumer still gets clean
  * stdout JSON.
  *
  * Exported so tests can lock the format.

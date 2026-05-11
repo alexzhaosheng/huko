@@ -137,18 +137,11 @@ describe("parseRunArgs — mode + verbosity flags", () => {
     assert.equal(r.args.mode, "lean");
   });
 
-  it("parses --full → mode 'full'", () => {
+  it("--full is no longer a flag (full is the default; opt-in is only --lean)", () => {
     const r = parseRunArgs(["--full", "hi"]);
-    assert.equal(r.kind, "ok");
-    if (r.kind !== "ok") return;
-    assert.equal(r.args.mode, "full");
-  });
-
-  it("rejects --lean and --full together", () => {
-    const r = parseRunArgs(["--lean", "--full", "hi"]);
     assert.equal(r.kind, "error");
     if (r.kind !== "error") return;
-    assert.match(r.message, /--lean and --full.*mutually exclusive/);
+    assert.match(r.message, /unknown flag: --full/);
   });
 
   it("parses --verbose → verbose: true", () => {
@@ -210,11 +203,15 @@ describe("parseRunArgs — --chat", () => {
     assert.equal(r.args.prompt, "");
   });
 
-  it("rejects an empty prompt WITHOUT --chat (one-shot still needs a prompt)", () => {
+  it("permits empty prompt without --chat (runCommand decides: stdin? error?)", () => {
+    // Parser no longer errors; runCommand decides at runtime based on
+    // whether stdin is a TTY. See tests/run-stdin.test.ts for the
+    // runtime resolution.
     const r = parseRunArgs([]);
-    assert.equal(r.kind, "error");
-    if (r.kind !== "error") return;
-    assert.match(r.message, /prompt is required/);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.prompt, "");
+    assert.equal(r.args.chat, undefined);
   });
 
   it("omits chat when not given (one-shot default)", () => {
@@ -227,34 +224,43 @@ describe("parseRunArgs — --chat", () => {
 
 // ─── error cases ────────────────────────────────────────────────────────────
 
-describe("parseRunArgs — error cases", () => {
-  it("rejects empty argv", () => {
+describe("parseRunArgs — empty-prompt cases (parser is permissive)", () => {
+  // The parser no longer errors on empty prompts — runCommand decides
+  // at runtime whether to (a) read stdin, (b) drop into chat REPL, or
+  // (c) surface "prompt required". The parser stays pure (no isTTY).
+
+  it("accepts empty argv (prompt = '')", () => {
     const r = parseRunArgs([]);
-    assert.equal(r.kind, "error");
-    if (r.kind !== "error") return;
-    assert.match(r.message, /prompt is required/);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.prompt, "");
   });
 
-  it("rejects flags-only argv with no prompt", () => {
+  it("accepts flags-only argv with no prompt", () => {
     const r = parseRunArgs(["--new", "--memory"]);
-    assert.equal(r.kind, "error");
-    if (r.kind !== "error") return;
-    assert.match(r.message, /prompt is required/);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.prompt, "");
+    assert.equal(r.args.newSession, true);
+    assert.equal(r.args.ephemeral, true);
   });
 
-  it("rejects empty prompt after sentinel", () => {
+  it("accepts empty prompt after sentinel", () => {
     const r = parseRunArgs(["--new", "--"]);
-    assert.equal(r.kind, "error");
-    if (r.kind !== "error") return;
-    assert.match(r.message, /empty prompt/);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.prompt, "");
   });
 
-  it("rejects whitespace-only prompt", () => {
+  it("treats whitespace-only after sentinel as empty (post-trim)", () => {
     const r = parseRunArgs(["--", "", "  ", ""]);
-    assert.equal(r.kind, "error");
-    if (r.kind !== "error") return;
-    assert.match(r.message, /empty/);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.prompt, "");
   });
+});
+
+describe("parseRunArgs — error cases", () => {
 
   it("rejects an unknown flag", () => {
     const r = parseRunArgs(["--definitely-not-a-flag", "hi"]);

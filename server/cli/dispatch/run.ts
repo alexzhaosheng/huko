@@ -63,20 +63,18 @@ export function parseRunArgs(rest: string[]): ParseResult {
   // tool surface (no `message(type=ask)`) so it doesn't try to ask.
   let interactive = process.env["HUKO_NON_INTERACTIVE"] !== "1";
   let showTokens = false;
-  let mode: "lean" | "full" | undefined;
+  let mode: "lean" | undefined;
   let verbose: boolean | undefined;
   let chat = false;
   let format: FormatName = "text";
 
   // Phase 1: parse flags until first bare positional OR `--` sentinel.
   let i = 0;
-  let sentinelHit = false;
   while (i < rest.length) {
     const arg = rest[i]!;
 
     if (arg === "--") {
       // Explicit sentinel — switch to prompt mode, don't include this token.
-      sentinelHit = true;
       i++;
       break;
     }
@@ -129,24 +127,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       continue;
     }
     if (arg === "--lean") {
-      if (mode === "full") {
-        return {
-          kind: "error",
-          message: "huko: --lean and --full are mutually exclusive\n",
-        };
-      }
       mode = "lean";
-      i++;
-      continue;
-    }
-    if (arg === "--full") {
-      if (mode === "lean") {
-        return {
-          kind: "error",
-          message: "huko: --lean and --full are mutually exclusive\n",
-        };
-      }
-      mode = "full";
       i++;
       continue;
     }
@@ -201,21 +182,12 @@ export function parseRunArgs(rest: string[]): ParseResult {
     return { kind: "error", message: "huko: --new and --session=<id> are mutually exclusive\n" };
   }
 
-  // Validate prompt. In chat mode an empty initial prompt is fine —
-  // the REPL will prompt for input. Outside chat mode a prompt is
-  // required.
+  // Empty prompts are no longer a parser-level error: the caller
+  // (runCommand) decides at runtime whether to read stdin, drop into
+  // chat REPL, or surface "prompt required". This keeps the parser
+  // pure (no isTTY probing) while letting chat mode and stdin-piped
+  // mode both pass through with `prompt = ""`.
   const prompt = promptTokens.join(" ").trim();
-  if (!chat && prompt.length === 0) {
-    return {
-      kind: "error",
-      message: sentinelHit
-        ? "huko: empty prompt after `--`. Provide the prompt text.\n"
-        : "huko: prompt is required.\n" +
-          "       Try: huko fix the bug in main.ts\n" +
-          "       Or:  huko --new --title='dev' fix the bug\n" +
-          "       For interactive: huko --chat\n",
-    };
-  }
 
   return {
     kind: "ok",

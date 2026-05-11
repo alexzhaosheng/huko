@@ -50,7 +50,18 @@ const DISPATCH: Record<string, Dispatcher> = {
 async function main(): Promise<number> {
   try {
     const argv = process.argv.slice(2);
-    if (argv.length === 0) usage(0);
+
+    // Bare `huko` with NO args:
+    //   - stdin is a TTY (interactive shell) → show usage. The operator
+    //     just typed `huko` to see what's available.
+    //   - stdin is piped/redirected             → fall through to the
+    //     prompt pipeline; runCommand will drain stdin and use it as
+    //     the prompt (`echo "hi" | huko`, `huko < prompt.txt`).
+    if (argv.length === 0) {
+      if (process.stdin.isTTY) usage(0);
+      return await dispatchRun([]);
+    }
+
     const head = argv[0]!;
     if (head === "-h" || head === "--help") usage(0);
 

@@ -33,8 +33,8 @@ export type HukoConfig = {
    *     overhead. See server/services/build-lean-system-prompt.ts.
    *
    * Layered like every other field: default ("full") → ~/.huko/config.json
-   * → <cwd>/.huko/config.json → env → explicit. CLI `--lean` / `--full`
-   * flags are explicit overrides for a single call.
+   * → <cwd>/.huko/config.json → env → explicit. CLI `--lean` flag
+   * is an explicit override for a single call.
    *
    * Stored as a string enum (not a boolean) so future modes (e.g. a
    * coding-only profile) plug in without breaking the schema.
