@@ -136,8 +136,12 @@ describe("buildBestPracticesInjection", () => {
 // ─── role files load cleanly ────────────────────────────────────────────────
 
 describe("builtin role files", () => {
-  for (const name of ["general", "coding", "writing", "research", "analysis"]) {
-    it(`loads ${name} role with non-empty body`, async () => {
+  // `general` is intentionally absent — universal conduct (terse, surface
+  // uncertainty, tools-not-guessing, etc.) now lives in the base system
+  // prompt's <principles> block, so "general" has nothing capability-
+  // specific to inject. See server/roles/builtin-roles.ts.
+  for (const name of ["coding", "writing", "research", "analysis"]) {
+    it(`loads ${name} capability with a Best Practices section`, async () => {
       const role = await loadRole(name);
       assert.ok(role.body.length > 100, `${name} body suspiciously short`);
       assert.match(role.body, /## Best Practices/i);

@@ -7,6 +7,23 @@
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
 export type HukoConfig = {
+  /**
+   * Agent execution mode.
+   *   - "full" — the default. Full system prompt, role/project context,
+   *     and the complete tool surface.
+   *   - "lean" — minimal system prompt (~123 tok) + shell-only tool
+   *     surface. Trades planning/tooling for ~95% smaller per-call fixed
+   *     overhead. See server/services/build-lean-system-prompt.ts.
+   *
+   * Layered like every other field: default ("full") → ~/.huko/config.json
+   * → <cwd>/.huko/config.json → env → explicit. CLI `--lean` / `--full`
+   * flags are explicit overrides for a single call.
+   *
+   * Stored as a string enum (not a boolean) so future modes (e.g. a
+   * coding-only profile) plug in without breaking the schema.
+   */
+  mode: "lean" | "full";
+
   task: {
     maxIterations: number;
     maxToolCalls: number;
@@ -17,10 +34,6 @@ export type HukoConfig = {
     thresholdRatio: number;
     targetRatio: number;
     charsPerToken: number;
-  };
-
-  role: {
-    default: string;
   };
 
   tools: {
@@ -52,6 +65,7 @@ export type HukoConfig = {
 // ─── Built-in defaults ───────────────────────────────────────────────────────
 
 export const DEFAULT_CONFIG: HukoConfig = {
+  mode: "full",
   task: {
     maxIterations: 200,
     maxToolCalls: 200,
@@ -61,9 +75,6 @@ export const DEFAULT_CONFIG: HukoConfig = {
     thresholdRatio: 0.7,
     targetRatio: 0.5,
     charsPerToken: 4,
-  },
-  role: {
-    default: "general",
   },
   tools: {
     webFetch: {

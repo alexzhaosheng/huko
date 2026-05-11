@@ -22,7 +22,6 @@ import {
   buildSystemPrompt,
   SYSTEM_PROMPT_CACHE_BOUNDARY,
 } from "../server/services/build-system-prompt.js";
-import { loadRole } from "../server/roles/index.js";
 
 // ─── getToolPromptHints ────────────────────────────────────────────────────
 
@@ -77,9 +76,7 @@ describe("getToolPromptHints", () => {
 
 describe("buildSystemPrompt — toolHints integration", () => {
   it("splices the supplied hints into <tool_use>", async () => {
-    const role = await loadRole("general", "/tmp");
     const prompt = await buildSystemPrompt({
-      role,
       cwd: "/tmp",
       toolHints: [
         "Custom hint A:\n- alpha rule",
@@ -100,9 +97,7 @@ describe("buildSystemPrompt — toolHints integration", () => {
   });
 
   it("keeps <tool_use> minimal when no hints supplied", async () => {
-    const role = await loadRole("general", "/tmp");
     const prompt = await buildSystemPrompt({
-      role,
       cwd: "/tmp",
       toolHints: [],
       currentDate: new Date("2026-05-10T12:00:00Z"),
@@ -118,10 +113,8 @@ describe("buildSystemPrompt — toolHints integration", () => {
   });
 
   it("real registered hints surface when getToolPromptHints is passed", async () => {
-    const role = await loadRole("general", "/tmp");
     const hints = getToolPromptHints();
     const prompt = await buildSystemPrompt({
-      role,
       cwd: "/tmp",
       toolHints: hints,
       currentDate: new Date("2026-05-10T12:00:00Z"),

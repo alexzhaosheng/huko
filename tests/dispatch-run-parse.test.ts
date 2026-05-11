@@ -202,25 +202,32 @@ describe("parseRunArgs — protocol enforcement", () => {
     assert.match(r.message, /mutually exclusive/);
   });
 
-  it("parses --lean and emits lean: true", () => {
+  it("parses --lean and emits mode: 'lean'", () => {
     const r = parseRunArgs(["--lean", "--", "ls"]);
     assert.equal(r.kind, "ok");
     if (r.kind !== "ok") return;
-    assert.equal(r.args.lean, true);
+    assert.equal(r.args.mode, "lean");
   });
 
-  it("rejects --lean combined with --role=<name>", () => {
-    const r = parseRunArgs(["--lean", "--role=coding", "--", "hi"]);
+  it("parses --full and emits mode: 'full'", () => {
+    const r = parseRunArgs(["--full", "--", "ls"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.mode, "full");
+  });
+
+  it("rejects --lean and --full together", () => {
+    const r = parseRunArgs(["--lean", "--full", "--", "hi"]);
     assert.equal(r.kind, "error");
     if (r.kind !== "error") return;
-    assert.match(r.message, /--lean and --role.*mutually exclusive/);
+    assert.match(r.message, /--lean and --full.*mutually exclusive/);
   });
 
-  it("omits lean when --lean is absent", () => {
+  it("omits mode when neither --lean nor --full is given", () => {
     const r = parseRunArgs(["--", "hi"]);
     assert.equal(r.kind, "ok");
     if (r.kind !== "ok") return;
-    assert.equal(r.args.lean, undefined);
+    assert.equal(r.args.mode, undefined);
   });
 });
 

@@ -1,37 +1,27 @@
 /**
  * server/roles/index.ts
  *
- * Role loader. A "role" is a markdown file with optional YAML frontmatter,
- * whose body becomes (most of) the system prompt. Roles are the "scenario
- * / persona" mechanism for huko — the user picks one with `--role=<name>`
- * (default: `coding`).
+ * Role loader. A "role" is a markdown file (with optional YAML
+ * frontmatter) holding capability-specific best-practices. After the
+ * 2026-05 redesign, roles are NO LONGER static persona overlays for the
+ * system prompt — they exist only as a data source for `plan` tool's
+ * per-phase `capabilities` injection.
+ *
+ * The only consumer is `server/task/best-practices.ts`. It pulls the
+ * `## Best Practices` section out of the role body and injects it into
+ * the tool_result when a plan phase tagged with that capability becomes
+ * active.
  *
  * Storage layers, checked in order (first match wins):
  *
  *   1. <project>/.huko/roles/<name>.md         — project-local override
  *   2. ~/.huko/roles/<name>.md                  — user-global override
- *   3. <huko repo>/server/roles/<name>.md       — built-in (this directory)
+ *   3. BUILTIN_ROLES (in-memory, bundled)       — shipped with huko
  *
- * Frontmatter is optional and lives in a `---` fence at the top of the file.
- * Recognised keys (everything else is silently ignored — forward-compat):
+ * Frontmatter (optional `---` fence at top). Only `description` is read;
+ * unrecognised keys are silently ignored for forward compatibility:
  *
  *   description: "Short human-readable summary"
- *   model: "claude-sonnet-4"        # logical id; resolved to numeric model.id
- *                                   # later by the orchestrator (see TODO)
- *   tools:
- *     allow: [shell, file, web_fetch, message]   # whitelist (omit = all allowed)
- *     deny:  [browser_open]                       # blacklist (always wins over allow)
- *
- * Why this design — mirroring [audit-2026-05.md] decision:
- *   - One markdown body is still the bulk of the role (no fragmenting into
- *     identity / language / capabilities like WeavesAI's chat-agent.json).
- *   - Frontmatter only carries fields with a real runtime consumer.
- *     `description` shows up in `huko roles list` (TODO). `tools.{allow,deny}`
- *     plug into `getToolsForLLM(filterContext)`. `model` will resolve to a
- *     numeric model id once `models.findByLogicalId(string)` lands.
- *   - Future per-user / per-task tool toggles compose with this by
- *     intersecting `allowedTools` lists and unioning `deniedTools` lists
- *     before calling `getToolsForLLM`. No interface change required.
  */
 
 import { readFile } from "node:fs/promises";
@@ -45,28 +35,6 @@ import { parseYamlSubset } from "./yaml-frontmatter.js";
 export type RoleFrontmatter = {
   /** Short human-readable summary, useful for `huko roles list`. */
   description?: string;
-  /**
-   * Logical model identifier (string). The orchestrator resolves this to
-   * a numeric `models.id` via persistence. If the role specifies a model
-   * but no provider has it registered, role loading still succeeds — the
-   * mismatch is reported when the task starts.
-   *
-   * NOTE: not yet wired through. See TODO(role-model) in
-   * task-orchestrator.ts.
-   */
-  model?: string;
-  /** Per-role tool gating. Both lists are optional. */
-  tools?: {
-    /**
-     * If set, ONLY these tools are visible to the LLM. Omit (or use an
-     * empty undefined) to allow all registered tools.
-     */
-    allow?: string[];
-    /**
-     * Tools that are always hidden, regardless of `allow`. Wins ties.
-     */
-    deny?: string[];
-  };
 };
 
 export type Role = {
@@ -193,29 +161,9 @@ function parseFrontmatter(fmRaw: string, sourcePath: string): RoleFrontmatter {
   }
 
   const fm: RoleFrontmatter = {};
-
   if (typeof parsed["description"] === "string") {
     fm.description = parsed["description"];
   }
-  if (typeof parsed["model"] === "string") {
-    fm.model = parsed["model"];
-  }
-
-  const toolsRaw = parsed["tools"];
-  if (toolsRaw && typeof toolsRaw === "object" && !Array.isArray(toolsRaw)) {
-    const tools: NonNullable<RoleFrontmatter["tools"]> = {};
-    const tobj = toolsRaw as Record<string, unknown>;
-    if (Array.isArray(tobj["allow"])) {
-      tools.allow = tobj["allow"].filter((x): x is string => typeof x === "string");
-    }
-    if (Array.isArray(tobj["deny"])) {
-      tools.deny = tobj["deny"].filter((x): x is string => typeof x === "string");
-    }
-    if (tools.allow !== undefined || tools.deny !== undefined) {
-      fm.tools = tools;
-    }
-  }
-
   return fm;
 }
 

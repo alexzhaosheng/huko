@@ -44,7 +44,7 @@ const PLAN_DESCRIPTION =
   "- MUST `update` the task plan when the user makes new requests or changes requirements\n" +
   "- A plan has one goal and an ordered list of phases\n" +
   "- Phase count scales with task complexity: trivial chat (skip plan entirely), simple (2), typical (4-6), complex (10+)\n" +
-  "- `capabilities` are role names that apply to this phase (e.g. [\"coding\"], [\"writing\", \"research\"]). They guide which best-practices are loaded; all tools remain available\n" +
+  "- `capabilities` is the PRIMARY expertise-routing mechanism: tag each phase with the dominant skill(s) it needs (e.g. [\"coding\"], [\"writing\", \"research\"]). The matching expert checklist is injected into the tool_result when the phase activates. There is NO static persona — picking the right capabilities is how you specialise. All tools remain available regardless\n" +
   "- Each phase may take multiple tool calls and reasoning steps to complete\n" +
   "- Phases should be high-level units of work, not individual steps\n" +
   "- Make delivering the result a separate phase, typically the last one\n" +
@@ -101,7 +101,7 @@ const PARAMETERS = {
           capabilities: {
             type: "array" as const,
             description:
-              "Role names that apply to this phase. Combine when multiple disciplines are needed. Leave empty if no role specialisation applies.",
+              "Expertise tags driving best-practices injection at phase activation. Built-in capabilities: \"coding\", \"writing\", \"research\", \"analysis\". Combine when multiple disciplines apply. Leave empty for phases that don't need a specialised checklist.",
             items: { type: "string" as const },
           },
           brief: {
@@ -141,7 +141,7 @@ const PLAN_PROMPT_HINT = [
   "Planning (`plan` tool):",
   "- For trivial chat / one-shot questions, skip the plan tool entirely.",
   "- For substantive multi-step work, call `plan(action=update)` BEFORE doing meaningful work; phases are high-level units, not micro-steps.",
-  "- Pass relevant `capabilities` (role names) on each phase — best-practices for those roles get attached on phase activation.",
+  "- Tag each phase's `capabilities` with the dominant expertise needed (coding / writing / research / analysis). This is the only way to invoke specialist guidance — there is no `--role` flag.",
   "- When the user changes scope, requirements, priorities, or constraints, call `plan(update)` again BEFORE other actions.",
   "- When the current phase is complete, call `plan(action=advance)` with the next sequential phase id; skipping is forbidden.",
 ].join("\n");

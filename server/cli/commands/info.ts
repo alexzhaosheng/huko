@@ -34,9 +34,16 @@
  */
 
 import { existsSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
+  getConfigLayers,
+  getValueByPath,
+  loadConfig,
   loadInfraConfig,
+  parsePath,
   type ConfigSource,
+  type ConfigSourceLayer,
   type InfraConfig,
   type ResolvedModel,
   type ResolvedProvider,
@@ -79,12 +86,29 @@ type Effective = {
   currentProviderSource: ConfigSource | null;
   currentModel: ResolvedModel | null;
   currentModelSource: ConfigSource | null;
+  /** Runtime-config mode + which layer set it (null if unset in this scope). */
+  mode: { value: "lean" | "full"; source: RuntimeSource | null };
+  /** Non-default runtime-config overrides (excluding `mode`, shown separately). */
+  runtimeOverrides: RuntimeOverride[];
+};
+
+type RuntimeSource = ConfigSourceLayer["source"];
+
+type RuntimeOverride = {
+  /** Dot path, e.g. `task.maxIterations`. */
+  path: string;
+  value: unknown;
+  source: RuntimeSource;
+  layerPath?: string;
 };
 
 export async function infoCommand(args: InfoArgs): Promise<number> {
   try {
     const cwd = process.cwd();
     const cfg = loadInfraConfig({ cwd });
+    // Ensure runtime config layers are loaded — bootstrap usually does
+    // this, but `huko info` can run before bootstrap on a fresh install.
+    loadConfig({ cwd });
     const eff = effectiveForScope(cfg, args.scope, cwd);
 
     if (args.format === "json") {
@@ -94,6 +118,12 @@ export async function infoCommand(args: InfoArgs): Promise<number> {
     if (args.format === "jsonl") {
       const payload = buildPayload(eff, cwd, args.scope);
       process.stdout.write(JSON.stringify({ type: "header", ...payload.header }) + "\n");
+      process.stdout.write(
+        JSON.stringify({ type: "currentMode", ...payload.currentMode }) + "\n",
+      );
+      for (const o of payload.runtimeOverrides) {
+        process.stdout.write(JSON.stringify({ type: "runtimeOverride", ...o }) + "\n");
+      }
       if (payload.currentProvider) {
         process.stdout.write(
           JSON.stringify({ type: "currentProvider", ...payload.currentProvider }) + "\n",
@@ -133,12 +163,17 @@ export async function infoCommand(args: InfoArgs): Promise<number> {
  * etc.) even when the entity definition lives in a different layer.
  */
 function effectiveForScope(cfg: InfraConfig, scope: InfoScope, cwd: string): Effective {
+  const runtimeLayers = getConfigLayers();
+  const runtime = runtimeForScope(scope, runtimeLayers);
+
   if (scope === "all") {
     return {
       currentProvider: cfg.currentProvider,
       currentProviderSource: cfg.currentProviderSource,
       currentModel: cfg.currentModel,
       currentModelSource: cfg.currentModelSource,
+      mode: runtime.mode,
+      runtimeOverrides: runtime.overrides,
     };
   }
 
@@ -174,7 +209,146 @@ function effectiveForScope(cfg: InfraConfig, scope: InfoScope, cwd: string): Eff
     currentProviderSource: providerName !== undefined ? layer : null,
     currentModel,
     currentModelSource: modelId !== undefined ? layer : null,
+    mode: runtime.mode,
+    runtimeOverrides: runtime.overrides,
   };
+}
+
+// ─── Runtime config (HukoConfig) resolution ─────────────────────────────────
+
+/**
+ * Find the highest-priority layer that contains `path`. Returns null if
+ * no layer has it set (in practice `default` always covers since
+ * DEFAULT_CONFIG is layer 0).
+ */
+function findLayerForPath(
+  layers: ConfigSourceLayer[],
+  path: string[],
+): ConfigSourceLayer | null {
+  for (let i = layers.length - 1; i >= 0; i--) {
+    if (getValueByPath(layers[i]!.raw as unknown, path) !== undefined) {
+      return layers[i]!;
+    }
+  }
+  return null;
+}
+
+/** Recursively enumerate all primitive leaves of an object with dot-paths. */
+function walkLeaves(obj: unknown, prefix: string = ""): Array<{ path: string; value: unknown }> {
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+    return [{ path: prefix, value: obj }];
+  }
+  const out: Array<{ path: string; value: unknown }> = [];
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    const next = prefix === "" ? k : `${prefix}.${k}`;
+    out.push(...walkLeaves(v, next));
+  }
+  return out;
+}
+
+type RuntimeView = {
+  mode: { value: "lean" | "full"; source: RuntimeSource | null };
+  overrides: RuntimeOverride[];
+};
+
+/**
+ * Per-scope runtime-config view:
+ *   - `all`     → effective `mode` from layered merge; `overrides` = every
+ *                 non-`mode` leaf whose effective value comes from a layer
+ *                 above `default`.
+ *   - `global`  → what `~/.huko/config.json` itself sets (could be empty);
+ *                 `mode` shows only if global sets it.
+ *   - `project` → same for `<cwd>/.huko/config.json`.
+ *
+ * Reading the SPECIFIC layer (not merge) matches how the provider/model
+ * scope view works above.
+ */
+function runtimeForScope(scope: InfoScope, layers: ConfigSourceLayer[]): RuntimeView {
+  if (scope === "all") {
+    const modeLayer = findLayerForPath(layers, ["mode"]);
+    const modeVal = modeLayer ? (getValueByPath(modeLayer.raw as unknown, ["mode"]) as "lean" | "full") : "full";
+    const modeSource = modeLayer ? modeLayer.source : null;
+
+    // Walk DEFAULT_CONFIG-shaped leaves via the topmost merged result —
+    // we get that by walking the highest-priority layer's effective view.
+    // Simpler: iterate every leaf path that any layer above `default`
+    // sets, dedup by path.
+    const overridenPaths = new Set<string>();
+    for (const layer of layers) {
+      if (layer.source === "default") continue;
+      for (const { path } of walkLeaves(layer.raw)) {
+        if (path === "mode") continue; // shown separately
+        overridenPaths.add(path);
+      }
+    }
+
+    const overrides: RuntimeOverride[] = [];
+    for (const p of [...overridenPaths].sort()) {
+      const parts = parsePath(p);
+      const winner = findLayerForPath(layers, parts);
+      if (!winner) continue;
+      const value = getValueByPath(winner.raw as unknown, parts);
+      overrides.push({
+        path: p,
+        value,
+        source: winner.source,
+        ...(winner.path !== undefined ? { layerPath: winner.path } : {}),
+      });
+    }
+
+    return {
+      mode: { value: modeVal, source: modeSource },
+      overrides,
+    };
+  }
+
+  // scope === "global" | "project" — read THAT layer's raw payload only.
+  const targetSource: RuntimeSource = scope === "global" ? "user" : "project";
+  const layer = layers.find((l) => l.source === targetSource);
+
+  if (!layer) {
+    return {
+      mode: { value: "full", source: null },
+      overrides: [],
+    };
+  }
+
+  const modeVal = getValueByPath(layer.raw as unknown, ["mode"]);
+  const modeRecord = modeVal === "lean" || modeVal === "full"
+    ? { value: modeVal as "lean" | "full", source: layer.source }
+    : { value: "full" as const, source: null };
+
+  const overrides: RuntimeOverride[] = [];
+  for (const leaf of walkLeaves(layer.raw)) {
+    if (leaf.path === "mode") continue;
+    overrides.push({
+      path: leaf.path,
+      value: leaf.value,
+      source: layer.source,
+      ...(layer.path !== undefined ? { layerPath: layer.path } : {}),
+    });
+  }
+  overrides.sort((a, b) => a.path.localeCompare(b.path));
+
+  return { mode: modeRecord, overrides };
+}
+
+/**
+ * Map runtime source labels onto the `ConfigSource` vocabulary the rest
+ * of `huko info` uses ("builtin" | "global" | "project") so the same
+ * color helper (`source()` in colors.ts) handles both domains.
+ *
+ *   - default  → builtin   (both = "the base layer")
+ *   - user     → global    (~/.huko/ is "global" in huko's vocabulary)
+ *   - project  → project   (unchanged)
+ *   - env      → global    (HUKO_CONFIG-pointed file — treat as a global
+ *                           override; rare in practice)
+ *   - explicit → global    (programmatic, e.g. test fixtures — also rare)
+ */
+function displaySource(s: RuntimeSource): ConfigSource {
+  if (s === "default") return "builtin";
+  if (s === "project") return "project";
+  return "global";
 }
 
 // ─── Text rendering ─────────────────────────────────────────────────────────
@@ -194,6 +368,44 @@ function printText(eff: Effective, cwd: string, scope: InfoScope): void {
     );
   }
   out.write("\n");
+
+  // Current mode section (parallel to Current provider / Current model)
+  if (eff.mode.source !== null) {
+    out.write(
+      bold("Current mode:    ") +
+        ` ${emphasis(eff.mode.value)}   (set in: ${source(displaySource(eff.mode.source), displaySource(eff.mode.source))})\n\n`,
+    );
+  } else if (scope === "all") {
+    // Effective view always has a mode (defaults to "full"). Show it.
+    out.write(
+      bold("Current mode:    ") +
+        ` ${emphasis(eff.mode.value)}   ${dim("(from default)")}\n\n`,
+    );
+  } else {
+    out.write(
+      bold("Current mode:    ") +
+        " " +
+        yellow(`(not set in ${scope})`) +
+        "\n\n",
+    );
+  }
+
+  // Other runtime overrides (always shown if any exist; section omitted
+  // when empty to avoid noise on a fresh install)
+  if (eff.runtimeOverrides.length > 0) {
+    const heading =
+      scope === "all" ? "Other runtime overrides:" : `Set by ${scope} config:`;
+    out.write(header(heading) + "\n");
+    const rows: Array<[string, string]> = eff.runtimeOverrides.map((o) => {
+      const where =
+        scope === "all"
+          ? `   (set in: ${source(displaySource(o.source), displaySource(o.source))})`
+          : "";
+      return [o.path, `${emphasis(formatValue(o.value))}${where}`];
+    });
+    printDetailBlock(rows);
+    out.write("\n");
+  }
 
   // Current provider section
   if (eff.currentProvider) {
@@ -289,12 +501,7 @@ function printText(eff: Effective, cwd: string, scope: InfoScope): void {
   // Config files (only in merged view)
   if (scope === "all") {
     out.write(header("Config files:") + "\n");
-    const files = [
-      { label: "providers.json (global)", path: globalConfigPath() },
-      { label: "providers.json (project)", path: projectConfigPath(cwd) },
-      { label: "keys.json (global)", path: globalKeysPath() },
-      { label: "keys.json (project)", path: projectKeysPath(cwd) },
-    ];
+    const files = collectConfigFiles(cwd);
     const rows: Array<[string, string]> = files.map((f) => {
       const ok = existsSync(f.path);
       const status = ok ? green("(exists)") : dim("(not present)");
@@ -302,6 +509,38 @@ function printText(eff: Effective, cwd: string, scope: InfoScope): void {
     });
     printDetailBlock(rows);
   }
+}
+
+/**
+ * Helper: list every on-disk file `huko info` considers user state. Two
+ * pairs each for providers / runtime config / keys.
+ *
+ * Order is "providers → runtime → keys" so layered changes are visually
+ * grouped; within each pair `global` comes before `project`.
+ */
+function collectConfigFiles(cwd: string): Array<{ label: string; path: string }> {
+  return [
+    { label: "providers.json (global)", path: globalConfigPath() },
+    { label: "providers.json (project)", path: projectConfigPath(cwd) },
+    { label: "config.json (global)", path: runtimeGlobalPath() },
+    { label: "config.json (project)", path: runtimeProjectPath(cwd) },
+    { label: "keys.json (global)", path: globalKeysPath() },
+    { label: "keys.json (project)", path: projectKeysPath(cwd) },
+  ];
+}
+
+function runtimeGlobalPath(): string {
+  return path.join(os.homedir(), ".huko", "config.json");
+}
+
+function runtimeProjectPath(cwd: string): string {
+  return path.join(cwd, ".huko", "config.json");
+}
+
+/** Stringify a runtime-config leaf value for display. */
+function formatValue(v: unknown): string {
+  if (typeof v === "string") return v;
+  return JSON.stringify(v);
 }
 
 function printDetailBlock(rows: Array<[string, string]>): void {
@@ -320,6 +559,18 @@ function pad(s: string, width: number): string {
 
 type Payload = {
   header: { cwd: string; scope: InfoScope };
+  currentMode: {
+    value: "lean" | "full";
+    /** Layer that set the value (display label: "global" not "user"). */
+    source: string | null;
+  };
+  runtimeOverrides: Array<{
+    path: string;
+    value: unknown;
+    /** Layer that set the value (display label). */
+    source: string;
+    layerPath?: string;
+  }>;
   currentProvider: {
     name: string;
     protocol: string;
@@ -379,16 +630,21 @@ function buildPayload(eff: Effective, cwd: string, scope: InfoScope): Payload {
 
   const files =
     scope === "all"
-      ? [
-          { label: "providers.json (global)", path: globalConfigPath() },
-          { label: "providers.json (project)", path: projectConfigPath(cwd) },
-          { label: "keys.json (global)", path: globalKeysPath() },
-          { label: "keys.json (project)", path: projectKeysPath(cwd) },
-        ].map((f) => ({ ...f, exists: existsSync(f.path) }))
+      ? collectConfigFiles(cwd).map((f) => ({ ...f, exists: existsSync(f.path) }))
       : [];
 
   return {
     header: { cwd, scope },
+    currentMode: {
+      value: eff.mode.value,
+      source: eff.mode.source !== null ? displaySource(eff.mode.source) : null,
+    },
+    runtimeOverrides: eff.runtimeOverrides.map((o) => ({
+      path: o.path,
+      value: o.value,
+      source: displaySource(o.source),
+      ...(o.layerPath !== undefined ? { layerPath: o.layerPath } : {}),
+    })),
     currentProvider: cp,
     currentModel: cm,
     files,

@@ -23,8 +23,6 @@ import type {
 } from "../persistence/index.js";
 import type { ResolvedModel } from "../config/infra-config-types.js";
 import type { TaskSummary } from "../../shared/events.js";
-import { loadRole } from "../roles/index.js";
-import { getConfig } from "../config/index.js";
 import { buildSystemPrompt } from "./build-system-prompt.js";
 import { buildLeanSystemPrompt } from "./build-lean-system-prompt.js";
 import { recoverOrphans, type RecoveryReport } from "../task/resume.js";
@@ -46,13 +44,12 @@ export type SendMessageInput = {
   content: string;
   attachments?: UserAttachment[];
   model: ResolvedModel;
-  role?: string;
   cwd?: string;
   interactive?: boolean;
   /**
    * Lean mode: minimal system prompt (~400 tokens) + shell-only tool
-   * surface (`bash`). When true, `role` is ignored and no project-context
-   * files are read. See server/services/build-lean-system-prompt.ts.
+   * surface (`bash`). No project-context files are read. See
+   * server/services/build-lean-system-prompt.ts.
    */
   lean?: boolean;
 };
@@ -259,30 +256,24 @@ export class TaskOrchestrator {
     let promptMetadata: Record<string, unknown>;
 
     if (input.lean) {
-      // Lean mode: fixed shell-only tool surface, no role loading,
-      // no project-context files read. `lean: true` tells the registry
-      // to render each surviving tool via its `leanDescription`
-      // (falling back to `description` when unset).
+      // Lean mode: fixed shell-only tool surface, no project-context
+      // files read. `lean: true` tells the registry to render each
+      // surviving tool via its `leanDescription` (falling back to
+      // `description` when unset).
       toolFilter.allowedTools = ["bash"];
       toolFilter.lean = true;
       systemPrompt = buildLeanSystemPrompt({ workingLanguage });
       promptMetadata = { mode: "lean" };
     } else {
-      const roleName = input.role ?? getConfig().role.default;
-      const role = await loadRole(roleName, cwd);
-      if (role.frontmatter.tools?.allow !== undefined) {
-        toolFilter.allowedTools = role.frontmatter.tools.allow;
-      }
-      if (role.frontmatter.tools?.deny !== undefined) {
-        toolFilter.deniedTools = role.frontmatter.tools.deny;
-      }
+      // Full mode: complete tool surface + base system prompt. Expertise
+      // is selected dynamically by the LLM via `plan(update)` capability
+      // tags — there is no static persona overlay.
       systemPrompt = await buildSystemPrompt({
-        role,
         cwd,
         workingLanguage,
         toolHints: getToolPromptHints(toolFilter),
       });
-      promptMetadata = { roleName: role.name };
+      promptMetadata = { mode: "full" };
     }
 
     // Persist the system prompt as its own entry so debug tooling can

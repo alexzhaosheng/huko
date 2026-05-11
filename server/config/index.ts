@@ -36,6 +36,23 @@ export {
   type ConfigSourceLayer,
 } from "./types.js";
 
+// ── Writers (path-based set/get/unset) ──────────────────────────────────────
+//
+// NOTE: `globalConfigPath` / `projectConfigPath` from this barrel point
+// at `providers.json`. The runtime-config writer (config.json) lives in
+// `./writer.js` and exposes its own paths there — import it directly to
+// avoid the naming collision.
+
+export {
+  type ConfigScope,
+  setConfigValue,
+  unsetConfigValue,
+  getValueByPath,
+  inferPathSchema,
+  readLayerFile,
+  parsePath,
+} from "./writer.js";
+
 // ── Infra config (providers / models / default model) ───────────────────────
 
 export {

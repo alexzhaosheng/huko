@@ -14,21 +14,17 @@ import {
   SYSTEM_PROMPT_CACHE_BOUNDARY,
 } from "../server/services/build-system-prompt.js";
 import { getToolPromptHints } from "../server/task/tools/registry.js";
-import { loadRole } from "../server/roles/index.js";
 import type { LLMCallOptions, LLMMessage } from "../server/core/llm/types.js";
 
 // ─── Test helpers ───────────────────────────────────────────────────────────
 
 async function buildWith(opts: {
-  roleName?: string;
   cwd?: string;
   workingLanguage?: string | null;
   currentDate?: Date;
   toolHints?: string[];
 }): Promise<string> {
-  const role = await loadRole(opts.roleName ?? "general", opts.cwd ?? "/tmp");
   const built: Parameters<typeof buildSystemPrompt>[0] = {
-    role,
     cwd: opts.cwd ?? "/tmp",
     currentDate: opts.currentDate ?? new Date("2026-05-10T12:00:00Z"),
     toolHints: opts.toolHints ?? getToolPromptHints(),
@@ -43,6 +39,8 @@ describe("buildSystemPrompt — structural blocks", () => {
   it("includes all required XML-tagged sections", async () => {
     const prompt = await buildWith({});
     for (const tag of [
+      "<scope>",
+      "<principles>",
       "<language>",
       "<format>",
       "<agent_loop>",
@@ -51,10 +49,28 @@ describe("buildSystemPrompt — structural blocks", () => {
       "<local>",
       "<safety>",
       "<disclosure_prohibition>",
-      "<role name=",
     ]) {
       assert.ok(prompt.includes(tag), `missing ${tag} in prompt`);
     }
+  });
+
+  it("does NOT include a static <role> overlay (removed in 2026-05 redesign)", async () => {
+    const prompt = await buildWith({});
+    assert.doesNotMatch(prompt, /<role[\s>]/);
+  });
+
+  it("<scope> mentions the 4 expertise capabilities", async () => {
+    const prompt = await buildWith({});
+    assert.match(prompt, /<scope>/);
+    for (const cap of ["coding", "writing", "research", "analysis"]) {
+      assert.ok(prompt.includes(cap), `<scope> should mention "${cap}"`);
+    }
+  });
+
+  it("identity is frontend-agnostic (no 'CLI-first')", async () => {
+    const prompt = await buildWith({});
+    assert.doesNotMatch(prompt, /CLI-first/);
+    assert.match(prompt, /You are huko, an autonomous AI agent/);
   });
 
   it("contains the identity preamble", async () => {
@@ -101,10 +117,10 @@ describe("buildSystemPrompt — cache boundary", () => {
   it("places everything stable BEFORE the boundary", async () => {
     const prompt = await buildWith({});
     const idxBoundary = prompt.indexOf(SYSTEM_PROMPT_CACHE_BOUNDARY);
-    const idxRole = prompt.indexOf("<role name=");
+    const idxScope = prompt.indexOf("<scope>");
     const idxLanguage = prompt.indexOf("<language>");
     assert.ok(idxLanguage > 0 && idxLanguage < idxBoundary);
-    assert.ok(idxRole > 0 && idxRole < idxBoundary);
+    assert.ok(idxScope > 0 && idxScope < idxBoundary);
   });
 });
 
@@ -140,26 +156,6 @@ describe("buildSystemPrompt — <local> block", () => {
     const prompt = await buildWith({});
     assert.match(prompt, /<workspace_policy>/);
     assert.match(prompt, /<local_safety>/);
-  });
-});
-
-// ─── Role block ─────────────────────────────────────────────────────────────
-
-describe("buildSystemPrompt — role overlay", () => {
-  it("wraps role.body in <role name=...>", async () => {
-    const prompt = await buildWith({ roleName: "writing" });
-    assert.match(prompt, /<role name="writing">/);
-    assert.match(prompt, /<\/role>/);
-  });
-
-  it("includes the role's persona text", async () => {
-    const prompt = await buildWith({ roleName: "writing" });
-    assert.match(prompt, /writing mode/i);
-  });
-
-  it("default role is general", async () => {
-    const prompt = await buildWith({});
-    assert.match(prompt, /<role name="general">/);
   });
 });
 
@@ -246,31 +242,24 @@ describe("buildSystemPrompt — project context (AGENTS.md / CLAUDE.md / HUKO.md
     }
   });
 
-  it("places <project_context> BEFORE <role> when both exist", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "huko-prompt-order-"));
-    try {
-      writeFileSync(join(tmp, "CLAUDE.md"), "# Project rules\n", "utf8");
-      const prompt = await buildWith({ cwd: tmp, roleName: "general" });
-      const idxProj = prompt.indexOf("<project_context>");
-      const idxRole = prompt.indexOf("<role name=");
-      assert.ok(idxProj > 0);
-      assert.ok(idxRole > idxProj, "role should come AFTER project_context");
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-
-  it("places <role> as the LAST block before the cache boundary", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "huko-prompt-rolelast-"));
+  it("places <project_context> as the LAST block before the cache boundary", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "huko-prompt-projectlast-"));
     try {
       writeFileSync(join(tmp, "CLAUDE.md"), "# Project\n", "utf8");
-      const prompt = await buildWith({ cwd: tmp, roleName: "general" });
-      const idxRole = prompt.indexOf("<role name=");
+      const prompt = await buildWith({ cwd: tmp });
+      const idxProj = prompt.indexOf("<project_context>");
       const idxBoundary = prompt.indexOf(SYSTEM_PROMPT_CACHE_BOUNDARY);
-      assert.ok(idxRole > 0);
-      assert.ok(idxBoundary > idxRole);
-      const between = prompt.slice(prompt.indexOf("</role>") + "</role>".length, idxBoundary);
-      assert.equal(between.trim(), "", `unexpected content between </role> and boundary: ${JSON.stringify(between)}`);
+      assert.ok(idxProj > 0);
+      assert.ok(idxBoundary > idxProj);
+      const between = prompt.slice(
+        prompt.indexOf("</project_context>") + "</project_context>".length,
+        idxBoundary,
+      );
+      assert.equal(
+        between.trim(),
+        "",
+        `unexpected content between </project_context> and boundary: ${JSON.stringify(between)}`,
+      );
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

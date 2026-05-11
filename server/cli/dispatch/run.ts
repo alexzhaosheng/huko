@@ -59,7 +59,6 @@ export function parseRunArgs(rest: string[]): ParseResult {
   //    word (`--foo` or a bare positional) is an error.
   let title: string | undefined;
   let ephemeral = false;
-  let role: string | undefined;
   let newSession = false;
   let sessionId: number | undefined;
   // Default interactive=true unless HUKO_NON_INTERACTIVE is set.
@@ -67,7 +66,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
   // tool surface (no `message(type=ask)`) so it doesn't try to ask.
   let interactive = process.env["HUKO_NON_INTERACTIVE"] !== "1";
   let showTokens = false;
-  let lean = false;
+  let mode: "lean" | "full" | undefined;
   let format: FormatName = "text";
 
   for (const arg of flagArgs) {
@@ -79,10 +78,6 @@ export function parseRunArgs(rest: string[]): ParseResult {
     }
     if (arg === "--memory") {
       ephemeral = true;
-      continue;
-    }
-    if (arg.startsWith("--role=")) {
-      role = arg.slice("--role=".length);
       continue;
     }
     if (arg === "--new") {
@@ -98,7 +93,23 @@ export function parseRunArgs(rest: string[]): ParseResult {
       continue;
     }
     if (arg === "--lean") {
-      lean = true;
+      if (mode === "full") {
+        return {
+          kind: "error",
+          message: "huko run: --lean and --full are mutually exclusive\n",
+        };
+      }
+      mode = "lean";
+      continue;
+    }
+    if (arg === "--full") {
+      if (mode === "lean") {
+        return {
+          kind: "error",
+          message: "huko run: --lean and --full are mutually exclusive\n",
+        };
+      }
+      mode = "full";
       continue;
     }
     if (arg.startsWith("--session=")) {
@@ -145,15 +156,6 @@ export function parseRunArgs(rest: string[]): ParseResult {
   if (newSession && sessionId !== undefined) {
     return { kind: "error", message: "huko run: --new and --session=<id> are mutually exclusive\n" };
   }
-  if (lean && role !== undefined) {
-    return {
-      kind: "error",
-      message:
-        "huko run: --lean and --role=<name> are mutually exclusive.\n" +
-        "         Lean mode ignores roles by design — it uses a fixed minimal\n" +
-        "         prompt and shell-only tool surface.\n",
-    };
-  }
 
   // 4. Validate prompt.
   if (promptArgs === null) {
@@ -181,12 +183,11 @@ export function parseRunArgs(rest: string[]): ParseResult {
       format,
       ...(title !== undefined ? { title } : {}),
       ...(ephemeral ? { ephemeral: true } : {}),
-      ...(role !== undefined ? { role } : {}),
       ...(newSession ? { newSession: true } : {}),
       ...(sessionId !== undefined ? { sessionId } : {}),
       ...(interactive ? {} : { interactive: false }),
       ...(showTokens ? { showTokens: true } : {}),
-      ...(lean ? { lean: true } : {}),
+      ...(mode !== undefined ? { mode } : {}),
     },
   };
 }

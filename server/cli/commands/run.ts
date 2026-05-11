@@ -44,6 +44,7 @@ import {
   getActiveSessionId,
   setActiveSessionId,
 } from "../state.js";
+import { getConfig } from "../../config/index.js";
 
 export type RunArgs = {
   prompt: string;
@@ -52,8 +53,6 @@ export type RunArgs = {
   title?: string;
   /** When true, run with Memory persistences — state.json untouched, lock skipped. */
   ephemeral?: boolean;
-  /** Role name (loaded from server/roles/ etc.). Defaults to "general". */
-  role?: string;
   /** Force a brand-new session and switch the active pointer to it. */
   newSession?: boolean;
   /** One-off send to a specific session id; active pointer untouched. */
@@ -71,12 +70,15 @@ export type RunArgs = {
    */
   showTokens?: boolean;
   /**
-   * Lean mode: swap to a minimal system prompt (~300-500 tokens vs.
-   * ~6-8k for the default) and a fixed shell-only tool surface (`bash`).
-   * No role, no project-context, no agent-loop/tool-use rules.
-   * CLI flag: `--lean`. Mutually exclusive with `--role=`.
+   * Per-call mode override.
+   *   - "lean" — minimal system prompt + bash-only tool surface.
+   *   - "full" — the default agent profile.
+   *   - undefined — inherit whatever is set via HukoConfig.mode
+   *     (`huko config set mode lean|full`, layered global → project).
+   *
+   * CLI flags `--lean` and `--full` populate this.
    */
-  lean?: boolean;
+  mode?: "lean" | "full";
 };
 
 /**
@@ -257,13 +259,18 @@ export async function runCommand(args: RunArgs): Promise<number> {
     }
 
     // ── Run the LLM call ──────────────────────────────────────────────────
+    // Resolve effective mode: CLI flag wins, otherwise inherit from
+    // HukoConfig (layered default → global → project → env → explicit).
+    // Bootstrap above already called loadConfig(), so getConfig() is hot.
+    const effectiveMode: "lean" | "full" = args.mode ?? getConfig().mode;
+    const lean = effectiveMode === "lean";
+
     const result = await ctx.orchestrator.sendUserMessage({
       chatSessionId,
       content: args.prompt,
       model,
-      ...(args.role !== undefined ? { role: args.role } : {}),
       ...(args.interactive === false ? { interactive: false } : {}),
-      ...(args.lean ? { lean: true } : {}),
+      ...(lean ? { lean: true } : {}),
     });
     runtime.activeTaskId = result.taskId;
     formatter.onTaskStarted?.(result.taskId);
