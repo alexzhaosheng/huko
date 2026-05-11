@@ -1,33 +1,37 @@
 /**
  * server/cli/dispatch/run.ts
  *
- * `huko run [flags] -- <prompt>` — argv parser + handoff to runCommand.
+ * `huko [flags] <prompt>` — argv parser + handoff to runCommand.
  *
- * Protocol (strict, no fallback):
+ * Protocol:
  *
- *   - Everything BEFORE `--` is flags. Flags can appear in any order.
- *     Any positional (non-`--*` word) before `--` is an error.
- *   - The `--` token is required when there's a prompt — it's the
- *     "end of options" sentinel from POSIX, safe across bash/zsh/PowerShell.
- *   - Everything AFTER `--` is the prompt, verbatim. No flag re-parsing,
- *     no special handling of `-`/`--` words inside. Words are joined
- *     with a single space (shell tokenisation already happened).
+ *   - Walk argv left-to-right. Initial mode: `flags`.
+ *   - Each token starting with `-` while in flag mode is interpreted as
+ *     a recognised flag. Unrecognised flags are a parse error.
+ *   - The first non-flag (bare positional) token switches the parser
+ *     to `prompt` mode. That token AND every subsequent token become
+ *     prompt content, verbatim — including things that look like flags.
+ *   - The explicit `--` token also switches to prompt mode but is NOT
+ *     itself included. Use it when the prompt's first word begins with
+ *     `-` (e.g. `huko -- -3 + 5 ?` or `huko -- --metric correctness`).
  *
  * Why this shape:
- *   - The old parser was order-sensitive in subtle ways and rejected
- *     prompts whose words started with `--` (e.g. `--metric correctness`)
- *     even though that's natural human prose. Quoting worked but felt
- *     bolted on.
- *   - Splitting on `--` gives parser a clear seam: left side is structured
- *     (flag-only, known vocabulary), right side is unstructured (free
- *     text, never parsed). No heuristic in the middle.
+ *   - Most invocations are bare prompts (`huko fix the bug`). No
+ *     ceremony, no sentinel.
+ *   - Flag-modified prompts work without `--`: `huko --new fix it`.
+ *   - The `--` sentinel survives as the escape hatch for prompts that
+ *     would otherwise look like flags.
+ *   - After the first positional, NO flag re-parsing — so prompts that
+ *     casually mention `--no-interaction` or `--force` aren't ambiguous.
  *
  * Examples:
- *   huko run --new --title=X -- 检查 huko 代码 --metric 准确率   # OK
- *   huko run -- explain how --no-interaction works              # OK
- *   huko run hello                                               # ERROR
- *   huko run --new                                               # ERROR (no prompt)
- *   huko run --                                                  # ERROR (empty)
+ *   huko fix the bug                        # OK — prompt: "fix the bug"
+ *   huko --new --title=X fix the bug        # OK — flags + prompt
+ *   huko --new -- --metric correctness      # OK — explicit sentinel
+ *   huko -- -3 + 5 = ?                      # OK — prompt starts with `-`
+ *   huko --unknown-flag foo                 # ERROR — unknown flag
+ *   huko --new                              # ERROR — no prompt
+ *   huko --                                 # ERROR — empty prompt
  *
  * Returns the exit code from `runCommand` (0..5). On parse error the
  * dispatcher writes a diagnostic and throws `CliExitError` via usage().
@@ -40,9 +44,9 @@ import { usage } from "./shared.js";
 // ─── Pure parser ────────────────────────────────────────────────────────────
 
 /**
- * Parse a `huko run` argv into either a fully-typed RunArgs, a help
- * request, or an error message. Pure function — no I/O, no process
- * exits — so tests can exercise every branch deterministically.
+ * Parse a huko argv into either a fully-typed RunArgs, a help request,
+ * or an error message. Pure function — no I/O, no process exits — so
+ * tests can exercise every branch deterministically.
  */
 export type ParseResult =
   | { kind: "ok"; args: RunArgs }
@@ -50,13 +54,6 @@ export type ParseResult =
   | { kind: "error"; message: string };
 
 export function parseRunArgs(rest: string[]): ParseResult {
-  // 1. Split on the sentinel.
-  const sentinelIdx = rest.indexOf("--");
-  const flagArgs = sentinelIdx >= 0 ? rest.slice(0, sentinelIdx) : rest;
-  const promptArgs = sentinelIdx >= 0 ? rest.slice(sentinelIdx + 1) : null;
-
-  // 2. Parse flag side. Known flag patterns ONLY — any unrecognised
-  //    word (`--foo` or a bare positional) is an error.
   let title: string | undefined;
   let ephemeral = false;
   let newSession = false;
@@ -70,119 +67,148 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let verbose: boolean | undefined;
   let format: FormatName = "text";
 
-  for (const arg of flagArgs) {
+  // Phase 1: parse flags until first bare positional OR `--` sentinel.
+  let i = 0;
+  let sentinelHit = false;
+  while (i < rest.length) {
+    const arg = rest[i]!;
+
+    if (arg === "--") {
+      // Explicit sentinel — switch to prompt mode, don't include this token.
+      sentinelHit = true;
+      i++;
+      break;
+    }
+    if (!arg.startsWith("-")) {
+      // First bare positional — this IS prompt start. Don't increment;
+      // prompt collection below will pick it up.
+      break;
+    }
+
     if (arg === "-h" || arg === "--help") return { kind: "help" };
 
     if (arg.startsWith("--title=")) {
       title = arg.slice("--title=".length);
+      i++;
       continue;
     }
     if (arg === "--memory") {
       ephemeral = true;
+      i++;
       continue;
     }
     if (arg === "--new") {
       newSession = true;
+      i++;
       continue;
     }
     if (arg === "--no-interaction" || arg === "-y") {
       interactive = false;
+      i++;
       continue;
     }
     if (arg === "--show-tokens") {
       showTokens = true;
+      i++;
       continue;
     }
     if (arg === "--verbose" || arg === "-v") {
       verbose = true;
+      i++;
       continue;
     }
     if (arg === "--quiet") {
       verbose = false;
+      i++;
       continue;
     }
     if (arg === "--lean") {
       if (mode === "full") {
         return {
           kind: "error",
-          message: "huko run: --lean and --full are mutually exclusive\n",
+          message: "huko: --lean and --full are mutually exclusive\n",
         };
       }
       mode = "lean";
+      i++;
       continue;
     }
     if (arg === "--full") {
       if (mode === "lean") {
         return {
           kind: "error",
-          message: "huko run: --lean and --full are mutually exclusive\n",
+          message: "huko: --lean and --full are mutually exclusive\n",
         };
       }
       mode = "full";
+      i++;
       continue;
     }
     if (arg.startsWith("--session=")) {
       const raw = arg.slice("--session=".length);
       const n = Number(raw);
       if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-        return { kind: "error", message: `huko run: invalid --session value: ${raw}\n` };
+        return { kind: "error", message: `huko: invalid --session value: ${raw}\n` };
       }
       sessionId = n;
+      i++;
       continue;
     }
     if (arg === "--json") {
       format = "json";
+      i++;
       continue;
     }
     if (arg === "--jsonl") {
       format = "jsonl";
+      i++;
       continue;
     }
     if (arg.startsWith("--format=")) {
       const v = arg.slice("--format=".length);
       if (v !== "text" && v !== "jsonl" && v !== "json") {
-        return { kind: "error", message: `huko run: invalid --format value: ${v}\n` };
+        return { kind: "error", message: `huko: invalid --format value: ${v}\n` };
       }
       format = v;
+      i++;
       continue;
     }
 
-    if (arg.startsWith("-")) {
-      return { kind: "error", message: `huko run: unknown flag: ${arg}\n` };
-    }
-
-    // Bare positional before sentinel — the protocol forbids this.
+    // Unknown flag. Note that things like `-3` (numbers) end up here
+    // because they start with `-` and don't match any known flag.
+    // Operator can use `--` sentinel: `huko -- -3 + 5`.
     return {
       kind: "error",
       message:
-        `huko run: positional argument "${arg}" is not allowed before \`--\`.\n` +
-        `         Prompts must come after \`--\`. Example:\n` +
-        `         huko run --new -- ${arg}${flagArgs.length > 1 ? " ..." : ""}\n`,
+        `huko: unknown flag: ${arg}\n` +
+        (arg.match(/^-\d/)
+          ? "       (use `--` if your prompt starts with `-`: `huko -- " + arg + " ...`)\n"
+          : ""),
     };
   }
 
-  // 3. Mutual exclusion checks.
+  // Phase 2: everything from `i` onward is prompt content, verbatim.
+  const promptTokens = rest.slice(i);
+
+  // Mutual exclusion check.
   if (newSession && sessionId !== undefined) {
-    return { kind: "error", message: "huko run: --new and --session=<id> are mutually exclusive\n" };
+    return { kind: "error", message: "huko: --new and --session=<id> are mutually exclusive\n" };
   }
 
-  // 4. Validate prompt.
-  if (promptArgs === null) {
+  // Validate prompt.
+  if (promptTokens.length === 0) {
     return {
       kind: "error",
-      message:
-        "huko run: prompt is required. Use `--` to mark the prompt start:\n" +
-        "         huko run [flags] -- <your prompt here>\n",
+      message: sentinelHit
+        ? "huko: empty prompt after `--`. Provide the prompt text.\n"
+        : "huko: prompt is required.\n" +
+          "       Try: huko fix the bug in main.ts\n" +
+          "       Or:  huko --new --title='dev' fix the bug\n",
     };
   }
-  const prompt = promptArgs.join(" ").trim();
+  const prompt = promptTokens.join(" ").trim();
   if (prompt.length === 0) {
-    return {
-      kind: "error",
-      message:
-        "huko run: empty prompt after `--`. Provide the prompt text:\n" +
-        "         huko run [flags] -- <your prompt here>\n",
-    };
+    return { kind: "error", message: "huko: prompt is empty / whitespace-only\n" };
   }
 
   return {

@@ -3,6 +3,22 @@
  * server/cli/index.ts
  *
  * `huko` CLI entry point — the single process.exit() site.
+ *
+ * Dispatch rule:
+ *   - argv[0] is `-h` / `--help`                      → usage
+ *   - argv[0] is a known noun (sessions, provider,    → that subcommand
+ *     model, keys, config, info, setup, debug, safety)
+ *   - anything else                                   → free-form prompt
+ *
+ * The "free-form prompt" path is the most common: `huko fix the bug`,
+ * `huko --new fix the bug`, `huko -- --rare-edge-case-prompt`. The
+ * prompt parser (dispatch/run.ts) walks argv left-to-right; the first
+ * non-flag positional switches to prompt mode and everything after is
+ * verbatim. The `--` sentinel is the escape hatch for prompts that
+ * happen to start with `-`.
+ *
+ * There is intentionally NO `run` verb. The agent IS huko's primary
+ * action — typing it would be redundant.
  */
 
 import { dispatchConfig } from "./dispatch/config.js";
@@ -20,7 +36,6 @@ import { CliExitError, usage } from "./dispatch/shared.js";
 type Dispatcher = (rest: string[]) => Promise<number>;
 
 const DISPATCH: Record<string, Dispatcher> = {
-  run: dispatchRun,
   sessions: dispatchSessions,
   provider: dispatchProvider,
   model: dispatchModel,
@@ -39,21 +54,15 @@ async function main(): Promise<number> {
     const head = argv[0]!;
     if (head === "-h" || head === "--help") usage(0);
 
-    // `run` is the implicit default verb: when the first token is a flag
-    // or the `--` sentinel (i.e. anything starting with `-`), there's no
-    // subcommand and the whole argv is `run` args. Lets users write
-    // `huko -- hello` or `huko --new -- hello` without typing `run`.
-    if (head.startsWith("-")) {
-      return await dispatchRun(argv);
-    }
-
+    // Known subcommand verb? Route there.
     const handler = DISPATCH[head];
-    if (!handler) {
-      process.stderr.write(`huko: unknown command: ${head}\n`);
-      usage();
+    if (handler) {
+      return await handler(argv.slice(1));
     }
 
-    return await handler(argv.slice(1));
+    // Otherwise — flags, bare prompts, anything else — goes to the
+    // prompt pipeline. The parser handles flag-vs-positional disambiguation.
+    return await dispatchRun(argv);
   } catch (err) {
     if (err instanceof CliExitError) return err.code;
     const msg = err instanceof Error ? err.message : String(err);
