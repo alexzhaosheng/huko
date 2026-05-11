@@ -181,6 +181,50 @@ describe("parseRunArgs — mode + verbosity flags", () => {
   });
 });
 
+// ─── --chat (REPL mode) ─────────────────────────────────────────────────────
+
+describe("parseRunArgs — --chat", () => {
+  it("parses --chat with NO initial prompt (REPL will read all)", () => {
+    const r = parseRunArgs(["--chat"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.chat, true);
+    assert.equal(r.args.prompt, "");
+  });
+
+  it("parses --chat WITH an initial prompt (run once, then REPL)", () => {
+    const r = parseRunArgs(["--chat", "fix", "the", "bug"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.chat, true);
+    assert.equal(r.args.prompt, "fix the bug");
+  });
+
+  it("parses --chat alongside other flags", () => {
+    const r = parseRunArgs(["--chat", "--new", "--show-tokens"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.chat, true);
+    assert.equal(r.args.newSession, true);
+    assert.equal(r.args.showTokens, true);
+    assert.equal(r.args.prompt, "");
+  });
+
+  it("rejects an empty prompt WITHOUT --chat (one-shot still needs a prompt)", () => {
+    const r = parseRunArgs([]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /prompt is required/);
+  });
+
+  it("omits chat when not given (one-shot default)", () => {
+    const r = parseRunArgs(["hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.chat, undefined);
+  });
+});
+
 // ─── error cases ────────────────────────────────────────────────────────────
 
 describe("parseRunArgs — error cases", () => {

@@ -135,7 +135,12 @@ export function openPrompter(): Prompter {
           opts.default !== undefined && opts.default !== ""
             ? dim(` [${opts.default}]`, "stderr")
             : "";
-        writePrompt(`${question}${suffix}: `);
+        // Wizard convention is "Question: ". For non-wizard callers
+        // (e.g. the REPL prompt) passing an empty `question` skips the
+        // trailing `: ` entirely — they get to render the cursor as
+        // they like.
+        const trailer = question.length === 0 && suffix.length === 0 ? "" : ": ";
+        writePrompt(`${question}${suffix}${trailer}`);
         const answer = await takeLine();
         const trimmed = answer.trim();
         const value =

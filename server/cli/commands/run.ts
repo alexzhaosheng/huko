@@ -89,6 +89,15 @@ export type RunArgs = {
    * CLI: `--verbose` / `-v` sets true; `--quiet` forces false.
    */
   verbose?: boolean;
+  /**
+   * Interactive REPL mode. When true, huko reads prompts from stdin in
+   * a loop until the operator exits (Ctrl+D, `/exit`, `/quit`). The
+   * initial `prompt` field is optional in this mode — if non-empty,
+   * it's submitted as the first turn before the REPL prompts for input.
+   *
+   * CLI: `--chat`.
+   */
+  chat?: boolean;
 };
 
 /**
@@ -111,6 +120,14 @@ export async function runCommand(args: RunArgs): Promise<number> {
   if (args.newSession && args.sessionId !== undefined) {
     process.stderr.write("huko run: --new and --session=<id> are mutually exclusive\n");
     return 3;
+  }
+
+  // Chat mode short-circuits to a REPL. Same plumbing internally
+  // (lock, bootstrap, handlers) but loops on stdin instead of
+  // exiting after one turn.
+  if (args.chat) {
+    const { chatCommand } = await import("./chat.js");
+    return await chatCommand(args);
   }
 
   const cwd = process.cwd();

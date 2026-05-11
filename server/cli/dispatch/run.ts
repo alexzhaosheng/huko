@@ -65,6 +65,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let showTokens = false;
   let mode: "lean" | "full" | undefined;
   let verbose: boolean | undefined;
+  let chat = false;
   let format: FormatName = "text";
 
   // Phase 1: parse flags until first bare positional OR `--` sentinel.
@@ -119,6 +120,11 @@ export function parseRunArgs(rest: string[]): ParseResult {
     }
     if (arg === "--quiet") {
       verbose = false;
+      i++;
+      continue;
+    }
+    if (arg === "--chat") {
+      chat = true;
       i++;
       continue;
     }
@@ -195,20 +201,20 @@ export function parseRunArgs(rest: string[]): ParseResult {
     return { kind: "error", message: "huko: --new and --session=<id> are mutually exclusive\n" };
   }
 
-  // Validate prompt.
-  if (promptTokens.length === 0) {
+  // Validate prompt. In chat mode an empty initial prompt is fine —
+  // the REPL will prompt for input. Outside chat mode a prompt is
+  // required.
+  const prompt = promptTokens.join(" ").trim();
+  if (!chat && prompt.length === 0) {
     return {
       kind: "error",
       message: sentinelHit
         ? "huko: empty prompt after `--`. Provide the prompt text.\n"
         : "huko: prompt is required.\n" +
           "       Try: huko fix the bug in main.ts\n" +
-          "       Or:  huko --new --title='dev' fix the bug\n",
+          "       Or:  huko --new --title='dev' fix the bug\n" +
+          "       For interactive: huko --chat\n",
     };
-  }
-  const prompt = promptTokens.join(" ").trim();
-  if (prompt.length === 0) {
-    return { kind: "error", message: "huko: prompt is empty / whitespace-only\n" };
   }
 
   return {
@@ -224,6 +230,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(showTokens ? { showTokens: true } : {}),
       ...(mode !== undefined ? { mode } : {}),
       ...(verbose !== undefined ? { verbose } : {}),
+      ...(chat ? { chat: true } : {}),
     },
   };
 }
