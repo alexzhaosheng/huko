@@ -247,6 +247,58 @@ describe("bash — schema enforcement", () => {
   });
 });
 
+// ─── exec: command-end edge cases (regression: heredoc + trailing comment) ─
+
+describe("bash — exec terminator placement (heredoc / comment safety)", () => {
+  // History: the POSIX launch path used to glue the completion sentinel
+  // onto the command via `;`:  `${command}; echo "MARKER:$?"`.
+  // That breaks any command whose last line is a heredoc delimiter or a
+  // trailing comment — `EOF;` is not a valid heredoc terminator, and
+  // `# comment; echo ...` makes the sentinel part of the comment.
+  // The sentinel now goes on its OWN line; these tests pin that.
+
+  it("heredoc with quoted delimiter completes (no hang) and writes the file", async (t) => {
+    if (isWin) {
+      t.skip("heredoc is a POSIX-shell construct");
+      return;
+    }
+    const sid = freshSession();
+    const target = join(tmp, "heredoc-out.txt");
+    const cmd = `cat > ${target} << 'HUKO_DOC_EOF'\nfirst line\nsecond line with \`backticks\`\nHUKO_DOC_EOF`;
+    const out = await invoke("bash", {
+      action: "exec",
+      command: cmd,
+      session: sid,
+      timeout_ms: 5000,
+    });
+    assert.equal(out.error, undefined);
+    assert.match(out.content, /\[exit code: 0\]/);
+    // Sentinel finished, no timeout note appended.
+    assert.doesNotMatch(out.content, /timed out/);
+    // The heredoc body actually made it into the file.
+    const written = (await import("node:fs/promises")).readFile(target, "utf8");
+    assert.match(await written, /first line/);
+    assert.match(await written, /second line with `backticks`/);
+  });
+
+  it("trailing # comment doesn't swallow the sentinel", async (t) => {
+    if (isWin) {
+      t.skip("# is not a comment in cmd.exe");
+      return;
+    }
+    const out = await invoke("bash", {
+      action: "exec",
+      command: "echo before-comment # trailing comment",
+      session: freshSession(),
+      timeout_ms: 5000,
+    });
+    assert.equal(out.error, undefined);
+    assert.match(out.content, /before-comment/);
+    assert.match(out.content, /\[exit code: 0\]/);
+    assert.doesNotMatch(out.content, /timed out/);
+  });
+});
+
 // ─── helper ─────────────────────────────────────────────────────────────────
 
 async function invoke(

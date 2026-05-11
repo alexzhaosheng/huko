@@ -300,11 +300,19 @@ async function actionExec(
 
   // Append a unique marker so we can detect command completion AND
   // capture the exit code. POSIX uses $?; Windows cmd uses %ERRORLEVEL%.
+  //
+  // The sentinel MUST go on a NEW LINE, not after a `;` — otherwise a
+  // command ending in a heredoc delimiter (e.g. `cat << 'EOF'\n…\nEOF`)
+  // gets the sentinel glued onto the EOF line, which then doesn't match
+  // bash's "delimiter alone on its line" requirement. The heredoc never
+  // terminates, cat blocks reading stdin, and we time out. Same trap
+  // exists for a command ending in `# comment` — the sentinel would be
+  // commented out. Windows already uses CRLF here; this is the POSIX fix.
   const marker = `__HUKO_DONE_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
   const launch =
     process.platform === "win32"
       ? `${command}\r\necho ${marker}:%ERRORLEVEL%\r\n`
-      : `${command}; echo "${marker}:$?"\n`;
+      : `${command}\necho "${marker}:$?"\n`;
   writeStdin(s.child, launch);
 
   const markerRegex = new RegExp(`${marker}:(\\d+)`);
