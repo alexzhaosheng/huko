@@ -48,6 +48,7 @@ import {
   type ResolvedModel,
   type ResolvedProvider,
 } from "../../config/index.js";
+import { estimateContextWindow } from "../../core/llm/model-context-window.js";
 import {
   describeKeySource,
   globalKeysPath,
@@ -467,15 +468,17 @@ function printText(eff: Effective, cwd: string, scope: InfoScope): void {
       bold("Current model:   ") +
         ` ${emphasis(`${eff.currentModel.providerName}/${eff.currentModel.modelId}`)}${setIn}\n`,
     );
+    const cwValue = eff.currentModel.contextWindow ?? estimateContextWindow(eff.currentModel.modelId);
+    const cwOrigin = eff.currentModel.contextWindow !== undefined
+      ? "from model definition"
+      : "estimated from model id";
     const detailRows: Array<[string, string]> = [
       ["Display name", eff.currentModel.displayName],
       ["Think level", eff.currentModel.defaultThinkLevel ?? "off"],
       ["Tool call mode", eff.currentModel.defaultToolCallMode ?? "native"],
+      ["Context window", `${cwValue.toLocaleString()} tokens   ${dim(`(${cwOrigin})`)}`],
       ["Model definition", source(eff.currentModel.source, eff.currentModel.source)],
     ];
-    if (eff.currentModel.contextWindow !== undefined) {
-      detailRows.push(["Context window", String(eff.currentModel.contextWindow)]);
-    }
     printDetailBlock(detailRows);
     out.write("\n");
   } else {
@@ -588,7 +591,9 @@ type Payload = {
     displayName: string;
     thinkLevel: string;
     toolCallMode: string;
-    contextWindow?: number;
+    contextWindow: number;
+    /** "model" if the model definition pinned it; "estimator" if derived from modelId. */
+    contextWindowSource: "model" | "estimator";
     definitionSource: string;
     pointerSource: string | null;
   } | null;
@@ -620,9 +625,12 @@ function buildPayload(eff: Effective, cwd: string, scope: InfoScope): Payload {
         displayName: eff.currentModel.displayName,
         thinkLevel: eff.currentModel.defaultThinkLevel ?? "off",
         toolCallMode: eff.currentModel.defaultToolCallMode ?? "native",
-        ...(eff.currentModel.contextWindow !== undefined
-          ? { contextWindow: eff.currentModel.contextWindow }
-          : {}),
+        contextWindow:
+          eff.currentModel.contextWindow ?? estimateContextWindow(eff.currentModel.modelId),
+        contextWindowSource:
+          eff.currentModel.contextWindow !== undefined
+            ? ("model" as const)
+            : ("estimator" as const),
         definitionSource: eff.currentModel.source,
         pointerSource: eff.currentModelSource,
       }
