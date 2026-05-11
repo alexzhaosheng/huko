@@ -54,7 +54,7 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
   {
     name: "deepseek",
     protocol: "openai",
-    baseUrl: "https://api.deepseek.com/v1",
+    baseUrl: "https://api.deepseek.com",
     apiKeyRef: "deepseek",
   },
   {

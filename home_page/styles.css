@@ -125,17 +125,18 @@ h1 {
 
 .terminal {
   margin: 10px 0 0;
-  padding: 0;
+  padding: 14px 16px;
   overflow-x: auto;
-  border: 0;
-  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+  background: #050706;
 }
 
 code {
   font-family: inherit;
   display: block;
   font-size: 0.84rem;
-  line-height: 1.08;
+  line-height: 1.65;
   white-space: pre;
 }
 

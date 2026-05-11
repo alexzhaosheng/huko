@@ -24,13 +24,12 @@
 
       <section class="feature-list" aria-label="Key features">
         <article class="feature">
-          <h2><span class="section-mark">[01]</span> Noun-first CLI</h2>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># continue the active session</span>
-<span class="command">huko review this diff for risky changes</span></span>
-<span class="pair"><span class="comment"># check who the agent is talking to</span>
-<span class="command">huko sessions current</span></span>
-<span class="pair"><span class="comment"># set the default model explicitly</span>
-<span class="command">huko model default anthropic/claude-sonnet-4-6</span></span></code></pre>
+          <h2><span class="section-mark">[01]</span> Full &amp; Lean Modes</h2>
+          <p class="tagline">Production-grade agent or lightweight bash-only — one binary, two shapes.</p>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># full — complete agent: planning, 13 tools, project context, role system</span>
+<span class="command">huko -- "review this diff, flag risky changes, suggest fixes"</span></span>
+<span class="pair"><span class="comment"># lean — bash-only, ~400 token overhead, fast even on small models</span>
+<span class="command">huko --lean "what's the uptime of this machine"</span></span></code></pre>
         </article>
 
         <article class="feature">
@@ -56,11 +55,11 @@
         <article class="feature">
           <h2><span class="section-mark">[04]</span> Project Memory</h2>
           <pre class="terminal"><code><span class="pair"><span class="comment"># continue work inside this repo</span>
-<span class="command">huko continue the refactor plan</span></span>
+<span class="command">huko -- continue the refactor plan</span></span>
 <span class="pair"><span class="comment"># list saved sessions for this project</span>
 <span class="command">huko sessions list</span></span>
 <span class="pair"><span class="comment"># branch into a fresh thread</span>
-<span class="command">huko --new --title="release triage" summarize today's blockers</span></span></code></pre>
+<span class="command">huko --new --title="release triage" -- summarize today's blockers</span></span></code></pre>
         </article>
 
         <article class="feature">

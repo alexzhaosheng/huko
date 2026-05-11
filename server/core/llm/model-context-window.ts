@@ -86,6 +86,9 @@ const HEURISTIC_TABLE: ReadonlyArray<readonly [string, number]> = [
   ["deepseek-r1", 64_000],
   ["deepseek-v3", 64_000],
   ["deepseek-coder", 16_000],
+  // V4 family — 1M context window (verified: api-docs.deepseek.com)
+  ["deepseek-v4-pro", 1_000_000],
+  ["deepseek-v4-flash", 1_000_000],
   ["deepseek", 64_000],
   ["qwen-2.5", 128_000],
   ["qwen-2", 32_000],
