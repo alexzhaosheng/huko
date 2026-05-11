@@ -26,6 +26,7 @@ import type { TaskSummary } from "../../shared/events.js";
 import { loadRole } from "../roles/index.js";
 import { getConfig } from "../config/index.js";
 import { buildSystemPrompt } from "./build-system-prompt.js";
+import { buildLeanSystemPrompt } from "./build-lean-system-prompt.js";
 import { recoverOrphans, type RecoveryReport } from "../task/resume.js";
 import { detectWorkingLanguage } from "../task/language-reminder.js";
 import { estimateContextWindow } from "../core/llm/model-context-window.js";
@@ -48,6 +49,12 @@ export type SendMessageInput = {
   role?: string;
   cwd?: string;
   interactive?: boolean;
+  /**
+   * Lean mode: minimal system prompt (~400 tokens) + shell-only tool
+   * surface (`bash`). When true, `role` is ignored and no project-context
+   * files are read. See server/services/build-lean-system-prompt.ts.
+   */
+  lean?: boolean;
 };
 
 export type SendMessageResult = {
@@ -240,31 +247,43 @@ export class TaskOrchestrator {
         ? ({ sessionType: "chat", chatSessionId: sessionId } as const)
         : ({ sessionType: "agent", agentSessionId: sessionId } as const);
 
-    const roleName = input.role ?? getConfig().role.default;
-    const role = await loadRole(roleName, cwd);
-
     const workingLanguage = detectWorkingLanguage(input.content);
 
-    // Build the toolFilter BEFORE the system prompt so we can hand the
-    // matching tool-prompt hints to buildSystemPrompt. A role that
-    // disables a tool also drops its prompt guidance — symmetry is
-    // automatic via the same filter.
+    // Build the toolFilter + system prompt. Lean and default modes go
+    // through entirely separate composers (see build-lean-system-prompt.ts)
+    // so a change to one mode's prompt cannot affect the other's.
     const toolFilter: ToolFilterContext = {
       interactive: input.interactive ?? true,
     };
-    if (role.frontmatter.tools?.allow !== undefined) {
-      toolFilter.allowedTools = role.frontmatter.tools.allow;
-    }
-    if (role.frontmatter.tools?.deny !== undefined) {
-      toolFilter.deniedTools = role.frontmatter.tools.deny;
-    }
+    let systemPrompt: string;
+    let promptMetadata: Record<string, unknown>;
 
-    const systemPrompt = await buildSystemPrompt({
-      role,
-      cwd,
-      workingLanguage,
-      toolHints: getToolPromptHints(toolFilter),
-    });
+    if (input.lean) {
+      // Lean mode: fixed shell-only tool surface, no role loading,
+      // no project-context files read. `lean: true` tells the registry
+      // to render each surviving tool via its `leanDescription`
+      // (falling back to `description` when unset).
+      toolFilter.allowedTools = ["bash"];
+      toolFilter.lean = true;
+      systemPrompt = buildLeanSystemPrompt({ workingLanguage });
+      promptMetadata = { mode: "lean" };
+    } else {
+      const roleName = input.role ?? getConfig().role.default;
+      const role = await loadRole(roleName, cwd);
+      if (role.frontmatter.tools?.allow !== undefined) {
+        toolFilter.allowedTools = role.frontmatter.tools.allow;
+      }
+      if (role.frontmatter.tools?.deny !== undefined) {
+        toolFilter.deniedTools = role.frontmatter.tools.deny;
+      }
+      systemPrompt = await buildSystemPrompt({
+        role,
+        cwd,
+        workingLanguage,
+        toolHints: getToolPromptHints(toolFilter),
+      });
+      promptMetadata = { roleName: role.name };
+    }
 
     // Persist the system prompt as its own entry so debug tooling can
     // reconstruct the raw payload sent to the LLM. `isLLMVisible` skips
@@ -275,7 +294,7 @@ export class TaskOrchestrator {
       kind: EntryKind.SystemPrompt,
       role: "system",
       content: systemPrompt,
-      metadata: { roleName: role.name },
+      metadata: promptMetadata,
     });
 
     const contextWindow =

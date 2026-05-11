@@ -70,6 +70,13 @@ export type RunArgs = {
    * `--show-tokens`. Defaults to false.
    */
   showTokens?: boolean;
+  /**
+   * Lean mode: swap to a minimal system prompt (~300-500 tokens vs.
+   * ~6-8k for the default) and a fixed shell-only tool surface (`bash`).
+   * No role, no project-context, no agent-loop/tool-use rules.
+   * CLI flag: `--lean`. Mutually exclusive with `--role=`.
+   */
+  lean?: boolean;
 };
 
 /**
@@ -178,22 +185,34 @@ export async function runCommand(args: RunArgs): Promise<number> {
     });
 
     // Current provider + model check. Both come from the merged
-    // InfraConfig (built-in pointers seeded by builtin-providers.ts;
-    // overridable in ~/.huko/providers.json or <cwd>/.huko/providers.json
-    // via `currentProvider` / `currentModel`). Built-ins point at
-    // anthropic/claude-sonnet-4-6 so this branch fires only if the user
-    // explicitly cleared one of them and we can't pair them up.
+    // InfraConfig (~/.huko/providers.json or <cwd>/.huko/providers.json
+    // via `currentProvider` / `currentModel`). huko ships NO preselected
+    // pair — a fresh install lands here until the user configures one.
     const model = ctx.infra.currentModel;
     if (model === null) {
       const cp = ctx.infra.currentProvider;
-      const cpName = cp ? cp.name : "(none)";
-      process.stderr.write(
-        `huko: no usable current model.\n` +
-          `  current provider: ${cpName} (set in: ${ctx.infra.currentProviderSource ?? "—"})\n` +
-          `  current model:    (none / unresolved)\n` +
-          `  Fix with:  huko provider current <name>  +  huko model current <modelId>\n` +
-          `  Or list: huko model list\n`,
-      );
+      const isFreshInstall = cp === null && ctx.infra.currentProviderSource === null;
+      if (isFreshInstall) {
+        process.stderr.write(
+          `huko: no provider configured yet.\n` +
+            `  Run the interactive setup wizard:\n` +
+            `      huko setup\n` +
+            `  Or do it manually:\n` +
+            `      huko provider list      # see known providers\n` +
+            `      huko provider current <name>\n` +
+            `      huko model current <modelId>\n` +
+            `      huko keys set <ref> <value>   # supply the API key\n`,
+        );
+      } else {
+        const cpName = cp ? cp.name : "(none)";
+        process.stderr.write(
+          `huko: no usable current model.\n` +
+            `  current provider: ${cpName} (set in: ${ctx.infra.currentProviderSource ?? "—"})\n` +
+            `  current model:    (none / unresolved)\n` +
+            `  Fix with:  huko provider current <name>  +  huko model current <modelId>\n` +
+            `  Or re-run: huko setup\n`,
+        );
+      }
       return 3;
     }
 
@@ -244,6 +263,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
       model,
       ...(args.role !== undefined ? { role: args.role } : {}),
       ...(args.interactive === false ? { interactive: false } : {}),
+      ...(args.lean ? { lean: true } : {}),
     });
     runtime.activeTaskId = result.taskId;
     formatter.onTaskStarted?.(result.taskId);

@@ -271,23 +271,15 @@ export const BUILTIN_MODELS: ModelConfig[] = [
   },
 ];
 
-// ─── Default ────────────────────────────────────────────────────────────────
-
-/**
- * Built-in "current provider" pointer. The user can override this in
- * ~/.huko/providers.json (`currentProvider: "openai"`) or per-project.
- *
- * Picked for: agentic-coding capability via Claude Sonnet 4.6 (direct
- * API, no proxy markup, stable model id at release time).
- */
-export const BUILTIN_CURRENT_PROVIDER = "anthropic";
-
-/**
- * Built-in "current model" pointer. Paired with BUILTIN_CURRENT_PROVIDER
- * — Anthropic's Sonnet 4.6 dateless id is itself a pinned snapshot,
- * not a floating alias.
- *
- * Override with `huko model current <modelId>` or by editing
- * ~/.huko/providers.json (`currentModel: "..."`).
- */
-export const BUILTIN_CURRENT_MODEL = "claude-sonnet-4-6";
+// ─── No implicit current pointer ────────────────────────────────────────────
+//
+// We deliberately do NOT ship a built-in `currentProvider` / `currentModel`.
+// The catalog above is "what huko knows about", not "what to use". A fresh
+// install has no preselected vendor — the user picks via `huko setup` (the
+// interactive wizard) or `huko provider current` + `huko model current`.
+// Picking a default for the user would mean shipping a wrong default for
+// most of them, since "which LLM" is a key/billing/policy decision huko
+// has no way to know.
+//
+// The `run` command (server/cli/commands/run.ts) surfaces a clear "set up
+// first" message when these pointers are null.

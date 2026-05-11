@@ -25,6 +25,7 @@ import type {
   TokenUsage,
 } from "../types.js";
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../../../services/build-system-prompt.js";
+import { getRawDebugLog, nextCallId, type RawDebugLog } from "../raw-debug-log.js";
 
 export const openaiAdapter: ProtocolAdapter = {
   protocol: "openai",
@@ -39,20 +40,58 @@ export const openaiAdapter: ProtocolAdapter = {
       ...(options.headers ?? {}),
     };
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    // Raw-debug capture: getRawDebugLog returns a no-op when
+    // HUKO_DEBUG_RAW_LLM is unset, so zero overhead in the normal case.
+    const log = getRawDebugLog();
+    const callId = nextCallId();
+    const startMs = Date.now();
+    log.logRequest({ callId, url, method: "POST", headers, body });
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (err) {
+      log.logResponse({
+        callId,
+        status: 0,
+        statusText: "fetch threw",
+        durationMs: Date.now() - startMs,
+        headers: {},
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      log.logResponse({
+        callId,
+        status: res.status,
+        statusText: res.statusText,
+        durationMs: Date.now() - startMs,
+        headers: extractHeaders(res.headers),
+        body: tryParseJson(text),
+        error: text,
+      });
       throw new LLMHttpError(res.status, res.statusText, text);
     }
 
-    return stream ? readStream(res, options) : readNonStream(res);
+    const debugCtx: DebugCtx = { log, callId, startMs };
+    return stream
+      ? readStream(res, options, debugCtx)
+      : readNonStream(res, debugCtx);
   },
+};
+
+type DebugCtx = {
+  log: RawDebugLog;
+  callId: string;
+  startMs: number;
 };
 
 // ─── Request body ────────────────────────────────────────────────────────────
@@ -124,8 +163,21 @@ function formatTools(tools: Tool[]): Array<Record<string, unknown>> {
 
 // ─── Non-streaming response ──────────────────────────────────────────────────
 
-async function readNonStream(res: Response): Promise<LLMTurnResult> {
-  const json = (await res.json()) as ChatCompletionResponse;
+async function readNonStream(res: Response, dbg: DebugCtx): Promise<LLMTurnResult> {
+  // Read as text first so the raw bytes survive into the debug log even
+  // if JSON parsing later fails. (`res.json()` would consume the body
+  // before we could capture it.)
+  const text = await res.text();
+  dbg.log.logResponse({
+    callId: dbg.callId,
+    status: res.status,
+    statusText: res.statusText,
+    durationMs: Date.now() - dbg.startMs,
+    headers: extractHeaders(res.headers),
+    body: tryParseJson(text),
+  });
+
+  const json = JSON.parse(text) as ChatCompletionResponse;
   const msg = json.choices?.[0]?.message;
 
   const toolCalls: ToolCall[] = (msg?.tool_calls ?? []).map((c) => ({
@@ -146,7 +198,11 @@ async function readNonStream(res: Response): Promise<LLMTurnResult> {
 
 // ─── Streaming response (SSE) ────────────────────────────────────────────────
 
-async function readStream(res: Response, options: LLMCallOptions): Promise<LLMTurnResult> {
+async function readStream(
+  res: Response,
+  options: LLMCallOptions,
+  dbg: DebugCtx,
+): Promise<LLMTurnResult> {
   if (!res.body) throw new Error("Streaming response has no body");
 
   const reader = res.body.getReader();
@@ -158,13 +214,18 @@ async function readStream(res: Response, options: LLMCallOptions): Promise<LLMTu
   let usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   let buffer = "";
+  // Verbatim SSE text accumulator for the raw debug log. Decoded once
+  // from the same chunk we feed into `buffer` to avoid double-decoding.
+  let rawSSE = "";
 
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
+      const chunkText = decoder.decode(value, { stream: true });
+      rawSSE += chunkText;
+      buffer += chunkText;
 
       let nl: number;
       while ((nl = buffer.indexOf("\n")) !== -1) {
@@ -216,6 +277,16 @@ async function readStream(res: Response, options: LLMCallOptions): Promise<LLMTu
     } catch {
       /* noop */
     }
+    // Log even on partial / aborted streams — what we got so far is
+    // exactly what we want to see in the debug record.
+    dbg.log.logResponse({
+      callId: dbg.callId,
+      status: res.status,
+      statusText: res.statusText,
+      durationMs: Date.now() - dbg.startMs,
+      headers: extractHeaders(res.headers),
+      rawSSE,
+    });
   }
 
   const toolCalls: ToolCall[] = [];
@@ -276,6 +347,22 @@ function normalizeUsage(u: ChatCompletionUsage | undefined): TokenUsage {
 
 function joinUrl(base: string, path: string): string {
   return base.replace(/\/+$/, "") + "/" + path.replace(/^\/+/, "");
+}
+
+function extractHeaders(h: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  h.forEach((v, k) => {
+    out[k] = v;
+  });
+  return out;
+}
+
+function tryParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 // ─── Error ───────────────────────────────────────────────────────────────────

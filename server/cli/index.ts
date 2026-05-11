@@ -37,6 +37,14 @@ async function main(): Promise<number> {
     const head = argv[0]!;
     if (head === "-h" || head === "--help") usage(0);
 
+    // `run` is the implicit default verb: when the first token is a flag
+    // or the `--` sentinel (i.e. anything starting with `-`), there's no
+    // subcommand and the whole argv is `run` args. Lets users write
+    // `huko -- hello` or `huko --new -- hello` without typing `run`.
+    if (head.startsWith("-")) {
+      return await dispatchRun(argv);
+    }
+
     const handler = DISPATCH[head];
     if (!handler) {
       process.stderr.write(`huko: unknown command: ${head}\n`);

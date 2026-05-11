@@ -23,11 +23,7 @@ import {
 } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import {
-  BUILTIN_CURRENT_MODEL,
-  BUILTIN_CURRENT_PROVIDER,
-  BUILTIN_PROVIDERS,
-} from "../server/config/builtin-providers.js";
+import { BUILTIN_PROVIDERS } from "../server/config/builtin-providers.js";
 import {
   findModel,
   findProvider,
@@ -80,15 +76,14 @@ describe("loadInfraConfig — built-ins only", () => {
     for (const p of cfg.providers) assert.equal(p.source, "builtin");
   });
 
-  it("current provider + model are the built-in pair", () => {
+  it("current provider + model are unset on a fresh install", () => {
     const cfg = loadInfraConfig({ cwd });
-    assert.ok(cfg.currentProvider);
-    assert.equal(cfg.currentProvider!.name, BUILTIN_CURRENT_PROVIDER);
-    assert.equal(cfg.currentProviderSource, "builtin");
-    assert.ok(cfg.currentModel);
-    assert.equal(cfg.currentModel!.providerName, BUILTIN_CURRENT_PROVIDER);
-    assert.equal(cfg.currentModel!.modelId, BUILTIN_CURRENT_MODEL);
-    assert.equal(cfg.currentModelSource, "builtin");
+    // No preselected vendor — user must pick one via `huko setup` or
+    // `huko provider current` / `huko model current`.
+    assert.equal(cfg.currentProvider, null);
+    assert.equal(cfg.currentProviderSource, null);
+    assert.equal(cfg.currentModel, null);
+    assert.equal(cfg.currentModelSource, null);
   });
 });
 

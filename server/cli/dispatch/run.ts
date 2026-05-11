@@ -67,6 +67,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
   // tool surface (no `message(type=ask)`) so it doesn't try to ask.
   let interactive = process.env["HUKO_NON_INTERACTIVE"] !== "1";
   let showTokens = false;
+  let lean = false;
   let format: FormatName = "text";
 
   for (const arg of flagArgs) {
@@ -94,6 +95,10 @@ export function parseRunArgs(rest: string[]): ParseResult {
     }
     if (arg === "--show-tokens") {
       showTokens = true;
+      continue;
+    }
+    if (arg === "--lean") {
+      lean = true;
       continue;
     }
     if (arg.startsWith("--session=")) {
@@ -136,9 +141,18 @@ export function parseRunArgs(rest: string[]): ParseResult {
     };
   }
 
-  // 3. Mutual exclusion check.
+  // 3. Mutual exclusion checks.
   if (newSession && sessionId !== undefined) {
     return { kind: "error", message: "huko run: --new and --session=<id> are mutually exclusive\n" };
+  }
+  if (lean && role !== undefined) {
+    return {
+      kind: "error",
+      message:
+        "huko run: --lean and --role=<name> are mutually exclusive.\n" +
+        "         Lean mode ignores roles by design — it uses a fixed minimal\n" +
+        "         prompt and shell-only tool surface.\n",
+    };
   }
 
   // 4. Validate prompt.
@@ -172,6 +186,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(sessionId !== undefined ? { sessionId } : {}),
       ...(interactive ? {} : { interactive: false }),
       ...(showTokens ? { showTokens: true } : {}),
+      ...(lean ? { lean: true } : {}),
     },
   };
 }

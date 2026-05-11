@@ -74,6 +74,23 @@ export type ServerToolDefinition = Tool & {
    * disables a tool also drops its prompt guidance automatically.
    */
   promptHint?: string;
+  /**
+   * Lean-mode replacement for `description`. When the tool is rendered
+   * via lean mode (`ToolMaterializeContext.lean === true`), this string
+   * is sent to the LLM in place of `description`. Default mode is
+   * unaffected.
+   *
+   * The two descriptions are SEPARATE fields on purpose — touching one
+   * cannot bleed into the other's rendering path (see materialise()).
+   * Omit to fall back to `description` (i.e. lean mode picks up the full
+   * description unchanged).
+   *
+   * Use when a tool's full description carries guidance the lean-mode
+   * user case won't exercise (e.g. bash's `send`/`wait`/`kill`/`view`
+   * advanced workflows). A slim variant keeps lean fast without
+   * degrading default-mode reliability.
+   */
+  leanDescription?: string;
 };
 
 export type WorkstationToolDefinition = ServerToolDefinition;
@@ -153,17 +170,28 @@ export type ToolFilterContext = {
   deniedTools?: string[];
   predicate?: (name: string, kind: "server" | "workstation") => boolean;
   interactive?: boolean;
+  /**
+   * Render tools for lean mode. When true, `materialise()` uses each
+   * tool's `leanDescription` (falling back to `description` when unset)
+   * and skips default-mode rendering hooks (`platformNotes`,
+   * `descriptionFor`, `parametersFor`). Default false.
+   */
+  lean?: boolean;
 };
 
 export type ToolMaterializeContext = {
   interactive: boolean;
+  lean: boolean;
 };
 
 export type ToolFilter = (name: string, kind: "server" | "workstation") => boolean;
 
 export function getToolsForLLM(filter?: ToolFilter | ToolFilterContext): Tool[] {
   const ctx = normaliseFilter(filter);
-  const matCtx: ToolMaterializeContext = { interactive: ctx.interactive ?? true };
+  const matCtx: ToolMaterializeContext = {
+    interactive: ctx.interactive ?? true,
+    lean: ctx.lean ?? false,
+  };
   const out: Tool[] = [];
   for (const [name, t] of registry) {
     if (ctx.allowedTools !== undefined && !ctx.allowedTools.includes(name)) continue;
@@ -183,6 +211,27 @@ function normaliseFilter(
 }
 
 function materialise(
+  def: ServerToolDefinition,
+  matCtx: ToolMaterializeContext,
+): Tool {
+  // Two completely separate rendering paths — touching one cannot leak
+  // into the other (mirrors the buildSystemPrompt / buildLeanSystemPrompt
+  // split). Lean does NOT call platformNotes / descriptionFor /
+  // parametersFor; those are default-mode rendering hooks by design.
+  return matCtx.lean
+    ? materialiseLean(def)
+    : materialiseDefault(def, matCtx);
+}
+
+function materialiseLean(def: ServerToolDefinition): Tool {
+  return {
+    name: def.name,
+    description: def.leanDescription ?? def.description,
+    parameters: def.parameters,
+  };
+}
+
+function materialiseDefault(
   def: ServerToolDefinition,
   matCtx: ToolMaterializeContext,
 ): Tool {

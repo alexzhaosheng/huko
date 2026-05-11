@@ -41,8 +41,6 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  BUILTIN_CURRENT_MODEL,
-  BUILTIN_CURRENT_PROVIDER,
   BUILTIN_MODELS,
   BUILTIN_PROVIDERS,
 } from "./builtin-providers.js";
@@ -67,11 +65,13 @@ export type LoadInfraConfigOptions = {
 export function loadInfraConfig(opts: LoadInfraConfigOptions = {}): InfraConfig {
   const cwd = opts.cwd ?? process.cwd();
 
+  // Built-in layer ships the catalog (providers + models) but NO
+  // `currentProvider` / `currentModel` — a fresh install has no
+  // preselected vendor. The user picks via `huko setup` or the
+  // `provider current` / `model current` commands.
   const builtin: InfraConfigFile = {
     providers: BUILTIN_PROVIDERS,
     models: BUILTIN_MODELS,
-    currentProvider: BUILTIN_CURRENT_PROVIDER,
-    currentModel: BUILTIN_CURRENT_MODEL,
   };
   const global = readJsonFile(globalConfigPath());
   const project = readJsonFile(projectConfigPath(cwd));

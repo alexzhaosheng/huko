@@ -103,7 +103,7 @@ registerServerTool(
   {
     name: "message",
     description: BASE_DESCRIPTION,
-    parameters: buildSchema({ interactive: true }),
+    parameters: buildSchema({ interactive: true, lean: false }),
     parametersFor: (ctx) => buildSchema(ctx),
     descriptionFor: (ctx) => (ctx.interactive ? undefined : NON_INTERACTIVE_NOTE),
     dangerLevel: "safe",

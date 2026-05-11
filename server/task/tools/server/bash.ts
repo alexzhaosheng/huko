@@ -431,28 +431,33 @@ function actionView(s: Session): string {
 
 // ─── Tool registration ──────────────────────────────────────────────────────
 
+// Base description shared by all platforms. The `<platform>` block was
+// removed: platform-specific guidance now lives in `platformNotes` so
+// the registry appends it only on the runtime that needs it (Windows).
+// On Linux/Mac the LLM never sees Windows shell rules — direct -190 tok.
+//
+// Trims vs. the previous version (preserving behavior-shaping content):
+//   - `<limits>` head/tail mechanics + idle-reap dropped (engine detail)
+//   - `<sessions>` "auto-recreate fresh session" wording dropped (engine fallback)
+//   - `<actions>` `kill` SIGTERM/SIGKILL signal detail dropped
+//   - `<actions>` `view` description tightened
+//   - "use `write_file` to write a cross-platform script" advice dropped
+//     (rarely followed; tempts the LLM to produce stray script files)
 const DESCRIPTION =
   "Run a shell command in a persistent session. The session preserves cwd, env vars, and exported state across calls — `cd src` then later `pnpm test` works as expected.\n\n" +
   "<actions>\n" +
   "- `exec`  (default): run `command`, wait for it to finish, return output + exit code.\n" +
   "- `send`           : write raw `input` text to the session's stdin (e.g. answering an interactive prompt). The shell does NOT auto-add a newline — include `\\n` yourself if you want one.\n" +
   "- `wait`           : block until more output arrives or the process exits. Useful after `send`.\n" +
-  "- `kill`           : SIGTERM (then SIGKILL after 2s) the session's process.\n" +
-  "- `view`           : drain whatever's been buffered since the last call without running anything.\n" +
+  "- `kill`           : terminate the session's process.\n" +
+  "- `view`           : drain output buffered since the last call.\n" +
   "</actions>\n\n" +
   "<sessions>\n" +
-  "Sessions are keyed by `session` (default `\"default\"`). They're created on first use and reused after. If the shell exited, a follow-up exec will create a fresh session under the same name.\n" +
-  "Use a different `session` id to run commands in parallel (e.g. a long-running dev server in `\"dev\"` while you keep working in `\"default\"`).\n" +
+  "Sessions are keyed by `session` (default `\"default\"`). Use a different `session` id to run commands in parallel (e.g. a long-running dev server in `\"dev\"` while you keep working in `\"default\"`).\n" +
   "</sessions>\n\n" +
-  "<platform>\n" +
-  "- Linux/Mac: shell is $SHELL (or /bin/bash). Standard POSIX commands.\n" +
-  "- Windows  : shell is %COMSPEC% (cmd.exe by default). Use `dir` not `ls`, `type` not `cat`, `set` not `export`. PowerShell is reachable via `powershell -Command \"...\"`.\n" +
-  "- For non-trivial cross-platform commands, branch on `process.platform` from a tiny script you write with `write_file`, then run it.\n" +
-  "</platform>\n\n" +
   "<limits>\n" +
-  "- Output capped at 50 KiB per call (head 40 KiB + `[N chars omitted]` + tail 8 KiB).\n" +
+  "- Output is capped at ~50 KiB per call (larger output is truncated).\n" +
   "- `timeout_ms` (default 30000, max 300000) only bounds OUR wait — the command keeps running in the session if it doesn't finish in time. Use `wait` / `view` / `kill` to follow up.\n" +
-  "- Idle sessions are reaped after 30 minutes of no activity.\n" +
   "</limits>\n\n" +
   "<instructions>\n" +
   "- Prefer non-interactive flags (`--yes`, `--no-input`, `-y`). Interactive prompts that expect a TTY may hang — use `send` to feed responses, or pipe an answer in with `yes |`.\n" +
@@ -460,10 +465,38 @@ const DESCRIPTION =
   "- Use `cwd` ONLY when CREATING a new session. Once the shell is running, `cd` inside it instead.\n" +
   "</instructions>";
 
+// Windows-only addendum, appended by the registry when process.platform
+// === "win32". Linux/Mac runtimes never see this text. The pithy form
+// covers the four commands LLMs trip on most under cmd.exe.
+const WIN_PLATFORM_NOTE =
+  "<platform>\n" +
+  "- Shell is cmd.exe by default. Use `dir` not `ls`, `type` not `cat`, `set` not `export`.\n" +
+  "- PowerShell is reachable via `powershell -Command \"...\"`.\n" +
+  "</platform>";
+
+// Lean-mode replacement description. Drops advanced-workflow guidance
+// (sessions, send/wait/kill/view, output-cap mechanics, idle-reap) that
+// a single-shot lean user case won't exercise. Keeps the bits without
+// which the LLM reliably misfires: non-interactive flag preference,
+// sudo avoidance, Windows shell differences.
+//
+// Size: ~420 chars vs. ~3000 for the default — ~85% smaller.
+const LEAN_DESCRIPTION =
+  "Run a shell command and return its stdout/stderr + exit code. " +
+  "The shell session preserves cwd and env across calls, so `cd foo` then later `ls` works.\n\n" +
+  "- Default timeout 30s (configurable up to 300s via `timeout_ms`).\n" +
+  "- Output capped at ~50 KiB.\n" +
+  "- Prefer non-interactive flags (`-y`, `--yes`). Avoid sudo / interactive prompts — they hang.\n" +
+  "- On Windows the shell is cmd.exe: use `dir` / `type` / `set` instead of `ls` / `cat` / `export`.";
+
 registerServerTool(
   {
     name: "bash",
     description: DESCRIPTION,
+    leanDescription: LEAN_DESCRIPTION,
+    platformNotes: {
+      win32: WIN_PLATFORM_NOTE,
+    },
     parameters: {
       type: "object",
       properties: {

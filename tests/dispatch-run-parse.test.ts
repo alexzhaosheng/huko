@@ -201,6 +201,27 @@ describe("parseRunArgs — protocol enforcement", () => {
     if (r.kind !== "error") return;
     assert.match(r.message, /mutually exclusive/);
   });
+
+  it("parses --lean and emits lean: true", () => {
+    const r = parseRunArgs(["--lean", "--", "ls"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.lean, true);
+  });
+
+  it("rejects --lean combined with --role=<name>", () => {
+    const r = parseRunArgs(["--lean", "--role=coding", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /--lean and --role.*mutually exclusive/);
+  });
+
+  it("omits lean when --lean is absent", () => {
+    const r = parseRunArgs(["--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.lean, undefined);
+  });
 });
 
 // ─── help short-circuit ─────────────────────────────────────────────────────

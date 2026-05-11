@@ -65,6 +65,4 @@ export type {
 export {
   BUILTIN_PROVIDERS,
   BUILTIN_MODELS,
-  BUILTIN_CURRENT_PROVIDER,
-  BUILTIN_CURRENT_MODEL,
 } from "./builtin-providers.js";
