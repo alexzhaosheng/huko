@@ -60,7 +60,14 @@ export async function executeAndPersist(
   ctx: TaskContext,
   call: ToolCall,
 ): Promise<ToolExecOutcome> {
-  if (ctx.isAborted) return { kind: "aborted" };
+  if (ctx.isAborted) {
+    // Aborted before we could even start. The assistant message that
+    // emitted this tool_call is already in the DB; without a paired
+    // tool_result the next task on this session would 400 on strict
+    // providers (DeepSeek). See persistAbortedToolResult.
+    await persistAbortedToolResult(ctx, call);
+    return { kind: "aborted" };
+  }
 
   const tool = getTool(call.name);
 
@@ -100,6 +107,11 @@ export async function executeAndPersist(
   } catch (err: unknown) {
     if (isAbort(err)) {
       ctx.currentToolPromise = null;
+      // Aborted mid-execution — tool may have started but we have no
+      // result. Persist a synthetic tool_result so the assistant entry's
+      // tool_call_id is paired (otherwise future tasks 400 on strict
+      // providers).
+      await persistAbortedToolResult(ctx, coercedCall);
       return { kind: "aborted" };
     }
     outcome = { result: "", error: errorMessage(err) };
@@ -107,7 +119,10 @@ export async function executeAndPersist(
     ctx.currentToolPromise = null;
   }
 
-  if (ctx.isAborted) return { kind: "aborted" };
+  // NOTE: do NOT short-circuit on `ctx.isAborted` here. The tool already
+  // returned a real outcome; persisting it (below) keeps the conversation
+  // history valid. The loop's top-of-iteration abort check picks up the
+  // stop signal cleanly on the next pass.
 
   if (outcome.finalResult !== undefined && outcome.finalResult.length > 0) {
     ctx.finalResult = outcome.finalResult;
@@ -361,6 +376,40 @@ function refusalFromDecision(
     error: errorCode,
     metadata,
   };
+}
+
+/**
+ * Persist a synthetic `tool_result` entry for a call that never produced
+ * a real outcome — because the task was aborted before the tool ran, was
+ * interrupted mid-execution, or sat in `deferredCalls` when the loop
+ * terminated.
+ *
+ * The assistant message that emitted the `tool_call_id` is already in the
+ * persisted history at this point. Without a paired tool message, the
+ * next task on the same chat session would replay the broken history to
+ * the LLM and 400 on strict providers (DeepSeek: "tool_calls must be
+ * followed by tool messages...").
+ *
+ * Best-effort: errors during persistence are swallowed because we are
+ * already in a termination path; surfacing a secondary error would mask
+ * the real reason the task is ending.
+ */
+export async function persistAbortedToolResult(
+  ctx: TaskContext,
+  call: ToolCall,
+): Promise<void> {
+  try {
+    await persistResult(
+      ctx,
+      call,
+      "Error: tool execution was interrupted before completing. " +
+        "The result is unknown. (Synthesised by in-process abort recovery.)",
+      "interrupted",
+      { synthetic: true, source: "tool-execute:abort" },
+    );
+  } catch {
+    /* swallow — we're already aborting */
+  }
 }
 
 // ─── Internal: persistence ───────────────────────────────────────────────────

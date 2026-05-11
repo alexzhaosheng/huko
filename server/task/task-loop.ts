@@ -21,7 +21,7 @@
 import { EntryKind, TERMINAL_STATUSES, type TaskStatus } from "../../shared/types.js";
 import type { TaskContext } from "../engine/TaskContext.js";
 import { callLLM } from "./pipeline/llm-call.js";
-import { executeAndPersist } from "./pipeline/tool-execute.js";
+import { executeAndPersist, persistAbortedToolResult } from "./pipeline/tool-execute.js";
 import { manageContext } from "./pipeline/context-manage.js";
 import { getConfig } from "../config/index.js";
 
@@ -76,6 +76,8 @@ export class TaskLoop {
           ctx.taskStopped = true;
           break;
         }
+        // (drain logic for any leftover deferredCalls runs in `finally`
+        // below — every loop-exit path gets the same cleanup).
         if (ctx.iterationCount >= MAX_ITERATIONS) {
           await this.appendFailureNotice(`Reached the iteration limit (${MAX_ITERATIONS}).`);
           ctx.taskFailed = true;
@@ -95,7 +97,9 @@ export class TaskLoop {
             break;
           }
           if (outcome.kind === "ok" && outcome.shouldBreak) {
-            ctx.deferredCalls.length = 0;
+            // Sibling calls still in deferredCalls aren't going to run —
+            // the `finally` block below will persist synthetic results
+            // for them so the assistant tool_call ids stay paired.
             break;
           }
           await manageContext(ctx);
@@ -127,7 +131,7 @@ export class TaskLoop {
             break;
           }
           if (toolOutcome.kind === "ok" && toolOutcome.shouldBreak) {
-            ctx.deferredCalls.length = 0;
+            // See note above — finally cleans up unrun siblings.
             break;
           }
           await manageContext(ctx);
@@ -163,11 +167,17 @@ export class TaskLoop {
       ctx.taskFailed = true;
       const msg = errorMessage(err);
       await this.appendFailureNotice(`Task crashed: ${msg}`);
-      this.running = false;
       throw err;
+    } finally {
+      // Whatever the exit reason — graceful break, abort, exception —
+      // any tool_calls still queued in deferredCalls correspond to
+      // tool_call_ids in an already-persisted assistant message that
+      // will never get matched tool_results otherwise. Strict providers
+      // (DeepSeek) 400 the next task on this session if even one pair
+      // is missing. Synthesize results here so history stays valid.
+      await this.drainDeferredCalls();
+      this.running = false;
     }
-
-    this.running = false;
 
     const status = ctx.resolveStatus();
     if (!TERMINAL_STATUSES.has(status)) {
@@ -196,6 +206,19 @@ export class TaskLoop {
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * Persist a synthetic tool_result for every tool_call still queued in
+   * `deferredCalls` and clear the queue. Called from the run() finally
+   * block — see the long comment there for the providers-care-about-
+   * pairing rationale. Idempotent: empty queue is a no-op.
+   */
+  private async drainDeferredCalls(): Promise<void> {
+    while (this.ctx.deferredCalls.length > 0) {
+      const call = this.ctx.deferredCalls.shift()!;
+      await persistAbortedToolResult(this.ctx, call);
+    }
+  }
 
   private async appendFailureNotice(message: string): Promise<void> {
     try {
