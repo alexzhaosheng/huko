@@ -26,6 +26,43 @@ export type WaitForReplyCallback = (payload: {
   selectionType?: "single" | "multiple";
 }) => Promise<{ content: string; attachments?: UserAttachment[] }>;
 
+/**
+ * Frontend port for safety-policy decisions. Called by tool-execute
+ * when `evaluatePolicy()` returns `{ action: "prompt" }`. The frontend
+ * (CLI / daemon / IDE) shows the request to the operator and resolves
+ * the promise with their choice.
+ *
+ * `-y` / non-interactive runs SHOULD NOT install this port — the
+ * absence is the fail-closed signal (tool-execute treats `prompt` as
+ * deny when the port is undefined).
+ *
+ * Outcomes:
+ *   - `allow`               — execute this one call; rules unchanged
+ *   - `deny`                — refuse this one call; rules unchanged
+ *   - `allow_and_remember`  — execute, AND append the matched pattern
+ *                             to `safety.toolRules.<tool>.allow` in the
+ *                             global config so future calls auto-execute.
+ *                             Only valid when `matchedPattern` is set.
+ */
+export type SafetyDecisionRequest = {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  reason: string;
+  matchedPattern?: string;
+  matchedField?: string;
+  matchedValue?: string;
+};
+
+export type SafetyDecisionOutcome =
+  | { kind: "allow" }
+  | { kind: "deny" }
+  | { kind: "allow_and_remember" };
+
+export type RequestDecisionCallback = (
+  req: SafetyDecisionRequest,
+) => Promise<SafetyDecisionOutcome>;
+
 // ─── TaskContext ──────────────────────────────────────────────────────────────
 
 export type TaskContextOptions = SessionOwnership & {
@@ -45,6 +82,10 @@ export type TaskContextOptions = SessionOwnership & {
   executeTool?: WorkstationExecutor;
   requestApproval?: ApprovalCallback;
   waitForReply?: WaitForReplyCallback;
+  /** Safety-policy decision port. See SafetyDecisionRequest. */
+  requestDecision?: RequestDecisionCallback;
+  /** Where to persist "allow_and_remember" choices. */
+  cwd?: string;
   externalAbortSignal?: AbortSignal;
 };
 
@@ -72,6 +113,8 @@ export class TaskContext {
   readonly executeTool?: WorkstationExecutor;
   readonly requestApproval?: ApprovalCallback;
   readonly waitForReply?: WaitForReplyCallback;
+  readonly requestDecision?: RequestDecisionCallback;
+  readonly cwd?: string;
 
   readonly masterAbort: AbortController;
   currentLlmAbort: AbortController | null = null;
@@ -129,6 +172,8 @@ export class TaskContext {
     if (opts.executeTool !== undefined) this.executeTool = opts.executeTool;
     if (opts.requestApproval !== undefined) this.requestApproval = opts.requestApproval;
     if (opts.waitForReply !== undefined) this.waitForReply = opts.waitForReply;
+    if (opts.requestDecision !== undefined) this.requestDecision = opts.requestDecision;
+    if (opts.cwd !== undefined) this.cwd = opts.cwd;
 
     this.masterAbort = new AbortController();
     if (opts.externalAbortSignal) {

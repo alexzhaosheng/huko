@@ -34,6 +34,7 @@
 import type { TaskRunSummary } from "../../task/task-loop.js";
 import { bootstrap } from "../bootstrap.js";
 import { attachAskHandler } from "./run-ask.js";
+import { attachDecisionHandler } from "./run-decision.js";
 import { makeFormatter, type FormatName } from "../formatters/index.js";
 import {
   acquireProjectLock,
@@ -180,6 +181,14 @@ export async function runCommand(args: RunArgs): Promise<number> {
     format: args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl",
     getOrchestrator: () => ctx?.orchestrator ?? null,
   });
+  // Safety-policy decision events (parallel to ask_user). Only meaningful
+  // in interactive runs — `--no-interaction` runs don't get the port
+  // installed at the orchestrator either, so this handler stays silent.
+  const decisionHandle = attachDecisionHandler({
+    formatter,
+    format: args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl",
+    getOrchestrator: () => ctx?.orchestrator ?? null,
+  });
 
   try {
     ctx = await bootstrap(formatter, {
@@ -288,6 +297,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
   } finally {
     process.off("SIGINT", onSigint);
     askHandle.close();
+    decisionHandle.close();
     if (ctx) ctx.shutdown();
     if (lock) lock.release();
   }

@@ -211,6 +211,40 @@ export type AskUserReply = {
   selected?: string[];
 };
 
+/**
+ * Emitted when the safety-policy gate has decided to PROMPT the operator
+ * before running a tool call. The frontend (CLI / daemon / IDE) renders
+ * the request and resolves via `orchestrator.respondToDecision`.
+ *
+ * Distinct from `ask_user`:
+ *   - `ask_user`         : LLM initiated, free-text reply expected.
+ *   - `decision_required`: tool-pipeline initiated, ternary reply
+ *                          ("allow" | "deny" | "allow_and_remember").
+ *
+ * The reply shape lets the operator pick:
+ *   - `allow`              — execute this one call; rules unchanged
+ *   - `deny`               — refuse this one call; LLM gets `user_denied`
+ *   - `allow_and_remember` — execute, AND persist matchedPattern to
+ *                            the global `safety.toolRules.<tool>.allow`
+ *                            list so future calls auto-execute
+ */
+export type DecisionRequiredEvent = {
+  type: "decision_required";
+  taskId: number;
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  reason: string;
+  matchedPattern?: string;
+  matchedField?: string;
+  matchedValue?: string;
+  ts: number;
+};
+
+export type DecisionReply = {
+  kind: "allow" | "deny" | "allow_and_remember";
+};
+
 // ─── Summary type (for task_terminated) ──────────────────────────────────────
 
 /**
@@ -247,7 +281,8 @@ export type HukoEvent =
   | TaskTerminatedEvent
   | TaskErrorEvent
   | OrphanRecoveredEvent
-  | AskUserEvent;
+  | AskUserEvent
+  | DecisionRequiredEvent;
 
 // ─── Wire constants ──────────────────────────────────────────────────────────
 

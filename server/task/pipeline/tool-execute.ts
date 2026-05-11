@@ -24,10 +24,15 @@ import {
   isLegacyServerToolResult,
   isToolHandlerResult,
   type PostReminder,
+  type RegisteredTool,
+  type ServerToolDefinition,
   type ServerToolResult,
   type ToolAttachment,
   type ToolHandlerResult,
 } from "../tools/registry.js";
+import { evaluatePolicy, type PolicyDecision } from "../../safety/policy.js";
+import { appendRule } from "../../safety/persist.js";
+import { getConfig } from "../../config/index.js";
 
 // ─── Result type ──────────────────────────────────────────────────────────────
 
@@ -67,6 +72,25 @@ export async function executeAndPersist(
 
   const coerced = coerceArgs(call.name, call.arguments);
   const coercedCall: ToolCall = { ...call, arguments: coerced };
+
+  // ── Safety policy gate ─────────────────────────────────────────────────
+  // Evaluate per-tool rules + dangerLevel default BEFORE running the
+  // handler. If denied (by rule, by missing operator confirmation, or
+  // by operator's "no" reply), persist a `policy_denied` tool_result and
+  // skip handler execution entirely — the LLM gets to see the reason
+  // and can retry differently.
+  const refusal = await applyPolicyGate(ctx, coercedCall, tool.definition);
+  if (refusal !== null) {
+    const entryId = await persistResult(
+      ctx,
+      coercedCall,
+      refusal.content,
+      refusal.error,
+      { policy: refusal.metadata },
+    );
+    ctx.toolCallCount += 1;
+    return { kind: "error", entryId, error: refusal.error };
+  }
 
   let outcome: Normalised;
   const racePromise = raceAbort(ctx, () => runTool(ctx, coercedCall, tool));
@@ -190,6 +214,153 @@ function normaliseHandlerOutput(
     return n;
   }
   return { result: String(out), error: null };
+}
+
+// ─── Internal: safety policy gate ────────────────────────────────────────────
+
+type Refusal = {
+  content: string;
+  error: string;
+  metadata: Record<string, unknown>;
+};
+
+/**
+ * Evaluate the safety policy for this call and decide whether to let
+ * the handler run. Returns `null` on go-ahead, or a `Refusal` envelope
+ * to be persisted as the tool_result when denied.
+ *
+ * Flow:
+ *   1. evaluatePolicy() — pure decision from rules + dangerLevel.
+ *   2. "auto" → null (run handler).
+ *   3. "deny" → refusal envelope.
+ *   4. "prompt":
+ *        a. No requestDecision port (non-interactive run): refusal
+ *           (fail-closed; see PRINCIPLES in safety/types).
+ *        b. Port present: invoke it, route the operator's choice:
+ *           - allow              → null
+ *           - deny               → refusal
+ *           - allow_and_remember → append matched pattern to global
+ *             allow list, then null. Persist errors are non-fatal —
+ *             log to stderr and proceed.
+ */
+async function applyPolicyGate(
+  ctx: TaskContext,
+  call: ToolCall,
+  def: ServerToolDefinition,
+): Promise<Refusal | null> {
+  const dangerLevel = def.dangerLevel ?? "safe";
+  const decision: PolicyDecision = evaluatePolicy({
+    toolName: call.name,
+    args: call.arguments,
+    dangerLevel,
+    safety: getConfig().safety,
+  });
+
+  if (decision.action === "auto") return null;
+
+  if (decision.action === "deny") {
+    return refusalFromDecision(decision, "policy_denied");
+  }
+
+  // decision.action === "prompt"
+  if (!ctx.requestDecision) {
+    // Non-interactive run: fail-closed. Don't ask, don't run.
+    return refusalFromDecision(
+      decision,
+      "policy_denied_non_interactive",
+      "Tool call would require confirmation but no operator is available " +
+        "(non-interactive run). To proceed in CI, either remove this " +
+        "requireConfirm rule or add an explicit `allow` pattern.",
+    );
+  }
+
+  let outcome;
+  try {
+    outcome = await ctx.requestDecision({
+      toolCallId: call.id,
+      toolName: call.name,
+      args: call.arguments,
+      reason: decision.reason ?? "",
+      ...(decision.matchedPattern !== undefined
+        ? { matchedPattern: decision.matchedPattern }
+        : {}),
+      ...(decision.matchedField !== undefined
+        ? { matchedField: decision.matchedField }
+        : {}),
+      ...(decision.matchedValue !== undefined
+        ? { matchedValue: decision.matchedValue }
+        : {}),
+    });
+  } catch (err) {
+    // Frontend died / aborted while awaiting input — treat as deny.
+    return refusalFromDecision(
+      decision,
+      "policy_denied_decision_failed",
+      `Confirmation port failed: ${errorMessage(err)}`,
+    );
+  }
+
+  if (outcome.kind === "deny") {
+    return refusalFromDecision(decision, "user_denied", "Operator declined.");
+  }
+
+  if (outcome.kind === "allow_and_remember") {
+    // Persist the matched pattern as a global allow rule. Best-effort —
+    // on disk error, still let the call proceed. The operator already
+    // approved this one; we don't want to ALSO fail the call because
+    // of a flaky write.
+    if (decision.matchedPattern !== undefined && ctx.cwd !== undefined) {
+      try {
+        appendRule(
+          "global",
+          ctx.cwd,
+          call.name,
+          "allow",
+          decision.matchedPattern,
+        );
+      } catch (err) {
+        process.stderr.write(
+          `huko: failed to persist "always allow" rule: ${errorMessage(err)}\n`,
+        );
+      }
+    }
+  }
+
+  return null;
+}
+
+function refusalFromDecision(
+  decision: PolicyDecision,
+  errorCode: string,
+  extraExplanation?: string,
+): Refusal {
+  // Build a verbose content string the LLM can act on — the rule, the
+  // matched field/value, and a human-readable next-step hint.
+  const parts: string[] = [];
+  parts.push(`Refused by safety policy: ${errorCode}.`);
+  if (decision.action !== "auto" && decision.reason) {
+    parts.push(`Reason: ${decision.reason}.`);
+  }
+  if (decision.action !== "auto" && decision.matchedValue !== undefined) {
+    parts.push(`Matched value: \`${decision.matchedValue}\`.`);
+  }
+  if (extraExplanation) parts.push(extraExplanation);
+
+  const metadata: Record<string, unknown> = {
+    decision: decision.action,
+    source: decision.action !== "auto" ? decision.source : undefined,
+  };
+  if (decision.action !== "auto") {
+    if (decision.reason) metadata["reason"] = decision.reason;
+    if (decision.matchedPattern !== undefined) metadata["pattern"] = decision.matchedPattern;
+    if (decision.matchedField !== undefined) metadata["field"] = decision.matchedField;
+  }
+
+  return {
+    content: parts.join(" "),
+    error: errorCode,
+    metadata,
+  };
 }
 
 // ─── Internal: persistence ───────────────────────────────────────────────────

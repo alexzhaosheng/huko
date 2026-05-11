@@ -25,6 +25,7 @@ import type { ResolvedModel } from "../config/infra-config-types.js";
 import type { TaskSummary } from "../../shared/events.js";
 import { buildSystemPrompt } from "./build-system-prompt.js";
 import { buildLeanSystemPrompt } from "./build-lean-system-prompt.js";
+import type { RequestDecisionCallback } from "../engine/TaskContext.js";
 import { recoverOrphans, type RecoveryReport } from "../task/resume.js";
 import { detectWorkingLanguage } from "../task/language-reminder.js";
 import { estimateContextWindow } from "../core/llm/model-context-window.js";
@@ -81,6 +82,19 @@ export class TaskOrchestrator {
     }
   >();
 
+  // Parallel to askResolvers, but for safety-policy decisions: the tool
+  // pipeline (NOT the LLM) is the one waiting. Different response shape
+  // (y/n/a, not free text) and different lifecycle (per-tool-call, not
+  // per-message-ask), so it gets its own map.
+  private readonly decisionResolvers = new Map<
+    string,
+    {
+      taskId: number;
+      resolve: (outcome: { kind: "allow" | "deny" | "allow_and_remember" }) => void;
+      reject: (err: Error) => void;
+    }
+  >();
+
   constructor(opts: OrchestratorOptions) {
     this.session = opts.session;
     this.emitterFactory = opts.emitterFactory;
@@ -131,7 +145,9 @@ export class TaskOrchestrator {
   stop(taskId: number): boolean {
     const loop = this.liveLoops.get(taskId);
     if (!loop) return false;
-    this.abortAsksForTask(taskId, new Error("Task stopped while waiting for user reply"));
+    const err = new Error("Task stopped while waiting for user reply");
+    this.abortAsksForTask(taskId, err);
+    this.abortDecisionsForTask(taskId, err);
     loop.stop();
     return true;
   }
@@ -147,8 +163,27 @@ export class TaskOrchestrator {
     return true;
   }
 
+  /** Frontend pushes the operator's y/n/a here. Pairs with requestDecision. */
+  respondToDecision(
+    toolCallId: string,
+    outcome: { kind: "allow" | "deny" | "allow_and_remember" },
+  ): boolean {
+    const r = this.decisionResolvers.get(toolCallId);
+    if (!r) return false;
+    this.decisionResolvers.delete(toolCallId);
+    r.resolve(outcome);
+    return true;
+  }
+
   pendingAsks(): Array<{ toolCallId: string; taskId: number }> {
     return [...this.askResolvers.entries()].map(([toolCallId, v]) => ({
+      toolCallId,
+      taskId: v.taskId,
+    }));
+  }
+
+  pendingDecisions(): Array<{ toolCallId: string; taskId: number }> {
+    return [...this.decisionResolvers.entries()].map(([toolCallId, v]) => ({
       toolCallId,
       taskId: v.taskId,
     }));
@@ -158,6 +193,14 @@ export class TaskOrchestrator {
     for (const [toolCallId, r] of this.askResolvers) {
       if (r.taskId !== taskId) continue;
       this.askResolvers.delete(toolCallId);
+      r.reject(err);
+    }
+  }
+
+  private abortDecisionsForTask(taskId: number, err: Error): void {
+    for (const [toolCallId, r] of this.decisionResolvers) {
+      if (r.taskId !== taskId) continue;
+      this.decisionResolvers.delete(toolCallId);
       r.reject(err);
     }
   }
@@ -322,6 +365,42 @@ export class TaskOrchestrator {
         }
       };
 
+    // Safety-policy decision port. Only installed in INTERACTIVE runs —
+    // its absence is the fail-closed signal that tool-execute uses to
+    // turn `prompt` decisions into deny when -y / non-interactive.
+    const decisionResolvers = this.decisionResolvers;
+    const requestDecision: RequestDecisionCallback | undefined = (input.interactive ?? true)
+      ? (async (req) => {
+          await sessionPersistence.tasks.update(taskId, { status: "waiting_for_reply" });
+          sessionContext.emit({
+            type: "decision_required",
+            taskId,
+            toolCallId: req.toolCallId,
+            toolName: req.toolName,
+            args: req.args,
+            reason: req.reason,
+            ...(req.matchedPattern !== undefined ? { matchedPattern: req.matchedPattern } : {}),
+            ...(req.matchedField !== undefined ? { matchedField: req.matchedField } : {}),
+            ...(req.matchedValue !== undefined ? { matchedValue: req.matchedValue } : {}),
+            ts: Date.now(),
+          });
+          try {
+            return await new Promise<{
+              kind: "allow" | "deny" | "allow_and_remember";
+            }>((resolve, reject) => {
+              decisionResolvers.set(req.toolCallId, { taskId, resolve, reject });
+            });
+          } finally {
+            decisionResolvers.delete(req.toolCallId);
+            try {
+              await sessionPersistence.tasks.update(taskId, { status: "running" });
+            } catch {
+              /* already terminal — ignore */
+            }
+          }
+        })
+      : undefined;
+
     const taskContext = new TaskContext({
       taskId,
       ...sessionOwnership,
@@ -337,6 +416,8 @@ export class TaskOrchestrator {
       systemPrompt,
       sessionContext,
       waitForReply,
+      cwd,
+      ...(requestDecision !== undefined ? { requestDecision } : {}),
     });
 
     taskContext.workingLanguage = workingLanguage;

@@ -116,7 +116,7 @@ export function getToolPolicy(toolName: string): ToolPolicyMeta {
 
 // ─── Internal registry shape ──────────────────────────────────────────────────
 
-type RegisteredTool =
+export type RegisteredTool =
   | { kind: "server"; definition: ServerToolDefinition; handler: ServerToolHandler }
   | { kind: "workstation"; definition: WorkstationToolDefinition };
 
@@ -250,6 +250,17 @@ function materialiseDefault(
 /** All registered tool names. Useful for diagnostics. */
 export function listToolNames(): string[] {
   return [...registry.keys()];
+}
+
+/**
+ * Heuristic: a tool is "writable" (i.e. has external-facing side effects
+ * worth gating with a safety prompt) if its dangerLevel is moderate or
+ * dangerous. Safe tools (read_file / list_dir / grep / glob / web_fetch /
+ * web_search) fall through to byDangerLevel.safe and don't need rule stubs
+ * in the safety scaffold.
+ */
+export function isWritableTool(def: ServerToolDefinition): boolean {
+  return def.dangerLevel === "moderate" || def.dangerLevel === "dangerous";
 }
 
 /**

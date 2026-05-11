@@ -14,6 +14,7 @@ import { dispatchRun } from "./dispatch/run.js";
 import { dispatchSessions } from "./dispatch/sessions.js";
 import { dispatchInfo } from "./dispatch/info.js";
 import { dispatchSetup } from "./dispatch/setup.js";
+import { dispatchSafety } from "./dispatch/safety.js";
 import { CliExitError, usage } from "./dispatch/shared.js";
 
 type Dispatcher = (rest: string[]) => Promise<number>;
@@ -28,6 +29,7 @@ const DISPATCH: Record<string, Dispatcher> = {
   info: dispatchInfo,
   setup: dispatchSetup,
   debug: dispatchDebug,
+  safety: dispatchSafety,
 };
 
 async function main(): Promise<number> {

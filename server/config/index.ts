@@ -34,6 +34,8 @@ export {
   DEFAULT_CONFIG,
   type HukoConfig,
   type ConfigSourceLayer,
+  type SafetyAction,
+  type ToolSafetyRules,
 } from "./types.js";
 
 // ── Writers (path-based set/get/unset) ──────────────────────────────────────

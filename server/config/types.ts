@@ -4,6 +4,23 @@
  * The single typed schema for huko's configuration.
  */
 
+// ─── Safety policy primitives ───────────────────────────────────────────────
+
+export type SafetyAction = "auto" | "prompt" | "deny";
+
+export type ToolSafetyRules = {
+  /** Patterns that — if matched — refuse the call before the handler runs. */
+  deny?: string[];
+  /**
+   * Patterns that — if matched — bypass `requireConfirm` and the
+   * dangerLevel default. `deny` still wins. Populated by the operator
+   * picking "always allow" at a confirmation prompt.
+   */
+  allow?: string[];
+  /** Patterns that — if matched — pause execution and ask the operator y/n. */
+  requireConfirm?: string[];
+};
+
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
 export type HukoConfig = {
@@ -52,6 +69,44 @@ export type HukoConfig = {
     };
   };
 
+  /**
+   * Per-tool safety policy. Layered on top of each tool's intrinsic
+   * `dangerLevel` ("safe" | "moderate" | "dangerous"). The evaluator
+   * lives in `server/safety/policy.ts` and runs BEFORE the tool handler
+   * in `server/task/pipeline/tool-execute.ts`.
+   *
+   * Precedence (per call):
+   *   1. `toolRules[name].deny` pattern matches  → deny (returned to LLM)
+   *   2. `toolRules[name].allow` pattern matches → auto (skip prompt)
+   *   3. `toolRules[name].requireConfirm` match  → prompt the operator
+   *   4. fallback: `byDangerLevel[<tool's level>]`
+   *
+   * Pattern syntax:
+   *   - Default: literal-prefix match against the relevant argument
+   *     (e.g. bash matches `command`; write_file matches `path`).
+   *   - `re:<regex>`: ECMAScript regex. Compile errors warn + skip.
+   *
+   * Layered merge:
+   *   - `byDangerLevel.*`: project > global > default (replace).
+   *   - `toolRules.<tool>.{deny,allow,requireConfirm}`: union across
+   *     layers (additive — project never relaxes global constraints
+   *     unintentionally). This is the loader's only array-merge
+   *     exception; documented in `server/config/loader.ts`.
+   *
+   * Non-interactive runs (`-y` / HUKO_NON_INTERACTIVE=1): if a
+   * `prompt` decision would fire but no `requestDecision` port is
+   * installed, the call is denied (fail-closed). The LLM sees a clear
+   * `policy_denied` tool_result naming the matched rule.
+   */
+  safety: {
+    byDangerLevel: {
+      safe: SafetyAction;
+      moderate: SafetyAction;
+      dangerous: SafetyAction;
+    };
+    toolRules: Record<string, ToolSafetyRules>;
+  };
+
   cli: {
     format: "text" | "jsonl" | "json";
   };
@@ -93,6 +148,19 @@ export const DEFAULT_CONFIG: HukoConfig = {
   daemon: {
     port: 3000,
     host: "127.0.0.1",
+  },
+  safety: {
+    byDangerLevel: {
+      // Read-only ops auto-execute; write/exec ops auto-execute by
+      // default too — the new safety layer is opt-in. Users who want
+      // confirmation for write/exec set `moderate: "prompt"`.
+      safe: "auto",
+      moderate: "auto",
+      // `dangerous` exists for tools that should always pause unless
+      // explicitly bypassed (currently no tool ships at this level).
+      dangerous: "prompt",
+    },
+    toolRules: {},
   },
 };
 

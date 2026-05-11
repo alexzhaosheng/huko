@@ -103,10 +103,65 @@ export function loadConfig(options: LoadConfigOptions = {}): HukoConfig {
     result = deepMerge(result, layer.raw) as HukoConfig;
   }
 
+  // Override: `safety.toolRules.<tool>.{deny,allow,requireConfirm}` are
+  // UNION-merged across layers, not replaced. Safety constraints are
+  // additive — project never silently relaxes global. This is the
+  // loader's only array-merge exception; everywhere else, arrays in a
+  // higher layer replace arrays in a lower layer.
+  result = applyToolRulesUnion(result, layers);
+
   resolvedConfig = result;
   resolvedLayers = layers;
   loaded = true;
   return result;
+}
+
+function applyToolRulesUnion(merged: HukoConfig, layers: ConfigSourceLayer[]): HukoConfig {
+  // Collect contributions from EVERY layer (default included). Keys
+  // are `<toolName>::<bucket>`; values are de-duped string lists.
+  type Bucket = "deny" | "allow" | "requireConfirm";
+  const buckets: Bucket[] = ["deny", "allow", "requireConfirm"];
+  const accum = new Map<string, string[]>();
+
+  for (const layer of layers) {
+    const raw = layer.raw as { safety?: { toolRules?: Record<string, unknown> } };
+    const toolRules = raw.safety?.toolRules;
+    if (!toolRules || typeof toolRules !== "object") continue;
+    for (const [toolName, rawRules] of Object.entries(toolRules)) {
+      if (!rawRules || typeof rawRules !== "object") continue;
+      const rr = rawRules as Record<string, unknown>;
+      for (const bucket of buckets) {
+        const arr = rr[bucket];
+        if (!Array.isArray(arr)) continue;
+        const key = `${toolName}::${bucket}`;
+        const cur = accum.get(key) ?? [];
+        for (const p of arr) {
+          if (typeof p === "string" && p.length > 0 && !cur.includes(p)) {
+            cur.push(p);
+          }
+        }
+        accum.set(key, cur);
+      }
+    }
+  }
+
+  // Build the merged toolRules from the accumulator.
+  const merged_toolRules: Record<string, { deny?: string[]; allow?: string[]; requireConfirm?: string[] }> = {};
+  for (const [key, list] of accum) {
+    if (list.length === 0) continue;
+    const [toolName, bucket] = key.split("::") as [string, Bucket];
+    const entry = merged_toolRules[toolName] ?? {};
+    entry[bucket] = list;
+    merged_toolRules[toolName] = entry;
+  }
+
+  return {
+    ...merged,
+    safety: {
+      ...merged.safety,
+      toolRules: merged_toolRules,
+    },
+  };
 }
 
 /**
