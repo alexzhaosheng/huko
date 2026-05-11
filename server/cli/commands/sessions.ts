@@ -118,7 +118,7 @@ export async function sessionsDeleteCommand(args: SessionsDeleteArgs): Promise<n
     );
 
     // If we just deleted the active session, clear the pointer so the
-    // next `huko run` creates a fresh one.
+    // next `huko` creates a fresh one.
     if (getActiveSessionId(cwd) === args.id) {
       setActiveSessionId(cwd, null);
     }

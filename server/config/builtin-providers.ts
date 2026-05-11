@@ -2,7 +2,7 @@
  * server/config/builtin-providers.ts
  *
  * Built-in provider / model definitions shipped with huko. The "you
- * just installed huko, set one API key, type huko run" set.
+ * just installed huko, set one API key, type huko" set.
  *
  * Designed to overlap zero with user state — these are inert data
  * imported by `infra-config.ts` and merged into the runtime view.

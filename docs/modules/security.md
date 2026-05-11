@@ -86,7 +86,7 @@ mycorp       unset           MYCORP_API_KEY       Corp Gateway
 
 ## 默认 .gitignore
 
-`<cwd>/.huko/` 第一次被创建（首次 `huko run` / `huko sessions new` /
+`<cwd>/.huko/` 第一次被创建（首次 `huko` / `huko sessions new` /
 `huko provider add` ...）时，`SqliteSessionPersistence` 自动写入：
 
 ```

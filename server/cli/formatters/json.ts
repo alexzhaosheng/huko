@@ -8,7 +8,7 @@
  *   stderr: live diagnostics in plain text (so the user can see progress).
  *
  * Use case:
- *   const result = $(huko run --json "summarize this PDF")
+ *   const result = $(huko --json "summarize this PDF")
  *   echo $result | jq '.final'
  */
 

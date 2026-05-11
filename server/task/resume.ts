@@ -33,7 +33,7 @@
  *   - Reconstruct TaskContext and continue the loop. That requires
  *     re-resolving model config + tools + executors — for huko's
  *     CLI-first scope, the simpler "mark failed, repair pairing" is
- *     enough. The user can `huko run --session=N "..."` (when that
+ *     enough. The user can `huko --session=N "..."` (when that
  *     lands) to add a new task to the same session, and the synthetic
  *     tool_results will keep history valid.
  *   - Periodic re-scan (WeavesAI runs an OrphanRecovery health check

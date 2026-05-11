@@ -18,7 +18,7 @@ huko 的形态是 **kernel + 可插拔扩展**：
 ┌────────────────────────────────────────┐
 │         Frontends（消费方）           │
 │ ─────────────────────────────────────  │
-│   CLI 一次性    `huko run -- ...`      │
+│   CLI 一次性    `huko ...`      │
 │   CLI 后台      `huko start` + `send`  │
 │   CLI 交互      `huko chat`            │
 │   外部 web UI   独立包，订阅事件流     │
@@ -99,7 +99,7 @@ huko 的形态是 **kernel + 可插拔扩展**：
 
 - **流式是头等公民**——大模型场景下流式即体验。内核以 token-level 事件流传递。
 - **持久化默认 SQLite**（更普遍场景），但每个 frontend 可选 null（一次性）/ file（轻调试）/ 外挂。
-- **零落盘选项必须保留**——CLI `--no-persist` / `huko run` 默认 ephemeral 是核心 use case。
+- **零落盘选项必须保留**——CLI `--memory` ephemeral 模式是核心 use case。
 
 ### 代码约定
 
@@ -125,7 +125,6 @@ huko 的形态是 **kernel + 可插拔扩展**：
 | Task Loop | `server/task/task-loop.ts` | [task-loop](./modules/task-loop.md) | 主状态机 + interject + stop | ✅ |
 | Pipeline | `server/task/pipeline/` | [pipeline](./modules/pipeline.md) | llm-call + tool-execute + context-manage | ✅ + ⏳ stub |
 | Tools | `server/task/tools/` | [tools](./modules/tools.md) | 双注册 + ToolHandlerResult + coerceArgs + 策略；内置 message + web_fetch | ✅ |
-| Roles | `server/roles/` + `server/services/build-system-prompt.ts` | [roles](./modules/roles.md) | 角色/persona 系统：markdown role + buildSystemPrompt + CLAUDE.md 注入；默认 `coding` | ✅ |
 | Config | `server/config/` | [config](./modules/config.md) | 单一 config 子系统：DEFAULT_CONFIG + ~/.huko/config.json + project + env。所有 hardcoded tunable 收口于此 | ✅ |
 | Resume | `server/task/resume.ts` | [resume](./modules/resume.md) | orphan 恢复：mark failed + 合成 tool_result 保配对 + elided entries 过滤 | ✅ |
 | Persistence | `server/persistence/` | [persistence](./modules/persistence.md) | 两个接口：InfraPersistence (~/.huko/infra.db) + SessionPersistence (<cwd>/.huko/huko.db)；sqlite + memory 后端 | ✅ |
@@ -186,7 +185,7 @@ huko 的形态是 **kernel + 可插拔扩展**：
 
 按依赖顺序：
 
-**✅ 当前迭代全部完成**：Promise.race 审计、SystemReminder collector、配对约束、Role 系统、Compaction Turn-atomic、Resume 三种 checkpoint
+**✅ 当前迭代全部完成**：Promise.race 审计、SystemReminder collector、配对约束、Compaction Turn-atomic、Resume 三种 checkpoint
 
 **✅ 近期完成**
 
@@ -194,7 +193,7 @@ huko 的形态是 **kernel + 可插拔扩展**：
 - ~~Persistence 接口抽象 + Memory / SQLite 两个内置实现~~
 - ~~Orchestrator + routers 解耦 DB → 接 Persistence~~
 - ~~HukoEvent 语义事件协议正式化~~
-- ~~CLI 一次性模式 `huko run` (text / jsonl / json formatter)~~
+- ~~CLI 一次性模式 (text / jsonl / json formatter)~~
 - ~~FilePersistence (JSONL append-only event-sourced)~~（split 时退役）
 - ~~Tool 系统 v2：ToolHandlerResult / coerceArgs / display / dangerLevel / platformNotes~~
 - ~~首批内置 server tools：`message`（info+result）、`web_fetch`~~
@@ -205,7 +204,7 @@ huko 的形态是 **kernel + 可插拔扩展**：
 - ~~WeavesAI 设计研究 doc（[agent-design-notes.md](./agent-design-notes.md)）~~
 - ~~**Persistence 双拆**：`InfraPersistence` (~/.huko/infra.db) + `SessionPersistence` (<cwd>/.huko/huko.db)~~
 - ~~**API key 解耦**：`providers.api_key_ref` + `server/security/keys.ts` 三层查找~~
-- ~~**Active session per-cwd**：`<cwd>/.huko/state.json` + `huko run` 默认接续 + `sessions current/switch/new`~~
+- ~~**Active session per-cwd**：`<cwd>/.huko/state.json` + `huko` 默认接续 + `sessions current/switch/new`~~
 - ~~**Provider/Model/Keys CLI**：`huko provider/model/keys` 完整 CRUD~~
 - ~~`<cwd>/.huko/.gitignore` 自动生成（默认排除 huko.db / keys.json / state.json）~~
 - ~~删除 `HUKO_DB_PATH` env override（无消费者）~~

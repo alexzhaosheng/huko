@@ -7,8 +7,8 @@
  *   stderr: only fatal errors (the run command's onError path).
  *
  * Filter examples:
- *   huko run --format=jsonl "..." | jq 'select(.type == "tool_result")'
- *   huko run --format=jsonl "..." | jq -r 'select(.type == "assistant_content_delta") | .delta' | tr -d '\n'
+ *   huko --format=jsonl "..." | jq 'select(.type == "tool_result")'
+ *   huko --format=jsonl "..." | jq -r 'select(.type == "assistant_content_delta") | .delta' | tr -d '\n'
  *
  * `task_terminated` is the natural stream terminator. Run command exits
  * after that event (via the awaited completion promise).

@@ -32,7 +32,7 @@
  * users notice that a previous crash got cleaned up.
  *
  * Concurrency: bootstrap itself does NOT acquire the per-cwd lock —
- * that's the caller's concern (the CLI command). `huko run` acquires
+ * that's the caller's concern (the CLI command). `huko` acquires
  * the lock BEFORE calling bootstrap so orphan recovery is also under
  * the lock.
  */

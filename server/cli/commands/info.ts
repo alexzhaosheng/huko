@@ -18,7 +18,7 @@
  *
  * Provider/model LISTS aren't shown here — `huko provider list` and
  * `huko model list` already cover those. `info` is the focused view:
- * "what's actually going to run if I type `huko run`".
+ * "what's actually going to run if I type `huko`".
  *
  * Sections in text mode:
  *   1. Header   — cwd + scope label

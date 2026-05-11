@@ -14,7 +14,7 @@ server/cli/
   bootstrap.ts                公共：装配 Infra + Session persistence + Orchestrator
   state.ts                    `<cwd>/.huko/state.json` 读写（active session）
   commands/
-    run.ts                    `huko run`
+    run.ts                    `huko`
     sessions.ts               `huko sessions <verb>` (list/delete/current/switch/new)
     provider.ts               `huko provider <verb>` (list/add/remove)
     model.ts                  `huko model <verb>`    (list/add/remove/default)
@@ -42,7 +42,7 @@ resource 一个 dispatcher 函数（`dispatchSessions` / `dispatchProvider`
 
 | 命令 | 干啥 |
 |---|---|
-| `huko run [flags] -- <prompt>` | append 到 active session（没就建一个） |
+| `huko [flags] <prompt>` | append 到 active session（没就建一个） |
 | `huko sessions list` | 列本地项目 DB 的所有 chat sessions |
 | `huko sessions delete <id>` | 级联删除 session + tasks + entries |
 | `huko sessions current` | 显示当前 cwd 的 active session |
@@ -83,22 +83,21 @@ huko model add --provider=OpenRouter \
                --model-id=anthropic/claude-3.5-haiku --default
 
 # 4. 跑！
-huko run -- hello
+huko hello
 ```
 
 ---
 
 ## 命令细节
 
-### `huko run [flags] -- <prompt>`
+### `huko [flags] <prompt>`
 
-**Argv 协议**：在 `--` 之前只允许 flag（顺序自由），`--` 之后到行尾的所有内容**逐字成为 prompt**，不再做任何解析。这意味着：
+**Argv 协议**：Flag 放前面，第一个非 flag 的 positional 参数**开始 prompt**，其后所有内容逐字成为 prompt。`--` sentinel 可用于 prompt 以 `-` 开头的情况。这意味着：
 
-- `huko run --new -- explain --no-interaction works` — 合法，prompt 含 `--no-interaction`
-- `huko run hello` — 错误：positional 必须在 `--` 之后
-- `huko run --new` — 错误：缺少 prompt
-
-`--` 是 POSIX 标准的 "end of options" 标记，bash/zsh/PowerShell 都不会动它。
+- `huko --new explain --no-interaction works` — 合法，prompt 含 `--no-interaction`
+- `huko hello` — 合法，prompt = "hello"
+- `huko --new` — 错误：缺少 prompt
+- `huko -- -3 + 5 = ?` — 使用 `--` sentinel 处理以 `-` 开头的 prompt
 
 
 #### Session 选择规则
@@ -129,7 +128,7 @@ huko run -- hello
 | `jsonl` | 每个 HukoEvent 一行 JSON | 仅 fatal error |
 | `json` | task 完成时一份 JSON 文档（status / final / usage / counts） | 进度提示（tool calls / tool results） |
 
-**核心约定**：stdout 是"结果流"，stderr 是"诊断流"。`huko run -- ... > out.txt`
+**核心约定**：stdout 是"结果流"，stderr 是"诊断流"。`huko -- ... > out.txt`
 永远只捕获 stdout 的结果——shell pipe 友好。
 
 #### 选项
@@ -139,7 +138,7 @@ huko run -- hello
 --json | --jsonl           等价于 --format=json/jsonl
 --title=<text>             仅当**新建** session 时使用
 --memory                   Ephemeral 模式（见下）
---role=<name>              切 role（默认 coding）
+
 --new                      强制新 session 并切 active
 --session=<id>             一次性发到指定 session（active 不动）
 -h, --help                 帮助
@@ -148,7 +147,7 @@ huko run -- hello
 #### `--memory` ephemeral 模式
 
 ```bash
-huko run --memory "private question"
+huko --memory "private question"
 ```
 
 行为：
@@ -174,13 +173,13 @@ huko sessions list --jsonl
 ```
 
 只读 inspector，列出 `<cwd>/.huko/huko.db` 里的所有 chat sessions（**包括**
-所有 `huko run` 跑过留下的会话）。按 `createdAt` 倒序。
+所有 `huko` 跑过留下的会话）。按 `createdAt` 倒序。
 
 #### `sessions delete <id>`
 
 级联删 session + tasks + entries（cascade 在 SessionPersistence 实现）。
 **不交互式确认**——这是 single-user dev CLI。如果删的恰好是 active 指
-针，自动清掉指针，下次 `huko run` 会建新的。
+针，自动清掉指针，下次 `huko` 会建新的。
 
 #### `sessions current`
 
@@ -298,7 +297,7 @@ huko model add --provider=OpenRouter \
 **shell pipe 取干净结果**：
 
 ```bash
-result=$(huko run --json "Generate a haiku" | jq -r .final)
+result=$(huko --json "Generate a haiku" | jq -r .final)
 echo "$result"
 ```
 
@@ -307,7 +306,7 @@ echo "$result"
 ```bash
 #!/bin/sh
 diff=$(git diff --cached)
-verdict=$(huko run --memory --json "Review this diff for obvious bugs. Return YES if OK to commit, NO with reason otherwise.\n\n$diff")
+verdict=$(huko --memory --json "Review this diff for obvious bugs. Return YES if OK to commit, NO with reason otherwise.\n\n$diff")
 if echo "$verdict" | jq -r .final | grep -q '^NO'; then
   echo "$verdict" | jq -r .final
   exit 1
@@ -317,7 +316,7 @@ fi
 **CI 摘要**：
 
 ```bash
-huko run --memory "Summarize this CI log into 3 bullets, focus on failures" < build.log
+huko --memory "Summarize this CI log into 3 bullets, focus on failures" < build.log
 ```
 
 ---
@@ -374,7 +373,7 @@ verbs 真到 30+ 再考虑。
 
 ## 易踩的坑
 
-- **不要**期望 `huko run` 在 ephemeral 之外不修改 active session 指针——
+- **不要**期望 `huko` 在 ephemeral 之外不修改 active session 指针——
   默认行为就是写 `<cwd>/.huko/state.json`
 - **不要**手写 `apiKey: process.env["..."]` 在 demo / 测试代码里——用
   `apiKeyRef` 让 `resolveApiKey` 处理，统一行为
@@ -382,7 +381,7 @@ verbs 真到 30+ 再考虑。
   `--format=text`
 - **不要**让 daemon 和 CLI 同时写同一个 `huko.db`——读没问题（WAL 多读），
   并发写会等锁
-- **不要**`huko sessions delete` 当前 active session 后期望 `huko run`
+- **不要**`huko sessions delete` 当前 active session 后期望 `huko`
   提示——指针自动清掉，悄悄建新的（这是设计选择，避免堆积错误信息）
 
 ---
@@ -391,7 +390,7 @@ verbs 真到 30+ 再考虑。
 
 ```bash
 npx tsc --noEmit          # 类型检查
-huko run --memory "ping"  # 端到端冒烟（前提：env 里有 OPENROUTER_API_KEY 或 keys.json 配好）
+huko --memory "ping"  # 端到端冒烟（前提：env 里有 OPENROUTER_API_KEY 或 keys.json 配好）
 ```
 
 ---

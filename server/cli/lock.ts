@@ -1,16 +1,16 @@
 /**
  * server/cli/lock.ts
  *
- * Per-cwd advisory lock for `huko run`.
+ * Per-cwd advisory lock for the default action (fka `huko run`).
  *
- * Why: two `huko run` processes in the same directory would (a) both run
+ * Why: two `huko` processes in the same directory would (a) both run
  * orphan recovery on startup — duplicating synthetic tool_results — and
  * (b) interleave user-message / assistant-turn appends on the same
  * active session, scrambling the conversation.
  *
  * SQLite WAL handles raw write serialisation, so other commands
  * (`sessions list`, `provider add`, etc.) don't need this lock. Only
- * `huko run` does, because it holds long-lived state during the LLM
+ * `huko` does, because it holds long-lived state during the LLM
  * call.
  *
  * Lock file: `<cwd>/.huko/lock` containing JSON `{ pid, ts }`. Acquired

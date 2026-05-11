@@ -328,7 +328,7 @@ function printSummary(
       `      provider:      ${cyan(providerName, "stderr")}\n` +
       `      key ref:       ${apiKeyRef} (${keyTag})\n` +
       `      current model: ${cyan(ref, "stderr")}\n` +
-      "\n" + dim("Try it:  huko run -- hello", "stderr") + "\n",
+      "\n" + dim("Try it:  huko hello", "stderr") + "\n",
   );
 }
 

@@ -6,7 +6,7 @@
  * server/config/infra-config.ts).
  *
  * For:
- *   - `huko run --memory` (one-shot, no disk side effects)
+ *   - `huko --memory` (one-shot, no disk side effects)
  *   - Unit tests — hand-rolled fixtures, fast teardown
  *   - Sandboxes / read-only filesystems
  *

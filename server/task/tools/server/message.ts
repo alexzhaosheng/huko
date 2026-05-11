@@ -9,7 +9,7 @@
  *   - result — final deliverable; sets ctx.finalResult and ends the task
  *
  * `ask` mode requires the orchestrator to have wired
- * TaskContext.waitForReply. When the user runs `huko run --no-interaction`,
+ * TaskContext.waitForReply. When the user runs `huko --no-interaction`,
  * the registry materialises this tool's schema WITHOUT `ask` so the LLM
  * literally cannot request user input.
  */

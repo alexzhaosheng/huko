@@ -144,7 +144,7 @@ export function usage(exitCode: number = 3): never {
  * Walk argv pulling out --format / --json / --jsonl flags.
  *
  * Used by list-style subcommands (sessions list, provider list, model
- * list) that don't take a free-text prompt. The `huko run` parser does
+ * list) that don't take a free-text prompt. The `huko` parser does
  * NOT use this — it has its own strict sentinel-based parser in
  * dispatch/run.ts.
  */

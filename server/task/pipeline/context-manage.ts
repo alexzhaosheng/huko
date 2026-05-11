@@ -117,7 +117,7 @@ export async function manageContext(ctx: TaskContext): Promise<void> {
   // Collect the entryIds of every dropped message — stored in the
   // reminder's metadata so future session-continue / resume code can
   // know to filter them out when re-hydrating llmContext from the
-  // persistent log. Without this, a follow-up `huko run --session=N`
+  // persistent log. Without this, a follow-up `huko --session=N`
   // on the same session would re-load all the elided rows AND see the
   // "N turns elided" marker — self-contradictory and re-blows the
   // context window.

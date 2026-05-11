@@ -11,7 +11,7 @@
  * `import.meta.url`. That broke as soon as the code moved into a
  * bundle: the .sql files weren't shipped, and even if they had been
  * the relative path differed between dev and dist. The bug surfaced
- * as `huko run` failing with `no such table: tasks` in any directory
+ * as `huko` failing with `no such table: tasks` in any directory
  * a published / built huko was used in. Inlining the SQL eliminates
  * the failure mode entirely.
  *

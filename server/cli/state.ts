@@ -6,7 +6,7 @@
  * Lives at `<cwd>/.huko/state.json`:
  *   { "activeSessionId": 42 }
  *
- * The active session is the implicit target for `huko run -- ...` when
+ * The active session is the implicit target for `huko` when
  * neither `--session=<id>` nor `--new` is passed. Sets are written
  * atomically (write-then-rename) so a crashed process can't leave a
  * half-written JSON.
@@ -35,7 +35,7 @@ import {
 import * as path from "node:path";
 
 export type CwdState = {
-  /** The chat session every `huko run` defaults to. Cleared by `--new`. */
+  /** The chat session every `huko` defaults to. Cleared by `--new`. */
   activeSessionId?: number;
 };
 

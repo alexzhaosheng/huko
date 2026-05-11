@@ -8,7 +8,7 @@
 
 ## 设计目标
 
-**所有 hardcoded 参数集中收口**。操作者改一个 token 阈值 / 超时 / 默认 role
+**所有 hardcoded 参数集中收口**。操作者改一个 token 阈值 / 超时 / 默认 model
 不应该需要改源码。
 
 ---
@@ -55,9 +55,6 @@ type HukoConfig = {
     thresholdRatio: number;      // 默认 0.7（70% 模型 window 触发）
     targetRatio: number;         // 默认 0.5（压缩到 50%）
     charsPerToken: number;       // 默认 4
-  };
-  role: {
-    default: string;             // 默认 "coding"
   };
   tools: {
     webFetch: {
@@ -192,7 +189,7 @@ capability 的反面教训）。每加一个 config key 必须配一个 runtime 
   在函数体内调，运行时读
 - **不要**期望 config 改了能立刻生效——目前是 read-once，要重启
 - **不要**把敏感数据（API key）写进 config.json —— provider 配置走 SQLite
-  `providers` 表，用 `huko run --memory` 可以跨用户避免泄漏
+  `providers` 表，用 `huko --memory` 可以跨用户避免泄漏
 
 ---
 
