@@ -212,10 +212,38 @@ async function persistResult(
     taskId: ctx.taskId,
     kind: EntryKind.ToolResult,
     role: "tool",
-    content: error !== null ? `Error: ${error}` : result,
+    content: selectToolResultContent(result, error),
     toolCallId: call.id,
     metadata,
   });
+}
+
+/**
+ * Pick the string that goes on the persisted `tool_result` entry — the
+ * one the LLM sees in its conversation history.
+ *
+ * Tool handlers explicitly populate the `content` field with the message
+ * they want the LLM to see (e.g. "Error: edits[2].find must be a string.").
+ * The `error` field is a SHORT machine-readable code ("bad edit shape")
+ * meant for filtering / telemetry. Earlier code synthesized
+ * `Error: ${error}` for any failed call, which discarded the handler's
+ * diagnostic detail — the LLM would see "Error: bad edit shape" with no
+ * hint about which edit or which field.
+ *
+ * Rules:
+ *   - Non-empty `result` (the handler's content): always use it as-is.
+ *   - Empty `result` + non-null `error`: synthesize `Error: ${error}`
+ *     so the LLM at least sees the short code. Defensive — no current
+ *     handler returns empty content + error, but we tolerate it.
+ *   - Empty `result` + null `error`: return empty (a clean tool with
+ *     no output is a valid state).
+ *
+ * Exported for unit tests in tests/tool-execute-content.test.ts.
+ */
+export function selectToolResultContent(result: string, error: string | null): string {
+  if (result !== "") return result;
+  if (error !== null) return `Error: ${error}`;
+  return result;
 }
 
 // ─── Internal: abort race ────────────────────────────────────────────────────
