@@ -49,10 +49,13 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           break;
 
         case "assistant_started":
-          assistantStreaming = true;
+          // No-op — assistantStreaming flips on at the first real
+          // content_delta, so turns that emit only thinking + a
+          // message tool call don't print a stray trailing newline.
           break;
 
         case "assistant_content_delta":
+          assistantStreaming = true;
           process.stdout.write(event.delta);
           break;
 
@@ -69,6 +72,13 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           if (event.toolCalls && event.toolCalls.length > 0 && !printedToolCallsFor.has(event.entryId)) {
             printedToolCallsFor.add(event.entryId);
             for (const c of event.toolCalls) {
+              // `message` is the user-facing delivery channel — render
+              // its `text` as plaintext, NOT as a generic tool-call args
+              // dump. result→stdout (the "answer"), info→stderr (mid-
+              // task narration). The `← message: ok` ack is suppressed
+              // in tool_result below since the user already saw the text.
+              if (c.name === "message" && renderMessageCall(c.arguments)) continue;
+
               const argsStr = JSON.stringify(c.arguments);
               const collapsed =
                 verbose || argsStr.length <= TOOL_CALL_ARGS_MAX
@@ -82,6 +92,9 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           break;
 
         case "tool_result": {
+          // `message` text was already rendered at assistant_complete
+          // (see renderMessageCall). Suppress the redundant ack.
+          if (event.toolName === "message" && !event.error) break;
           if (event.error) {
             // Errors always shown — the LLM's recovery depends on them
             // and the operator wants to notice. Verbose adds the full
@@ -201,4 +214,31 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
 function extractReminderReason(content: string): string | null {
   const m = /<system_reminder\s+reason="([^"]+)"/.exec(content);
   return m ? m[1]! : null;
+}
+
+/**
+ * Render a `message` tool call as user-facing prose. Returns true when
+ * we recognised the shape and produced output, false otherwise (caller
+ * falls back to the generic tool-call display).
+ *
+ *   type=result → stdout (the answer; pipe-friendly)
+ *   type=info   → stderr (mid-task narration)
+ *   type=ask    → not handled here; ask_user event renders the prompt
+ */
+function renderMessageCall(args: unknown): boolean {
+  if (args === null || typeof args !== "object") return false;
+  const obj = args as { type?: unknown; text?: unknown };
+  const text = typeof obj.text === "string" ? obj.text : null;
+  const type = typeof obj.type === "string" ? obj.type : null;
+  if (text === null) return false;
+
+  if (type === "result") {
+    process.stdout.write(text + "\n");
+    return true;
+  }
+  if (type === "info") {
+    process.stderr.write(text + "\n");
+    return true;
+  }
+  return false;
 }
