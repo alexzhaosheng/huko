@@ -28,10 +28,18 @@
  *   - We append a sentinel marker to the user's command so we can tell
  *     when it finished AND what its exit code was. The marker line is
  *     stripped from the returned output.
- *   - `timeout_ms` only bounds how long WE wait. The command itself
- *     is NOT killed on timeout — it keeps running in the session, and
- *     a follow-up `wait` or `view` can collect the late output.
- *     `kill` is the only path that actually terminates the process.
+ *   - `timeout_ms` is an IDLE timeout — we return "still running" only
+ *     when no stdout/stderr has arrived for that long. Streaming
+ *     commands (nested huko, wget, build tools) keep resetting it via
+ *     `lastActivity` updates in the chunk handlers, so they don't
+ *     trip on slow-but-progressing work. A silent-and-stuck command
+ *     still trips at `idleMs`.
+ *   - `total_timeout_ms` (optional) is a hard ceiling on total elapsed
+ *     time, applied even when output is flowing. Off by default.
+ *   - On EITHER timeout the command itself is NOT killed — it keeps
+ *     running in the session, and a follow-up `wait` or `view` can
+ *     collect the late output. `kill` is the only path that actually
+ *     terminates the process.
  *
  * Output:
  *   - Capped at 50 KiB per call. Larger output is rendered as
@@ -286,12 +294,21 @@ function clampTimeout(raw: unknown): number {
   return Math.min(n, MAX_TIMEOUT_MS);
 }
 
+/** Like clampTimeout but returns undefined for unset / invalid (the "no cap" signal). */
+function clampOptionalTimeout(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return undefined;
+  return Math.min(n, MAX_TIMEOUT_MS);
+}
+
 // ─── Action: exec ────────────────────────────────────────────────────────────
 
 async function actionExec(
   s: Session,
   command: string,
-  timeoutMs: number,
+  idleMs: number,
+  totalMs: number | undefined,
 ): Promise<{ output: string; timedOut: boolean; exitCode: number | null }> {
   // Drain any leftover output from before this exec — we only want
   // output produced BY this command in the result.
@@ -317,6 +334,12 @@ async function actionExec(
 
   const markerRegex = new RegExp(`${marker}:(\\d+)`);
   const start = Date.now();
+  // Reset the idle clock to NOW so a command that's silent from the
+  // start still trips after `idleMs` (otherwise stale activity from
+  // before this exec would suppress the first idle window). Subsequent
+  // chunk arrivals keep updating `lastActivity` in the data handlers
+  // installed by createSession().
+  s.lastActivity = start;
 
   return new Promise((resolve) => {
     const tick = (): void => {
@@ -356,10 +379,32 @@ async function actionExec(
       }
       // Timed out → resolve with what we have. The command keeps
       // running; user can `wait` or `view` to pick up the rest.
-      if (Date.now() - start >= timeoutMs) {
+      //
+      // Two timeout flavours, checked in priority order:
+      //   1. IDLE — no stdout/stderr for `idleMs`. The default. A
+      //      streaming command (nested huko, wget, tsc --watch) keeps
+      //      resetting `lastActivity` in the data handlers and never
+      //      trips this. A silent command (LLM thinking, `sleep`,
+      //      blocked on stdin) does.
+      //   2. TOTAL (optional) — hard cap on elapsed time regardless of
+      //      output. Off by default; the operator opts in via
+      //      `total_timeout_ms` when they want a strict ceiling.
+      const now = Date.now();
+      if (now - s.lastActivity >= idleMs) {
         const { stdout, stderr } = drain(s);
         s.notifyChange = null;
-        const note = "[command timed out — still running in this session; use action=wait or action=view to collect more output, or action=kill to abort]";
+        const note = `[idle timeout — no output for ${idleMs}ms; command still running in this session; use action=wait or action=view to collect more output, or action=kill to abort]`;
+        resolve({
+          output: renderOutput(stdout + (stdout && !stdout.endsWith("\n") ? "\n" : "") + note, stderr, null),
+          timedOut: true,
+          exitCode: null,
+        });
+        return;
+      }
+      if (totalMs !== undefined && now - start >= totalMs) {
+        const { stdout, stderr } = drain(s);
+        s.notifyChange = null;
+        const note = `[total timeout — exceeded ${totalMs}ms; command still running in this session; use action=wait or action=view to collect more output, or action=kill to abort]`;
         resolve({
           output: renderOutput(stdout + (stdout && !stdout.endsWith("\n") ? "\n" : "") + note, stderr, null),
           timedOut: true,
@@ -465,7 +510,8 @@ const DESCRIPTION =
   "</sessions>\n\n" +
   "<limits>\n" +
   "- Output is capped at ~50 KiB per call (larger output is truncated).\n" +
-  "- `timeout_ms` (default 30000, max 300000) only bounds OUR wait — the command keeps running in the session if it doesn't finish in time. Use `wait` / `view` / `kill` to follow up.\n" +
+  "- `timeout_ms` (default 30000, max 300000) is an IDLE timeout — we return \"still running\" only when no stdout/stderr has arrived for that long. Streaming commands (nested agents, builds, downloads) keep resetting it; only silent-and-stuck commands trip. The command keeps running in the session either way; use `wait` / `view` / `kill` to follow up.\n" +
+  "- `total_timeout_ms` (optional, off by default) is a hard ceiling on TOTAL elapsed time even when output is flowing. Use only when you want a strict cap (e.g. capping a pathological build).\n" +
   "</limits>\n\n" +
   "<instructions>\n" +
   "- Prefer non-interactive flags (`--yes`, `--no-input`, `-y`). Interactive prompts that expect a TTY may hang — use `send` to feed responses, or pipe an answer in with `yes |`.\n" +
@@ -492,7 +538,7 @@ const WIN_PLATFORM_NOTE =
 const LEAN_DESCRIPTION =
   "Run a shell command and return its stdout/stderr + exit code. " +
   "The shell session preserves cwd and env across calls, so `cd foo` then later `ls` works.\n\n" +
-  "- Default timeout 30s (configurable up to 300s via `timeout_ms`).\n" +
+  "- `timeout_ms` (default 30s, max 300s) is an idle timeout — silent-for-that-long commands return \"still running\" but keep running in the session.\n" +
   "- Output capped at ~50 KiB.\n" +
   "- Prefer non-interactive flags (`-y`, `--yes`). Avoid sudo / interactive prompts — they hang.\n" +
   "- On Windows the shell is cmd.exe: use `dir` / `type` / `set` instead of `ls` / `cat` / `export`.";
@@ -532,7 +578,11 @@ registerServerTool(
         },
         timeout_ms: {
           type: "number",
-          description: `How long to wait before returning. Default ${DEFAULT_TIMEOUT_MS}ms, max ${MAX_TIMEOUT_MS}ms.`,
+          description: `IDLE timeout — return "still running" if no stdout/stderr arrives within this many ms. Default ${DEFAULT_TIMEOUT_MS}ms, max ${MAX_TIMEOUT_MS}ms. Streaming commands (nested huko, wget, build tools) keep resetting it; only silent-and-stuck commands trip.`,
+        },
+        total_timeout_ms: {
+          type: "number",
+          description: `Optional HARD CAP on total elapsed time, even when output is flowing. Off by default. Use only when you want a strict ceiling regardless of activity (e.g. capping a pathological build at 5 min).`,
         },
       },
       required: [],
@@ -547,6 +597,7 @@ registerServerTool(
         ? path.resolve(String(args["cwd"]))
         : undefined;
     const timeoutMs = clampTimeout(args["timeout_ms"]);
+    const totalTimeoutMs = clampOptionalTimeout(args["total_timeout_ms"]);
 
     switch (action) {
       case "exec": {
@@ -558,7 +609,7 @@ registerServerTool(
           };
         }
         const s = getOrCreateSession(sessionId, cwd);
-        const r = await actionExec(s, command, timeoutMs);
+        const r = await actionExec(s, command, timeoutMs, totalTimeoutMs);
         return {
           content: r.output,
           summary: `bash exec (session=${sessionId}${r.timedOut ? ", timeout" : `, exit=${r.exitCode}`})`,

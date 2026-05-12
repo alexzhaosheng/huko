@@ -191,18 +191,88 @@ describe("bash — kill", () => {
 describe("bash — timeout doesn't kill the command", () => {
   it("returns timeout notice; later wait collects the late output", { skip: isWin }, async () => {
     const sid = freshSession();
-    // Sleep 2 seconds then echo. timeout_ms=200 — we'll bail before
-    // it finishes. Use POSIX sleep since this test is POSIX-skipped.
+    // Sleep 1 second then echo. timeout_ms=200 (idle) — we'll bail
+    // because the command is silent for the whole 200ms window.
     const out = await invoke("bash", {
       action: "exec",
       command: "sleep 1 && echo finished_late",
       session: sid,
       timeout_ms: 200,
     });
-    assert.match(out.content, /timed out/);
+    assert.match(out.content, /still running in this session/);
     // Wait for the command to finally finish.
     const late = await invoke("bash", { action: "wait", session: sid, timeout_ms: 3000 });
     assert.match(late.content, /finished_late/);
+  });
+});
+
+// ─── idle timeout: streaming commands don't trip ───────────────────────────
+
+describe("bash — idle timeout (timeout_ms) is reset by output", () => {
+  it("a command that prints every 200ms with idle=600ms completes (NOT timed out)", { skip: isWin }, async () => {
+    const sid = freshSession();
+    // 5 lines, ~200ms apart. Total ~1000ms — would trip the OLD total-
+    // timeout semantic (timeout_ms=600), but never has 600ms of silence
+    // so the new idle semantic lets it finish.
+    const out = await invoke("bash", {
+      action: "exec",
+      command:
+        "for i in 1 2 3 4 5; do echo line_$i; sleep 0.2; done; echo done_marker",
+      session: sid,
+      timeout_ms: 600,
+    });
+    assert.doesNotMatch(out.content, /still running/, `unexpected timeout: ${out.content}`);
+    assert.match(out.content, /done_marker/);
+    assert.match(out.content, /line_1/);
+    assert.match(out.content, /line_5/);
+  });
+
+  it("a silent command (sleep) DOES trip the idle timeout", { skip: isWin }, async () => {
+    const sid = freshSession();
+    const out = await invoke("bash", {
+      action: "exec",
+      command: "sleep 2 && echo too_late",
+      session: sid,
+      timeout_ms: 300,
+    });
+    assert.match(out.content, /idle timeout/);
+    assert.match(out.content, /still running in this session/);
+  });
+});
+
+// ─── total timeout: hard cap independent of output flow ────────────────────
+
+describe("bash — total_timeout_ms (optional hard cap)", () => {
+  it("trips even when the command is actively producing output", { skip: isWin }, async () => {
+    const sid = freshSession();
+    // Stream forever (well, for 30s — way past total cap). idle is
+    // generous (5s), but total_timeout_ms=500 cuts in well before any
+    // idle window could.
+    const out = await invoke("bash", {
+      action: "exec",
+      command: "for i in $(seq 1 300); do echo tick_$i; sleep 0.05; done",
+      session: sid,
+      timeout_ms: 5000,
+      total_timeout_ms: 500,
+    });
+    assert.match(out.content, /total timeout/);
+    assert.match(out.content, /still running in this session/);
+    // Should have captured several ticks before the cap fired.
+    assert.match(out.content, /tick_/);
+  });
+
+  it("when undefined, no hard cap (streaming commands run to completion)", { skip: isWin }, async () => {
+    const sid = freshSession();
+    // No total cap; idle is enough for the 200ms gaps.
+    const out = await invoke("bash", {
+      action: "exec",
+      command: "for i in 1 2 3; do echo n_$i; sleep 0.2; done",
+      session: sid,
+      timeout_ms: 600,
+      // total_timeout_ms intentionally omitted
+    });
+    assert.doesNotMatch(out.content, /still running/);
+    assert.match(out.content, /n_3/);
   });
 });
 
