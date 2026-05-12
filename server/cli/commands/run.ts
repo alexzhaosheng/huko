@@ -457,7 +457,13 @@ export async function runCommand(args: RunArgs): Promise<number> {
  *     cache read      3,456
  *     cache write       789
  *     output          1,234
- *     total          17,824
+ *
+ * No "total" row by design — input / output / cache-read / cache-write
+ * have wildly different per-token cost on every provider, so summing
+ * them produces a number that's easy to misread. Operators reading
+ * the breakdown can do their own arithmetic if they need a number for
+ * a budget; the JSON formatter still emits `usage.totalTokens` for
+ * machine consumers that just want a rough size.
  *
  * Numbers are right-aligned to the widest value. The breakdown writes
  * to stderr so a piped `huko --json` consumer still gets clean
@@ -474,7 +480,6 @@ export function formatTokenBreakdown(summary: TaskRunSummary): string {
     rows.push(["cache write", summary.cacheCreationTokens]);
   }
   rows.push(["output", summary.completionTokens]);
-  rows.push(["total", summary.totalTokens]);
 
   const fmt = (n: number) => n.toLocaleString("en-US");
   const numWidth = Math.max(...rows.map(([, n]) => fmt(n).length));

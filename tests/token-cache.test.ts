@@ -211,16 +211,16 @@ function summary(overrides: Partial<TaskRunSummary> = {}): TaskRunSummary {
 }
 
 describe("formatTokenBreakdown", () => {
-  it("renders only input/output/total when no cache fields", () => {
+  it("renders only input/output when no cache fields (no `total` row)", () => {
     const out = formatTokenBreakdown(summary());
     const lines = out.split("\n");
     assert.equal(lines[0], "Token usage:");
-    // 3 data rows: input, output, total
-    assert.equal(lines.length, 4);
+    // 2 data rows: input, output. NO `total` — different per-token
+    // costs make the sum misleading.
+    assert.equal(lines.length, 3);
     assert.match(lines[1]!, /input\s+1,234/);
     assert.match(lines[2]!, /output\s+567/);
-    assert.match(lines[3]!, /total\s+1,801/);
-    // No cache rows
+    assert.ok(!out.includes("total"));
     assert.ok(!out.includes("cache read"));
     assert.ok(!out.includes("cache write"));
   });
@@ -231,10 +231,11 @@ describe("formatTokenBreakdown", () => {
     );
     assert.ok(out.includes("cache read"));
     assert.ok(!out.includes("cache write"));
+    assert.ok(!out.includes("total"));
     assert.match(out, /cache read\s+800/);
-    // Order: input, cache read, output, total
+    // Order: input, cache (read), output — first token of each row.
     const rows = out.split("\n").slice(1).map((l) => l.trim().split(/\s+/)[0]);
-    assert.deepEqual(rows, ["input", "cache", "output", "total"]);
+    assert.deepEqual(rows, ["input", "cache", "output"]);
   });
 
   it("inserts both cache rows when both fields populated", () => {
@@ -248,6 +249,7 @@ describe("formatTokenBreakdown", () => {
     );
     assert.ok(out.includes("cache read"));
     assert.ok(out.includes("cache write"));
+    assert.ok(!out.includes("total"));
     assert.match(out, /cache write\s+250/);
   });
 
@@ -256,12 +258,10 @@ describe("formatTokenBreakdown", () => {
       summary({
         promptTokens: 1_234_567,
         completionTokens: 8,
-        totalTokens: 1_234_575,
       }),
     );
     // Both numbers padded to the same width (the longest one).
     assert.ok(out.includes("1,234,567"));
-    assert.ok(out.includes("1,234,575"));
     // The 8 should be right-aligned (padded with spaces).
     assert.match(out, / {7}8/);
   });

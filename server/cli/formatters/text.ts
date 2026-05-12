@@ -203,9 +203,15 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
       // Could write a tiny "thinking..." indicator; skip for v1.
     },
     onSummary(summary) {
+      // The default summary intentionally omits a token count. A naked
+      // "total" misleads — input vs output vs cache-read vs cache-write
+      // tokens have wildly different per-token cost on every provider,
+      // so adding them up obscures more than it reveals. Operators who
+      // want the actual breakdown pass `--show-tokens` (rendered by
+      // formatTokenBreakdown in commands/run.ts).
       process.stderr.write(
         dimErr(
-          `\n[${summary.status}] ${summary.totalTokens} tokens · ${summary.iterationCount} iter · ${summary.toolCallCount} tools · ${summary.elapsedMs}ms`,
+          `\n[${summary.status}] ${summary.iterationCount} iter · ${summary.toolCallCount} tools · ${summary.elapsedMs}ms`,
         ) + "\n",
       );
     },
