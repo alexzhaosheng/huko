@@ -27,6 +27,7 @@ import {
   DEFAULT_CONFIG,
   type ConfigSourceLayer,
   type HukoConfig,
+  type ToolSafetyRules,
 } from "./types.js";
 
 // ─── Module-global cached config ─────────────────────────────────────────────
@@ -119,9 +120,13 @@ export function loadConfig(options: LoadConfigOptions = {}): HukoConfig {
 function applyToolRulesUnion(merged: HukoConfig, layers: ConfigSourceLayer[]): HukoConfig {
   // Collect contributions from EVERY layer (default included). Keys
   // are `<toolName>::<bucket>`; values are de-duped string lists.
+  // `disabled` is OR'd across layers — any layer setting `true` wins;
+  // `false` is treated as absent (the field can only assert disablement,
+  // never re-enable a lower layer's disable).
   type Bucket = "deny" | "allow" | "requireConfirm";
   const buckets: Bucket[] = ["deny", "allow", "requireConfirm"];
   const accum = new Map<string, string[]>();
+  const disabled = new Set<string>();
 
   for (const layer of layers) {
     const raw = layer.raw as { safety?: { toolRules?: Record<string, unknown> } };
@@ -130,6 +135,7 @@ function applyToolRulesUnion(merged: HukoConfig, layers: ConfigSourceLayer[]): H
     for (const [toolName, rawRules] of Object.entries(toolRules)) {
       if (!rawRules || typeof rawRules !== "object") continue;
       const rr = rawRules as Record<string, unknown>;
+      if (rr["disabled"] === true) disabled.add(toolName);
       for (const bucket of buckets) {
         const arr = rr[bucket];
         if (!Array.isArray(arr)) continue;
@@ -146,12 +152,19 @@ function applyToolRulesUnion(merged: HukoConfig, layers: ConfigSourceLayer[]): H
   }
 
   // Build the merged toolRules from the accumulator.
-  const merged_toolRules: Record<string, { deny?: string[]; allow?: string[]; requireConfirm?: string[] }> = {};
+  const merged_toolRules: Record<string, ToolSafetyRules> = {};
   for (const [key, list] of accum) {
     if (list.length === 0) continue;
     const [toolName, bucket] = key.split("::") as [string, Bucket];
     const entry = merged_toolRules[toolName] ?? {};
     entry[bucket] = list;
+    merged_toolRules[toolName] = entry;
+  }
+  // Apply disabled flags last — may add tools that have ONLY a disable
+  // and no rule lists.
+  for (const toolName of disabled) {
+    const entry = merged_toolRules[toolName] ?? {};
+    entry.disabled = true;
     merged_toolRules[toolName] = entry;
   }
 

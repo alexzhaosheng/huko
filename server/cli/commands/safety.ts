@@ -20,7 +20,11 @@ import {
   type RuleValidationIssue,
 } from "../../safety/policy.js";
 import {
+  appendRule,
   installSafetyTemplate,
+  removeRulePattern,
+  removeToolEntry,
+  setToolDisabled,
   type InstallResult,
 } from "../../safety/persist.js";
 import { getConfig, loadConfig } from "../../config/index.js";
@@ -29,9 +33,9 @@ import {
   type HukoConfig,
   type ToolSafetyRules,
 } from "../../config/index.js";
-import { getTool } from "../../task/tools/registry.js";
+import { getTool, listToolNames } from "../../task/tools/registry.js";
 import type { ToolDangerLevel } from "../../task/tools/registry.js";
-import { bold, cyan, dim, green, red, yellow } from "../colors.js";
+import { bold, cyan, dim, green, magenta, red, yellow } from "../colors.js";
 
 // ─── init ──────────────────────────────────────────────────────────────────
 
@@ -115,7 +119,8 @@ export async function safetyListCommand(): Promise<number> {
 }
 
 function printToolRules(name: string, rules: ToolSafetyRules): void {
-  process.stdout.write(`  ${cyan(name)}\n`);
+  const tag = rules.disabled === true ? "  " + red("[disabled]") : "";
+  process.stdout.write(`  ${cyan(name)}${tag}\n`);
   const fields = MATCH_FIELDS[name];
   if (fields) {
     process.stdout.write(dim(`    matches: ${fields.join(", ")}\n`));
@@ -176,12 +181,218 @@ export async function safetyCheckCommand(args: {
   }
 }
 
+// ─── tool (list) ───────────────────────────────────────────────────────────
+
+/**
+ * `huko safety tool` — list every registered tool with its current
+ * safety configuration: dangerLevel, [disabled] flag, count of
+ * deny/allow/require patterns. The detailed pattern list is `safety
+ * list`'s job; this view is the per-tool index.
+ */
+export async function safetyToolCommand(): Promise<number> {
+  try {
+    loadConfig({ cwd: process.cwd() });
+    const safety = getConfig().safety;
+
+    const names = listToolNames().sort();
+    if (names.length === 0) {
+      process.stdout.write(dim("(no tools registered — should not happen in a normal install)\n"));
+      return 0;
+    }
+
+    const colName = Math.max(...names.map((n) => n.length), 4);
+    const colDanger = "moderate".length;
+
+    process.stdout.write(
+      bold("=== Tools ===") + "\n" +
+      dim(`  Use \`huko safety enable|disable <tool>\` to toggle, ` +
+        `\`huko safety list\` for the rule details.\n\n`),
+    );
+
+    for (const name of names) {
+      const tool = getTool(name);
+      const dangerLevel: ToolDangerLevel = tool?.definition.dangerLevel ?? "safe";
+      const rules = safety.toolRules[name];
+      const isDisabled = rules?.disabled === true;
+      const denyN = rules?.deny?.length ?? 0;
+      const allowN = rules?.allow?.length ?? 0;
+      const reqN = rules?.requireConfirm?.length ?? 0;
+
+      const status = isDisabled
+        ? red("DISABLED".padEnd(8))
+        : dim("enabled ".padEnd(8));
+      const dangerCol = colorDanger(dangerLevel).padEnd(colDanger + 8);
+      const ruleSummary =
+        denyN === 0 && allowN === 0 && reqN === 0
+          ? dim("(no rules)")
+          : `${denyN} deny / ${allowN} allow / ${reqN} require`;
+
+      process.stdout.write(
+        `  ${cyan(name).padEnd(colName + 9)}  ${status}  ${dangerCol}  ${ruleSummary}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`huko: safety tool failed: ${describe(err)}\n`);
+    return 1;
+  }
+}
+
+// ─── enable / disable ──────────────────────────────────────────────────────
+
+export async function safetyEnableCommand(args: {
+  toolName: string;
+  scope: ConfigScope;
+}): Promise<number> {
+  return await toggleDisabled(args.toolName, args.scope, false);
+}
+
+export async function safetyDisableCommand(args: {
+  toolName: string;
+  scope: ConfigScope;
+}): Promise<number> {
+  // Sanity: the tool must exist. We don't FORBID writing safety rules
+  // for a tool that's not registered (e.g. a future workstation tool),
+  // but disabling something nonexistent is almost certainly a typo.
+  if (!getTool(args.toolName)) {
+    process.stderr.write(
+      red(`huko safety disable: unknown tool: ${args.toolName}\n`) +
+      dim(`       see \`huko safety tool\` for the list of registered tools\n`),
+    );
+    return 3;
+  }
+  return await toggleDisabled(args.toolName, args.scope, true);
+}
+
+async function toggleDisabled(
+  toolName: string,
+  scope: ConfigScope,
+  value: boolean,
+): Promise<number> {
+  try {
+    const result = setToolDisabled(scope, process.cwd(), toolName, value);
+    const where = scope === "global" ? "global" : "project";
+    if (result.kind === "noop") {
+      process.stderr.write(
+        yellow(`huko: ${toolName} was already ${value ? "disabled" : "enabled"} in ${where}\n`),
+      );
+      return 0;
+    }
+    const verb = value ? "disabled" : "enabled";
+    process.stderr.write(
+      green(`huko: ${verb} ${toolName} (${where}: ${result.filePath})\n`),
+    );
+    return 0;
+  } catch (err) {
+    process.stderr.write(`huko: safety ${value ? "disable" : "enable"} failed: ${describe(err)}\n`);
+    return 1;
+  }
+}
+
+// ─── deny / allow / require (add a regex pattern) ──────────────────────────
+
+export async function safetyAppendRuleCommand(args: {
+  toolName: string;
+  bucket: "deny" | "allow" | "requireConfirm";
+  pattern: string;
+  scope: ConfigScope;
+}): Promise<number> {
+  if (!getTool(args.toolName)) {
+    process.stderr.write(
+      red(`huko safety ${shortBucket(args.bucket)}: unknown tool: ${args.toolName}\n`) +
+      dim(`       see \`huko safety tool\` for the list\n`),
+    );
+    return 3;
+  }
+  try {
+    const result = appendRule(
+      args.scope,
+      process.cwd(),
+      args.toolName,
+      args.bucket,
+      args.pattern,
+    );
+    const where = args.scope === "global" ? "global" : "project";
+    if (result.kind === "already_present") {
+      process.stderr.write(
+        yellow(`huko: pattern already in ${args.toolName}.${args.bucket} (${where})\n`),
+      );
+      return 0;
+    }
+    process.stderr.write(
+      green(
+        `huko: added ${args.toolName}.${args.bucket} += ${args.pattern}  ` +
+        `(${where}: ${result.filePath})\n`,
+      ),
+    );
+    return 0;
+  } catch (err) {
+    process.stderr.write(`huko: safety ${shortBucket(args.bucket)} failed: ${describe(err)}\n`);
+    return 1;
+  }
+}
+
+function shortBucket(b: "deny" | "allow" | "requireConfirm"): string {
+  return b === "requireConfirm" ? "require" : b;
+}
+
+// ─── unset (remove a pattern, or the whole tool entry) ────────────────────
+
+export async function safetyUnsetCommand(args: {
+  toolName: string;
+  pattern?: string;
+  scope: ConfigScope;
+}): Promise<number> {
+  try {
+    const result = args.pattern !== undefined
+      ? removeRulePattern(args.scope, process.cwd(), args.toolName, args.pattern)
+      : removeToolEntry(args.scope, process.cwd(), args.toolName);
+    const where = args.scope === "global" ? "global" : "project";
+
+    if (result.kind === "not_found") {
+      const target = args.pattern !== undefined
+        ? `pattern ${args.pattern} in ${args.toolName}`
+        : `entry for ${args.toolName}`;
+      process.stderr.write(
+        yellow(`huko: no ${target} in ${where} (${result.filePath}); nothing to do\n`),
+      );
+      return 0;
+    }
+
+    if (result.kind === "removed") {
+      process.stderr.write(
+        green(
+          `huko: removed ${args.toolName}.${result.bucket} -= ${result.pattern}  ` +
+          `(${where}: ${result.filePath})\n`,
+        ),
+      );
+    } else {
+      process.stderr.write(
+        green(
+          `huko: removed all rules + disabled flag for ${args.toolName}  ` +
+          `(${where}: ${result.filePath})\n`,
+        ),
+      );
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`huko: safety unset failed: ${describe(err)}\n`);
+    return 1;
+  }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 function formatAction(a: "auto" | "deny" | "prompt"): string {
   if (a === "auto") return green(a);
   if (a === "deny") return red(a);
   return yellow(a);
+}
+
+function colorDanger(d: ToolDangerLevel): string {
+  if (d === "dangerous") return magenta(d);
+  if (d === "moderate") return yellow(d);
+  return dim(d);
 }
 
 function describe(err: unknown): string {

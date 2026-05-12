@@ -117,6 +117,182 @@ export function appendRule(
   return { kind: "appended", filePath };
 }
 
+// ─── Toggle disabled flag ──────────────────────────────────────────────────
+
+export type SetDisabledResult =
+  | { kind: "set"; filePath: string; previous: boolean | undefined }
+  | { kind: "noop"; filePath: string };
+
+/**
+ * Toggle `safety.toolRules.<toolName>.disabled`. Two operations:
+ *   - `value=true`  → set the field; no-op if already `true`
+ *   - `value=false` → REMOVE the field (we treat absent and `false`
+ *                     identically to keep the schema clean — see the
+ *                     `disabled?: boolean` doc comment in config/types.ts)
+ *
+ * If removing the disabled flag leaves the tool entry empty (no
+ * deny/allow/require either), the entry itself is removed. Same goes
+ * for the surrounding `toolRules` and `safety` objects when they
+ * become empty — keeps the on-disk JSON tidy.
+ */
+export function setToolDisabled(
+  scope: ConfigScope,
+  cwd: string,
+  toolName: string,
+  value: boolean,
+): SetDisabledResult {
+  const filePath = scopePath(scope, cwd);
+  const file = readLayerFile(filePath);
+
+  const safety = isPlainObject(file["safety"]) ? { ...file["safety"] } : {};
+  const toolRulesRaw = safety["toolRules"];
+  const toolRules = isPlainObject(toolRulesRaw) ? { ...toolRulesRaw } : {};
+  const toolEntryRaw = toolRules[toolName];
+  const toolEntry = isPlainObject(toolEntryRaw) ? { ...toolEntryRaw } : {};
+
+  const previous = typeof toolEntry["disabled"] === "boolean"
+    ? (toolEntry["disabled"] as boolean)
+    : undefined;
+
+  if (value === true) {
+    if (previous === true) return { kind: "noop", filePath };
+    toolEntry["disabled"] = true;
+  } else {
+    if (previous === undefined) return { kind: "noop", filePath };
+    delete toolEntry["disabled"];
+  }
+
+  // Tidy up empty levels left behind.
+  if (Object.keys(toolEntry).length === 0) {
+    delete toolRules[toolName];
+  } else {
+    toolRules[toolName] = toolEntry;
+  }
+  if (Object.keys(toolRules).length === 0) {
+    delete safety["toolRules"];
+  } else {
+    safety["toolRules"] = toolRules;
+  }
+
+  let next: Record<string, unknown>;
+  if (Object.keys(safety).length === 0) {
+    next = { ...file };
+    delete next["safety"];
+  } else {
+    next = { ...file, safety };
+  }
+  writeLayerFile(filePath, next);
+
+  return { kind: "set", filePath, previous };
+}
+
+// ─── Remove rule patterns / whole tool entries ────────────────────────────
+
+export type RemoveRuleResult =
+  | { kind: "removed"; filePath: string; bucket: Bucket; pattern: string }
+  | { kind: "removed_all"; filePath: string }
+  | { kind: "not_found"; filePath: string };
+
+type Bucket = "deny" | "allow" | "requireConfirm";
+const BUCKETS: Bucket[] = ["deny", "allow", "requireConfirm"];
+
+/**
+ * Remove a regex pattern from the first bucket that contains it.
+ * Returns `not_found` if no bucket has it.
+ *
+ * This is used by `huko safety unset <tool> <pattern>`. The user
+ * doesn't have to specify which bucket — we search deny → allow →
+ * requireConfirm in order. Same pattern in multiple buckets is rare
+ * (and would need explicit per-bucket commands to manage).
+ */
+export function removeRulePattern(
+  scope: ConfigScope,
+  cwd: string,
+  toolName: string,
+  pattern: string,
+): RemoveRuleResult {
+  const filePath = scopePath(scope, cwd);
+  const file = readLayerFile(filePath);
+
+  const safety = isPlainObject(file["safety"]) ? { ...file["safety"] } : {};
+  const toolRulesRaw = safety["toolRules"];
+  const toolRules = isPlainObject(toolRulesRaw) ? { ...toolRulesRaw } : {};
+  const toolEntryRaw = toolRules[toolName];
+  if (!isPlainObject(toolEntryRaw)) return { kind: "not_found", filePath };
+  const toolEntry = { ...toolEntryRaw };
+
+  let removedFrom: Bucket | undefined;
+  for (const bucket of BUCKETS) {
+    const arrRaw = toolEntry[bucket];
+    if (!Array.isArray(arrRaw)) continue;
+    const arr = arrRaw.filter((x): x is string => typeof x === "string");
+    if (!arr.includes(pattern)) continue;
+    const next = arr.filter((p) => p !== pattern);
+    if (next.length === 0) delete toolEntry[bucket];
+    else toolEntry[bucket] = next;
+    removedFrom = bucket;
+    break;
+  }
+
+  if (removedFrom === undefined) return { kind: "not_found", filePath };
+
+  // Tidy up.
+  if (Object.keys(toolEntry).length === 0) {
+    delete toolRules[toolName];
+  } else {
+    toolRules[toolName] = toolEntry;
+  }
+  if (Object.keys(toolRules).length === 0) delete safety["toolRules"];
+  else safety["toolRules"] = toolRules;
+
+  let nextFile: Record<string, unknown>;
+  if (Object.keys(safety).length === 0) {
+    nextFile = { ...file };
+    delete nextFile["safety"];
+  } else {
+    nextFile = { ...file, safety };
+  }
+  writeLayerFile(filePath, nextFile);
+
+  return { kind: "removed", filePath, bucket: removedFrom, pattern };
+}
+
+/**
+ * Remove the entire `toolRules.<toolName>` entry — wipes deny / allow /
+ * requireConfirm AND the `disabled` flag. Used by
+ * `huko safety unset <tool>` (no pattern arg).
+ */
+export function removeToolEntry(
+  scope: ConfigScope,
+  cwd: string,
+  toolName: string,
+): RemoveRuleResult {
+  const filePath = scopePath(scope, cwd);
+  const file = readLayerFile(filePath);
+
+  const safety = isPlainObject(file["safety"]) ? { ...file["safety"] } : {};
+  const toolRulesRaw = safety["toolRules"];
+  const toolRules = isPlainObject(toolRulesRaw) ? { ...toolRulesRaw } : {};
+  if (!isPlainObject(toolRules[toolName])) {
+    return { kind: "not_found", filePath };
+  }
+  delete toolRules[toolName];
+
+  if (Object.keys(toolRules).length === 0) delete safety["toolRules"];
+  else safety["toolRules"] = toolRules;
+
+  let nextFile: Record<string, unknown>;
+  if (Object.keys(safety).length === 0) {
+    nextFile = { ...file };
+    delete nextFile["safety"];
+  } else {
+    nextFile = { ...file, safety };
+  }
+  writeLayerFile(filePath, nextFile);
+
+  return { kind: "removed_all", filePath };
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {

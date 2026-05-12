@@ -9,6 +9,20 @@
 export type SafetyAction = "auto" | "prompt" | "deny";
 
 export type ToolSafetyRules = {
+  /**
+   * When true, the tool is removed from the LLM's tool surface entirely
+   * — both full and lean modes — as if it weren't registered. The LLM
+   * never sees the tool's name, schema, or description, so it can't try
+   * to call it. This is stronger than `deny` (which would let the LLM
+   * call the tool and then refuse at execution); use `disabled` when you
+   * want the capability genuinely absent rather than guarded.
+   *
+   * Layered: project layer's `disabled: true` overrides global. There's
+   * no way to "re-enable" from a lower layer if a higher one disables —
+   * remove the field, don't set it to `false`. (`disabled: false` is
+   * treated identically to absent for clarity.)
+   */
+  disabled?: boolean;
   /** Patterns that — if matched — refuse the call before the handler runs. */
   deny?: string[];
   /**
