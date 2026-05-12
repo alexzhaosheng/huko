@@ -39,6 +39,7 @@ import { dispatchInfo } from "./dispatch/info.js";
 import { dispatchSetup } from "./dispatch/setup.js";
 import { dispatchSafety } from "./dispatch/safety.js";
 import { CliExitError, usage } from "./dispatch/shared.js";
+import { stdinIsRegularFile } from "./commands/run.js";
 import { isLikelyPowerShell, formatPowerShellSentinelHint } from "./env-hints.js";
 
 type Dispatcher = (rest: string[]) => Promise<number>;
@@ -59,14 +60,15 @@ async function main(): Promise<number> {
   try {
     const argv = process.argv.slice(2);
 
-    // Bare `huko` with NO args:
-    //   - stdin is a TTY (interactive shell) → show usage. The operator
-    //     just typed `huko` to see what's available.
-    //   - stdin is piped/redirected             → fall through to the
-    //     prompt pipeline; runCommand will drain stdin and use it as
-    //     the prompt (`echo "hi" | huko`, `huko < prompt.txt`).
+    // Bare `huko` with NO args means "show me what huko does", whether
+    // typed at a terminal or invoked from a script / parent shell. The
+    // ONE exception is `huko < prompt.txt` — a regular-file FD on stdin
+    // is the unambiguous "drain this as my prompt" idiom, so we hand
+    // off to dispatchRun which will read the file. Pipes (echo … |
+    // huko) without args get usage too; to actually pipe a prompt the
+    // operator must opt in with `huko -`.
     if (argv.length === 0) {
-      if (process.stdin.isTTY) usage(0);
+      if (!stdinIsRegularFile()) usage(0);
       return await dispatchRun([]);
     }
 

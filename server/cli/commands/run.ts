@@ -155,8 +155,13 @@ async function readAllStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/** True when FD 0 is a regular file — i.e. the operator did `huko < prompt.txt`. */
-function stdinIsRegularFile(): boolean {
+/**
+ * True when FD 0 is a regular file — i.e. the operator did
+ * `huko < prompt.txt`. Exported because index.ts also needs to make
+ * the same TTY-vs-file-vs-pipe decision when deciding whether to
+ * print usage for the bare-`huko` (no args) case.
+ */
+export function stdinIsRegularFile(): boolean {
   try {
     return fstatSync(0).isFile();
   } catch {
