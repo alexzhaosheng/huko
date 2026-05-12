@@ -62,7 +62,7 @@
 
         <article class="feature">
           <h2><span class="section-mark">[04]</span> Tool-Level Security</h2>
-          <p class="tagline">Risk levels. Injection-resistant context. Now the real part: <strong>per-tool controls</strong> — <code>disable</code> a tool entirely (it never reaches the LLM's surface), or add <code>deny</code>/<code>allow</code>/<code>requireConfirm</code> regex matched against every parameter before the call leaves your machine. Control exactly what your agent can touch, down to the path and domain. Need more? <code>huko docker run</code>. Container. Zero side effects.</p>
+          <p class="tagline"><code>disable</code> tools from the LLM's surface. <code>deny</code> / <code>allow</code> / <code>requireConfirm</code> regex on every parameter. Control down to the path and domain. Container sandbox with <code>huko docker run</code>.</p>
           <pre class="terminal"><code><span class="pair"><span class="comment"># inspect the tool surface — what's available, what's restricted</span>
 <span class="command">huko safety tool</span></span>
 <span class="pair"><span class="comment"># take a tool off the LLM's menu entirely — it can't call what it can't see</span>
