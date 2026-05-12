@@ -59,6 +59,7 @@
 import { runCommand, type RunArgs } from "../commands/run.js";
 import type { FormatName } from "../formatters/index.js";
 import { usage } from "./shared.js";
+import { isLikelyPowerShell, formatPowerShellSentinelHint } from "../env-hints.js";
 
 // ─── Pure parser ────────────────────────────────────────────────────────────
 
@@ -269,8 +270,31 @@ export async function dispatchRun(rest: string[]): Promise<number> {
   const result = parseRunArgs(rest);
   if (result.kind === "help") usage(0);
   if (result.kind === "error") {
-    process.stderr.write(result.message);
+    let msg = result.message;
+    // PowerShell's legacy argument passing silently strips `--` before
+    // invoking external commands. Symptom: parser sees a bare positional
+    // that was supposed to be the prompt body. When that's the error AND
+    // we detect a PS env, append the three-option workaround menu. The
+    // sister case (PS stripping `--` AND argv landing at the top-level
+    // dispatcher's "unknown subcommand") is handled in index.ts.
+    if (isLikelyPowerShell() && isStrippedSentinelSymptom(msg)) {
+      msg += formatPowerShellSentinelHint();
+    }
+    process.stderr.write(msg);
     usage();
   }
   return await runCommand(result.args);
+}
+
+/**
+ * Does this parse-error message look like the symptom of a stripped `--`
+ * sentinel (PowerShell legacy mode)? Returns true for:
+ *   - "unexpected positional argument"  — bare token where the parser
+ *     expected a flag or sentinel, classic PS-strips-`--` outcome.
+ *
+ * Keeping this string-match local + narrow on purpose: the goal is "be
+ * helpful when the symptom matches", not "always nag PS users".
+ */
+function isStrippedSentinelSymptom(message: string): boolean {
+  return message.includes("unexpected positional argument");
 }
