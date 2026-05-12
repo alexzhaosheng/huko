@@ -10,6 +10,7 @@
 
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
+import * as path from "node:path";
 
 import { parseDockerRun } from "../server/cli/dispatch/docker.js";
 import {
@@ -157,12 +158,18 @@ describe("buildDockerArgs", () => {
 
   it("produces the canonical argv with -i (no TTY)", () => {
     const args = _buildDockerArgsForTest("img:1", ["--", "hello"], baseOpts);
+    // The home-mount path goes through `path.join`, which on Windows
+    // emits backslashes (`\host\home\.huko`) — that's correct, Docker
+    // Desktop on Windows accepts native paths in `-v`. Mirror the same
+    // platform-specific join in the expected so the assertion holds on
+    // POSIX and Windows alike. The cwd-mount uses the raw string in
+    // production code, so its expected stays a literal.
     assert.deepEqual(args, [
       "run",
       "--rm",
       "-i",
       "-v", "/host/proj:/work",
-      "-v", "/host/home/.huko:/root/.huko",
+      "-v", `${path.join("/host/home", ".huko")}:/root/.huko`,
       "--workdir", "/work",
       "img:1",
       "--", "hello",
