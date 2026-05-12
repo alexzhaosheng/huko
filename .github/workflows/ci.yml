@@ -12,8 +12,12 @@ name: ci
 
 on:
   pull_request:
+    paths-ignore:
+      - home_page/**
   push:
     branches: [main]
+    paths-ignore:
+      - home_page/**
   workflow_dispatch:
 
 permissions:
