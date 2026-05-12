@@ -39,6 +39,7 @@ import { dispatchInfo } from "./dispatch/info.js";
 import { dispatchSetup } from "./dispatch/setup.js";
 import { dispatchSafety } from "./dispatch/safety.js";
 import { CliExitError, usage } from "./dispatch/shared.js";
+import { isLikelyPowerShell, formatPowerShellSentinelHint } from "./env-hints.js";
 
 type Dispatcher = (rest: string[]) => Promise<number>;
 
@@ -84,11 +85,19 @@ async function main(): Promise<number> {
     // `--`", which keeps the two namespaces from colliding as the
     // subcommand surface grows.
     if (!head.startsWith("-")) {
-      process.stderr.write(
+      let msg =
         `huko: unknown subcommand: ${head}\n` +
-          `       Run \`huko --help\` to see all subcommands.\n` +
-          `       To send this as a prompt to the agent: huko -- ${argv.join(" ")}\n`,
-      );
+        `       Run \`huko --help\` to see all subcommands.\n` +
+        `       To send this as a prompt to the agent: huko -- ${argv.join(" ")}\n`;
+      // PowerShell's legacy argument passing silently strips `--` before
+      // invoking external commands, so a correctly-typed `huko -- <prompt>`
+      // reaches us as `huko <prompt>` and lands here. Tack on the
+      // workaround menu when we detect the PS environment — additive,
+      // never wrong.
+      if (isLikelyPowerShell()) {
+        msg += formatPowerShellSentinelHint();
+      }
+      process.stderr.write(msg);
       return 3;
     }
 
