@@ -30,6 +30,7 @@
 
 import { dispatchConfig } from "./dispatch/config.js";
 import { dispatchDebug } from "./dispatch/debug.js";
+import { dispatchDocker } from "./dispatch/docker.js";
 import { dispatchKeys } from "./dispatch/keys.js";
 import { dispatchModel } from "./dispatch/model.js";
 import { dispatchProvider } from "./dispatch/provider.js";
@@ -53,6 +54,7 @@ const DISPATCH: Record<string, Dispatcher> = {
   setup: dispatchSetup,
   debug: dispatchDebug,
   safety: dispatchSafety,
+  docker: dispatchDocker,
 };
 
 async function main(): Promise<number> {

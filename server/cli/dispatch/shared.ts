@@ -65,6 +65,7 @@ export function usage(exitCode: number = 3): never {
       row("safety list", "Print every active deny / allow / requireConfirm rule"),
       row("safety check <tool> <k>=<v>...", "Dry-run a hypothetical call against current rules"),
       row("info [scope]", `Show full configuration (scope: ${c("global")} | ${c("project")})`),
+      row("docker run [...]", "Run huko inside a container with cwd + ~/.huko mounted"),
       row("debug llm-log", "Render this session's LLM calls into huko_llm_log.html"),
       "",
       h("Prompt flags (default action — the agent loop):"),
