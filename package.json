@@ -1,6 +1,27 @@
 {
   "name": "@alexzhaosheng/huko",
   "version": "0.1.0",
+  "description": "An explicit, scriptable AI agent for the command line. Pipe data in, get the answer out.",
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "llm",
+    "claude",
+    "openai",
+    "anthropic",
+    "deepseek"
+  ],
+  "homepage": "https://github.com/alexzhaosheng/huko#readme",
+  "bugs": {
+    "url": "https://github.com/alexzhaosheng/huko/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexzhaosheng/huko.git"
+  },
+  "license": "MIT",
+  "author": "alexzhaosheng",
   "type": "module",
   "engines": {
     "node": "24.x"
