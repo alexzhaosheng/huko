@@ -12,9 +12,9 @@ CI/CD 分三个互相独立的 workflow：
 |---|---|---|---|
 | 1 | **CI**（lint + test 跨平台 + docker sanity） | PR / main push | ✅ **已实现** |
 | 2 | **edge-image**（docker `:edge`） | main push | ✅ **已实现**（commit d69888c+） |
-| 3 | **release**（npm + docker `:VERSION` + `:latest`） | tag push | ⏳ 未实现 |
+| 3 | **release**（npm + docker `:VERSION` + `:latest`） | tag push | ✅ **workflow 已实现，未实战** |
 
-我们按 **2 → 1 → 3** 顺序推：先解决"作者要测 docker 路径但本地 build 麻烦"的痛点，再上跨平台保险丝，最后才搞正式发布流程。
+我们按 **2 → 1 → 3** 顺序推：先解决"作者要测 docker 路径但本地 build 麻烦"的痛点，再上跨平台保险丝，最后才搞正式发布流程。Phase 3 的 workflow 已经写好，但**第一次 release 还没切**——切之前要走一遍下面的 [first-release checklist](#第一次-release-前置-checklist)。
 
 ---
 
@@ -131,24 +131,97 @@ CI 不依赖 edge-image，反过来也一样：
 
 ---
 
-## Phase 3: release（未实现）
+## Phase 3: release（workflow 已实现，未实战）
 
-### 计划
+### 文件
 
-`.github/workflows/release.yml`：
+- `.github/workflows/release.yml`
 
-- **触发**：push tag 形如 `v*.*.*`
-- **两个并发 job**：
-  - **npm publish**：跑 `prepublishOnly`（已经有 check + build），`npm publish` 用 `secrets.NPM_TOKEN`
-  - **docker publish**：build + push 多架构，tags = `:0.2.0` + `:0.2` + `:latest`，build-arg HUKO_VERSION 同步
+### 触发
 
-### Bridge 期前置
+- push tag 形如 `v*.*.*`（推荐路径）
+- `workflow_dispatch` + 手动选 tag（重发 / 修复用）
 
-第一次发 v0.1.0 之前要做的事：
-1. `npm login` + `npm whoami` 确认账号
-2. 仓库 secrets 加 `NPM_TOKEN`（npm 上 generate automation token）
-3. 把 `commands/docker.ts:DEFAULT_IMAGE` 改回 `:latest`（见 Phase 2 的 TODO）
-4. CHANGELOG 写 0.1.0 内容（人工，或上 release-please）
+### 四个 job
+
+**`preflight`**：assert tag 跟 `package.json` 的 `version` 字段匹配。catch "tag 错 commit" 或者"忘了 bump version"，0 修复成本。同时 derive `is_prerelease`（tag 含 `-` → prerelease）。
+
+**`npm-publish`** (gated on preflight)：
+- `actions/setup-node` with `registry-url=https://registry.npmjs.org`
+- `npm ci`
+- `npm publish --provenance --access public`（`prepublishOnly` 在 package.json 里已经跑 check + build:cli，不用单独再跑）
+- `--provenance` 加 SLSA build 见证，npm UI 的 Provenance tab 能看
+- 用 `secrets.NPM_TOKEN`
+
+**`docker-publish`** (gated on preflight)：
+- multi-arch（linux/amd64 + linux/arm64），`--build-arg HUKO_VERSION=<derived>`
+- tag 集合（`docker/metadata-action`）：
+  - `:VERSION` —— 永远
+  - `:MAJOR.MINOR` —— 仅 stable
+  - `:latest` —— 仅 stable（prerelease 不动 `:latest`）
+- 跑 smoke `docker run :VERSION --help`
+
+**`github-release`** (needs npm + docker)：
+- `softprops/action-gh-release` 自动生成 release notes
+- 标题、tag 名、prerelease 标记按 derived 信息走
+- body 里贴 npm install + docker pull 命令
+
+### 并发 / 故障容忍
+
+- `concurrency: release, cancel-in-progress: false` —— 一次只一个 release，**绝不取消进行中的 release**（半发布的 npm + 没 push 完的 docker 比 fail-loudly 难收拾）
+- npm 和 docker 是并发的：一个挂了另一个仍发完。失败的那个走 `workflow_dispatch` 手动重跑就行，不用回滚另一个
+
+### CI 不是硬 gate
+
+故意不做 `on: workflow_run` 联动——**约定**是从 main 上的绿 commit 切 tag。如果切了 red commit，release 仍跑（preflight 只查 version，不查 CI 状态）。要严格联动加 branch protection 或改 trigger，目前不必要。
+
+---
+
+## 第一次 release 前置 checklist
+
+按顺序，做完才能 `git tag v0.1.0 && git push --tags`：
+
+### 1. NPM 准备
+- [ ] `npm login` + `npm whoami` 确认是想发的账号
+- [ ] 检查 `huko` 这个 package 名在 npmjs.com 上是否可用：
+  ```bash
+  npm view huko 2>&1 | head -1
+  # E404 → 可用；其他 → 已被占；考虑改成 `@alexzhaosheng/huko`
+  ```
+  改 scoped name 的话同步改 `package.json:name` + workflow 的 `--access public` 仍适用
+- [ ] npm 上 generate automation token（Settings → Access Tokens → Generate New Token → Automation type）
+- [ ] 仓库 Settings → Secrets and variables → Actions → New repository secret → `NPM_TOKEN` = 上面的 token
+
+### 2. 代码切换 bridge
+- [ ] `server/cli/commands/docker.ts:DEFAULT_IMAGE` 从 `:edge` 改回 `:latest`
+- [ ] `tests/docker-parse.test.ts` 里的 `DEFAULT` 常量同步
+- [ ] `docs/docker.md` 里 "默认镜像" 行同步
+- [ ] `docs/cicd.md`（本文）这条 checklist 划掉
+- [ ] 提交 commit message 类似 `chore: switch DEFAULT_IMAGE to :latest ahead of v0.1.0 release`
+
+### 3. Version + CHANGELOG
+- [ ] `npm version 0.1.0 --no-git-tag-version` （只改 package.json，不自动打 tag——我们手动控制）
+- [ ] （可选）写 CHANGELOG.md，或依赖 GitHub Release 自动生成的 notes
+- [ ] 提交 commit 像 `chore(release): v0.1.0`
+
+### 4. 切 tag + push
+```bash
+git tag v0.1.0
+git push origin main
+git push origin v0.1.0       # 这一步触发 release.yml
+```
+
+### 5. 验证（release.yml 跑完后）
+- [ ] `npm install -g huko@0.1.0` 装得到
+- [ ] `docker pull ghcr.io/alexzhaosheng/huko:0.1.0` 拉得到
+- [ ] `docker pull ghcr.io/alexzhaosheng/huko:latest` 也能拉到（同一 image digest）
+- [ ] GitHub Releases 页面有 v0.1.0 条目
+- [ ] `huko docker run -- "hi"` 用 `:latest` 默认值跑通
+
+### 6. 出错怎么办
+- npm publish 失败、docker 成功：fix npm 问题（401 → token；403 → name；…），workflow_dispatch 重跑只 npm 那步可以
+- docker 失败、npm 成功：同理，重跑只 docker 那步
+- preflight 失败：tag 跟 package.json 不匹配，先查 `git checkout v0.1.0 -- package.json`，删 tag (`git tag -d v0.1.0; git push --delete origin v0.1.0`)、修 version、重新 tag
 
 ---
 
@@ -214,3 +287,12 @@ docker pull ghcr.io/alexzhaosheng/huko:edge
 ### CI docker-build job 失败
 
 跟 edge-image 同根同源——两者用的 Dockerfile 同一份。CI 只 build linux/amd64，挂了说明 Dockerfile 在 amd64 也坏；arm64-only 的问题（rare）等 edge-image 跑出来才能看见。
+
+### release.yml 里 npm publish 401 / 403
+
+- **401**：`NPM_TOKEN` 没设 / 过期 / 类型不对。要 "Automation" 类型的 token，不是 "Publish"（虽然两者都能用，但 Automation 不需要 2FA 交互）。
+- **403** with `You do not have permission`：package 名被别人占了。改 package.json 的 name 成 scoped（如 `@alexzhaosheng/huko`），workflow 里 `--access public` 自动适用。
+
+### release.yml 里 preflight 失败 (`tag X expects version Y but found Z`)
+
+tag 和 package.json 不一致。最常见：忘了 bump `package.json:version` 就 tag 了。修法：删 tag、bump、重 tag。**不要**改 package.json 不删 tag，下次 push 还是同一个 tag commit，preflight 还会挂。

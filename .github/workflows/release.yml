@@ -1,0 +1,202 @@
+name: release
+
+# Triggered by pushing a SemVer tag (`v0.1.0`, `v0.1.1`, `v1.0.0-rc.1`, ...).
+# Publishes huko to two registries in parallel:
+#
+#   npm-publish     — npm.js, with SLSA provenance attached
+#   docker-publish  — ghcr.io, multi-arch (linux/amd64 + linux/arm64),
+#                     tags: :VERSION, :MAJOR.MINOR, :latest (for stable),
+#                     skipping :latest on prereleases
+#
+# Both jobs gate on a `preflight` step that asserts the tag matches
+# package.json's `version` field — catches "I tagged the wrong commit"
+# / "forgot to bump package.json" before anything ships.
+#
+# CI status is NOT a hard gate (no workflow_run dependency). The convention
+# is "tag from a green main commit"; if you tag a red commit, the publish
+# still runs. Add branch protection if you want enforcement.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re-)publish, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write   # to create the GitHub Release at the end
+  packages: write   # to push to ghcr.io
+  id-token: write   # for npm provenance attestation
+
+concurrency:
+  # One release at a time. Never cancel an in-flight release — partial
+  # publishes are awkward to clean up.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ─── 0. preflight ─────────────────────────────────────────────────────────
+  preflight:
+    name: preflight (version match)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      is_prerelease: ${{ steps.derive.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # On workflow_dispatch the ref might not be the tag; explicit checkout.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Derive version from tag + assert match with package.json
+        id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "::error::tag $TAG expects package.json version $VERSION but found $PACKAGE_VERSION"
+            exit 1
+          fi
+          # Detect prereleases (e.g. 1.0.0-rc.1) so :latest gets skipped.
+          IS_PRERELEASE=false
+          case "$VERSION" in
+            *-*) IS_PRERELEASE=true ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Derived version=$VERSION  prerelease=$IS_PRERELEASE"
+
+  # ─── 1. npm publish ───────────────────────────────────────────────────────
+  npm-publish:
+    name: npm publish
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Publish to npm (with provenance)
+        # `prepublishOnly` (in package.json) runs check + build:cli, so we
+        # don't need a separate type-check / build step here.
+        # `--provenance` attaches a SLSA build attestation, viewable in
+        # the npm UI under the package's "Provenance" tab.
+        # `--access public` is required for first-time publishes and
+        # harmless thereafter; with a scoped name (e.g. @user/huko) it
+        # would be required to avoid the default-private behavior.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euxo pipefail
+          npm publish --provenance --access public
+
+  # ─── 2. docker publish ────────────────────────────────────────────────────
+  docker-publish:
+    name: docker publish (multi-arch)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        # `metadata-action` derives the tag set from the git tag:
+        #   - `:1.2.3`         (full version, always)
+        #   - `:1.2`           (major.minor, only on stable)
+        #   - `:latest`        (only on stable; skipped on -rc / -beta)
+        # The `enable=` conditions reference the prerelease bool from
+        # preflight so e.g. `v0.2.0-rc.1` won't move :latest off a
+        # stable release.
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/alexzhaosheng/huko
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.preflight.outputs.is_prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.preflight.outputs.is_prerelease == 'false' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            HUKO_VERSION=${{ needs.preflight.outputs.version }}
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
+
+      - name: Smoke test (amd64)
+        # Pull the just-pushed :VERSION (not :latest, in case parallel
+        # release shenanigans; the version tag is unique).
+        run: |
+          set -euxo pipefail
+          docker run --rm --platform linux/amd64 \
+            ghcr.io/alexzhaosheng/huko:${{ needs.preflight.outputs.version }} \
+            --help | head -5
+
+  # ─── 3. github release ────────────────────────────────────────────────────
+  github-release:
+    name: github release
+    needs: [preflight, npm-publish, docker-publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0   # for auto-generated release notes
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.preflight.outputs.version }}
+          name: v${{ needs.preflight.outputs.version }}
+          generate_release_notes: true
+          prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
+          body: |
+            ## Install
+
+            **npm**:
+            ```bash
+            npm install -g huko@${{ needs.preflight.outputs.version }}
+            ```
+
+            **Docker**:
+            ```bash
+            docker pull ghcr.io/alexzhaosheng/huko:${{ needs.preflight.outputs.version }}
+            huko docker run -- "your prompt"
+            ```
+
+            See [docs/cicd.md](https://github.com/alexzhaosheng/huko/blob/main/docs/cicd.md) for how this release was built.
