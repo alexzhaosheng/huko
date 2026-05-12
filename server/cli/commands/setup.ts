@@ -1,10 +1,18 @@
 /**
  * server/cli/commands/setup.ts
  *
- * `huko setup` — interactive wizard for the "I just installed huko"
- * happy path.
+ * `huko setup` — two modes:
  *
- * Flow:
+ *   1. First-run wizard: linear walk through scope → provider → key →
+ *      default model. Used when no current provider+model is configured.
+ *
+ *   2. Top-level menu (delegated to `./menu.ts`): used when huko already
+ *      has a current provider + model. Returning users naturally type
+ *      `huko setup` to "change something"; the menu surfaces the
+ *      common adjustments without making them remember subcommand
+ *      grammar. See chat 2026-05-12 for the design rationale.
+ *
+ * Wizard flow:
  *   1. Pick scope: global (~/.huko/) or project (<cwd>/.huko/)
  *   2. Pick provider: from BUILTIN_PROVIDERS, plus a "custom" option
  *   3. Confirm or customise the apiKeyRef
@@ -35,6 +43,7 @@ import {
   type ModelConfig,
   type ProviderConfig,
 } from "../../config/index.js";
+import { isConfigured, menuCommand } from "./menu.js";
 import {
   envVarNameFor,
   globalKeysPath,
@@ -54,6 +63,22 @@ type Scope = "global" | "project";
 type KeyMode = "store" | "skip";
 
 export async function setupCommand(): Promise<number> {
+  // Already-configured users get the menu; first-timers get the wizard.
+  // Detection is intentionally narrow (currentProvider + currentModel
+  // both set) — this is the same pair the runtime needs to talk to an
+  // LLM, so "configured" here means "the wizard would have nothing new
+  // to teach you".
+  const cwd0 = process.cwd();
+  let alreadyConfigured = false;
+  try {
+    alreadyConfigured = isConfigured(loadInfraConfig({ cwd: cwd0 }));
+  } catch {
+    // Treat any infra-config load error as "not configured" so the
+    // wizard runs and the user gets a clean slate.
+    alreadyConfigured = false;
+  }
+  if (alreadyConfigured) return await menuCommand();
+
   process.stderr.write(
     "\n" + bold("huko setup", "stderr") + " — configure a provider, a key, and a default model.\n" +
       dim("Press Ctrl+C any time to abort.", "stderr") + "\n\n",
