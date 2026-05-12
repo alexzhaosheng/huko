@@ -291,6 +291,54 @@ describe("parseRunArgs — bare positional → error (the new contract)", () => 
   });
 });
 
+describe("parseRunArgs — `-` (stdin prompt marker)", () => {
+  it("bare `-` sets stdinPrompt:true", () => {
+    const r = parseRunArgs(["-"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.stdinPrompt, true);
+    assert.equal(r.args.prompt, "");
+  });
+
+  it("flags then `-` is allowed", () => {
+    const r = parseRunArgs(["--new", "--memory", "-"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.stdinPrompt, true);
+    assert.equal(r.args.newSession, true);
+    assert.equal(r.args.ephemeral, true);
+  });
+
+  it("rejects argv after `-`", () => {
+    const r = parseRunArgs(["-", "foo", "bar"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /must be the last argument/);
+  });
+
+  it("rejects `-` followed by `--` (mutually exclusive prompt sources)", () => {
+    const r = parseRunArgs(["-", "--"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /must be the last argument/);
+  });
+
+  it("after `--`, a bare `-` is prompt content, not the stdin marker", () => {
+    const r = parseRunArgs(["--", "-"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.prompt, "-");
+    assert.equal(r.args.stdinPrompt, undefined);
+  });
+
+  it("omits stdinPrompt when not given", () => {
+    const r = parseRunArgs(["--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.stdinPrompt, undefined);
+  });
+});
+
 describe("parseRunArgs — flag-level error cases", () => {
 
   it("rejects an unknown flag", () => {

@@ -98,6 +98,17 @@ export type RunArgs = {
    * CLI: `--chat`.
    */
   chat?: boolean;
+  /**
+   * The operator passed `-` as the last argv token (`echo "..." | huko -`).
+   * runCommand drains stdin and uses it as the prompt — the only path
+   * besides argv (`-- ...`) and an explicit `< file` redirect that
+   * sources prompt content from outside the command line.
+   *
+   * Without this flag, runCommand will NEVER read from a non-file stdin
+   * — that's the deliberate fix for the "huko inherits a parent shell's
+   * idle pipe and reads the next queued command" failure mode.
+   */
+  stdinPrompt?: boolean;
 };
 
 /**
@@ -116,117 +127,41 @@ function deriveTitleFromPrompt(prompt: string, max: number = 40): string {
   return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + "…";
 }
 
-function promptRequiredHint(idleMs?: number): void {
-  let trailer = "";
-  if (idleMs !== undefined) {
-    trailer =
-      `       (stdin was a non-TTY pipe but no data arrived within ${idleMs}ms;\n` +
-      `        assuming an inherited idle pipe — set HUKO_STDIN_IDLE_MS to extend.)\n`;
-  }
+function promptRequiredHint(): void {
   process.stderr.write(
     "huko: prompt is required.\n" +
       "       Try: huko -- fix the bug in main.ts\n" +
-      "       Pipe: echo '...' | huko        (handles shell special chars safely)\n" +
-      "       File: huko < prompt.txt\n" +
-      "       REPL: huko --chat\n" +
-      trailer,
+      "       Pipe: echo '...' | huko -        (`-` = read prompt from stdin)\n" +
+      "       File: huko < prompt.txt          (works without `-`)\n" +
+      "       REPL: huko --chat\n",
   );
 }
 
 /**
- * Default idle window for stdin probing. Long enough that any local
- * pipe (`echo "..." | huko`) flushes before we give up; short enough
- * to feel snappy from a human's POV. The kernel pipe buffer is filled
- * by the writer's first syscall, so a real producer's bytes are
- * essentially always present on the FD by the time huko's main runs.
- *
- * Override with HUKO_STDIN_IDLE_MS if you have a slow producer (a
- * remote `kubectl exec ... | huko` style invocation) and the default
- * is too tight. Capped at 10s so a hung pipe still bails eventually.
+ * Drain stdin and return its UTF-8 contents. Used only when the caller
+ * has *explicit* signal that stdin should be the prompt source — either
+ * the `-` argv token or a regular-file FD (`huko < prompt.txt`). For
+ * pipes / sockets we never read without `-`, because there's no way to
+ * tell at the syscall layer whether bytes on a pipe are intentional
+ * input from the user or stale data from an inherited shell pipe (e.g.
+ * the next command queued by a parent bash). See chat 2026-05-12 for
+ * the failure mode this avoids.
  */
-const DEFAULT_STDIN_IDLE_MS = 100;
-const MAX_STDIN_IDLE_MS = 10_000;
-
-function stdinIdleMs(): number {
-  const raw = process.env["HUKO_STDIN_IDLE_MS"];
-  if (raw === undefined || raw === "") return DEFAULT_STDIN_IDLE_MS;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0) return DEFAULT_STDIN_IDLE_MS;
-  return Math.min(n, MAX_STDIN_IDLE_MS);
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
-/**
- * Drain stdin and return its UTF-8 contents — but only if data
- * actually arrives. Returns `null` when stdin is non-TTY but sits idle
- * for `idleMs` with no bytes, which guards against the failure mode
- * that triggers when huko runs inside another huko's bash tool: the
- * parent's persistent shell keeps stdin open as a writable pipe with
- * nothing in it, and a naive `for await ... process.stdin` would
- * block forever waiting for an EOF that the parent will never send.
- *
- * Behaviour by FD type:
- *   - Regular file (`huko < prompt.txt`): drain to EOF, no probe.
- *     A file is either empty or fully present; "idle" doesn't apply.
- *   - FIFO / socket / unknown: arm a one-shot timer at `idleMs`.
- *     The first chunk to arrive cancels the timer; thereafter we wait
- *     for EOF normally. If the timer fires before any byte shows up,
- *     return `null` and let the caller decide what "no input" means.
- *
- * Trim is left to the caller. After resolving with non-null, stdin is
- * exhausted; after resolving with null, stdin is paused (no listeners)
- * so no bytes are silently consumed.
- */
-async function readStdinIfReady(idleMs: number): Promise<string | null> {
-  let isFile = false;
+/** True when FD 0 is a regular file — i.e. the operator did `huko < prompt.txt`. */
+function stdinIsRegularFile(): boolean {
   try {
-    isFile = fstatSync(0).isFile();
+    return fstatSync(0).isFile();
   } catch {
-    /* fstat fails for some character devices; treat as non-file */
+    return false;
   }
-  if (isFile) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) {
-      chunks.push(chunk as Buffer);
-    }
-    return Buffer.concat(chunks).toString("utf8");
-  }
-
-  return await new Promise<string | null>((resolve) => {
-    const chunks: Buffer[] = [];
-    let started = false;
-    let resolved = false;
-    let timer: NodeJS.Timeout | null = null;
-
-    const onData = (chunk: Buffer) => {
-      started = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      chunks.push(chunk);
-    };
-    const onEnd = () => settle(started ? Buffer.concat(chunks).toString("utf8") : null);
-    const onError = () => settle(started ? Buffer.concat(chunks).toString("utf8") : null);
-
-    function settle(value: string | null): void {
-      if (resolved) return;
-      resolved = true;
-      if (timer !== null) clearTimeout(timer);
-      process.stdin.off("data", onData);
-      process.stdin.off("end", onEnd);
-      process.stdin.off("error", onError);
-      resolve(value);
-    }
-
-    process.stdin.on("data", onData);
-    process.stdin.on("end", onEnd);
-    process.stdin.on("error", onError);
-
-    timer = setTimeout(() => {
-      timer = null;
-      if (!started) settle(null);
-    }, idleMs);
-  });
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
@@ -243,30 +178,26 @@ export async function runCommand(args: RunArgs): Promise<number> {
     return await chatCommand(args);
   }
 
-  // Resolve prompt source. argv-given prompt wins; otherwise read
-  // stdin if it's piped (e.g. `echo "..." | huko`, `huko < prompt.txt`);
-  // otherwise error.
+  // Resolve prompt source. Precedence:
+  //   1. argv prompt (`huko -- ...`)                         — wins
+  //   2. explicit `-` token in argv (args.stdinPrompt)       — drain stdin
+  //   3. empty argv + stdin is a regular file (`huko < ...`) — drain stdin
+  //   4. otherwise                                           — "prompt required"
+  //
+  // We deliberately do NOT auto-drain stdin just because it's a pipe.
+  // A pipe with bytes on it is ambiguous at the syscall layer between
+  // "user piped me a prompt" and "I inherited a parent shell's pipe
+  // with the next queued command in it". Requiring an explicit `-`
+  // for the pipe case eliminates the ambiguity.
   let effectivePrompt = args.prompt;
   let stdinFed = false;
   if (effectivePrompt.length === 0) {
-    if (process.stdin.isTTY) {
+    const wantStdin = args.stdinPrompt === true || stdinIsRegularFile();
+    if (!wantStdin) {
       promptRequiredHint();
       return 3;
     }
-    const idleMs = stdinIdleMs();
-    const piped = await readStdinIfReady(idleMs);
-    if (piped === null) {
-      // Non-TTY stdin but nothing arrived in `idleMs`. Two real cases:
-      //   (a) Inherited an idle pipe (the symptomatic one — running
-      //       `huko` inside the bash tool of another huko, where the
-      //       parent's persistent shell keeps stdin open with no data).
-      //   (b) An explicit `huko < /dev/null` style invocation.
-      // Both are "the user didn't actually pipe a prompt"; treat the
-      // same as the TTY case.
-      promptRequiredHint(idleMs);
-      return 3;
-    }
-    effectivePrompt = piped.trim();
+    effectivePrompt = (await readAllStdin()).trim();
     stdinFed = true;
     if (effectivePrompt.length === 0) {
       process.stderr.write("huko: stdin was empty; no prompt provided\n");

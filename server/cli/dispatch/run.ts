@@ -1,7 +1,8 @@
 /**
  * server/cli/dispatch/run.ts
  *
- * `huko [flags] -- <prompt>` — argv parser + handoff to runCommand.
+ * `huko [flags] -- <prompt>` or `huko [flags] -` — argv parser +
+ * handoff to runCommand.
  *
  * Protocol:
  *
@@ -11,6 +12,9 @@
  *   - The `--` sentinel switches the parser to `prompt` mode and is
  *     NOT itself included. Everything after is prompt content,
  *     verbatim — including things that look like flags.
+ *   - The bare `-` token (unix convention for stdin) sets
+ *     `stdinPrompt: true` and MUST be the last argv token; it is
+ *     mutually exclusive with `--`.
  *   - A bare (non-flag) positional token in flag mode is a parse error.
  *     Prompt content MUST be introduced by `--` so that "first bare
  *     word" stays unambiguously a subcommand-selector slot at the
@@ -22,18 +26,30 @@
  *     the prompt overload "first bare word" means typo'd verbs like
  *     `huko sesions list` get sent to the LLM as a prompt — confusing.
  *     Forcing `--` cleanly separates the two namespaces forever.
+ *   - `-` for stdin is the standard unix idiom (cat, sort, diff). It
+ *     replaces the old "auto-drain stdin if non-TTY" heuristic, which
+ *     deadlocked when huko inherited an idle pipe (e.g. another huko's
+ *     bash tool keeping stdin open with the next queued command in it).
+ *     Requiring `-` makes the intent explicit; pipes are never drained
+ *     by accident. (`huko < prompt.txt` still works without `-` —
+ *     regular-file FDs are unambiguous.)
  *   - After `--`, NO flag re-parsing — prompts mentioning `--metric` or
  *     `--no-interaction` are passed through as prompt content.
- *   - Empty prompt is permitted: caller (runCommand) decides at runtime
- *     whether to read stdin, drop into chat REPL, or surface an error.
+ *   - Empty prompt + no `-` is permitted: caller (runCommand) decides
+ *     at runtime — `huko < file` reads the file; `huko --chat` enters
+ *     the REPL; otherwise "prompt required".
  *
  * Examples:
  *   huko -- fix the bug                     # OK — prompt: "fix the bug"
  *   huko --new --title=X -- fix the bug     # OK — flags + sentinel + prompt
  *   huko --new -- --metric correctness      # OK — `--metric` is prompt content
  *   huko -- -3 + 5 = ?                      # OK — prompt may start with `-`
+ *   echo "fix bug" | huko -                 # OK — `-` = read prompt from stdin
+ *   huko --new -                            # OK — flags + read stdin
  *   huko --unknown-flag                     # ERROR — unknown flag
  *   huko --new fix the bug                  # ERROR — bare positional, missing `--`
+ *   huko - foo                              # ERROR — argv after `-`
+ *   huko - --                               # ERROR — `-` and `--` are exclusive
  *   huko --                                 # OK   — empty prompt; runCommand decides
  *
  * Returns the exit code from `runCommand` (0..5). On parse error the
@@ -70,8 +86,10 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let verbose: boolean | undefined;
   let chat = false;
   let format: FormatName = "text";
+  let stdinPrompt = false;
 
-  // Phase 1: parse flags until first bare positional OR `--` sentinel.
+  // Phase 1: parse flags until first bare positional, `--` sentinel,
+  // or `-` (stdin marker).
   let i = 0;
   while (i < rest.length) {
     const arg = rest[i]!;
@@ -79,6 +97,20 @@ export function parseRunArgs(rest: string[]): ParseResult {
     if (arg === "--") {
       // Explicit sentinel — switch to prompt mode, don't include this token.
       i++;
+      break;
+    }
+    if (arg === "-") {
+      // Stdin marker — must be the last token, mutually exclusive with
+      // any further argv. Caller (runCommand) will drain stdin.
+      i++;
+      if (i < rest.length) {
+        return {
+          kind: "error",
+          message:
+            `huko: \`-\` (stdin prompt) must be the last argument; got: ${rest.slice(i).join(" ")}\n`,
+        };
+      }
+      stdinPrompt = true;
       break;
     }
     if (!arg.startsWith("-")) {
@@ -188,18 +220,28 @@ export function parseRunArgs(rest: string[]): ParseResult {
   }
 
   // Phase 2: everything from `i` onward is prompt content, verbatim.
+  // (When `stdinPrompt` is true the loop already consumed the `-` and
+  // forbids further argv, so promptTokens is guaranteed empty.)
   const promptTokens = rest.slice(i);
 
-  // Mutual exclusion check.
+  // Mutual exclusion checks.
   if (newSession && sessionId !== undefined) {
     return { kind: "error", message: "huko: --new and --session=<id> are mutually exclusive\n" };
   }
+  if (stdinPrompt && promptTokens.length > 0) {
+    // Defensive — `-` handler already errors on this, but if a future
+    // refactor reorders the loop, keep the contract enforceable here.
+    return {
+      kind: "error",
+      message: "huko: `-` (stdin prompt) cannot be combined with an inline prompt\n",
+    };
+  }
 
   // Empty prompts are no longer a parser-level error: the caller
-  // (runCommand) decides at runtime whether to read stdin, drop into
-  // chat REPL, or surface "prompt required". This keeps the parser
-  // pure (no isTTY probing) while letting chat mode and stdin-piped
-  // mode both pass through with `prompt = ""`.
+  // (runCommand) decides at runtime whether to read stdin (because of
+  // `-` or because FD 0 is a regular file), drop into chat REPL, or
+  // surface "prompt required". This keeps the parser pure (no isTTY
+  // probing).
   const prompt = promptTokens.join(" ").trim();
 
   return {
@@ -216,6 +258,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(mode !== undefined ? { mode } : {}),
       ...(verbose !== undefined ? { verbose } : {}),
       ...(chat ? { chat: true } : {}),
+      ...(stdinPrompt ? { stdinPrompt: true } : {}),
     },
   };
 }
