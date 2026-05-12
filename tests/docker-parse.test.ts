@@ -122,10 +122,8 @@ describe("parseDockerRun — help short-circuit", () => {
 // ─── _resolveImageForTest ───────────────────────────────────────────────────
 
 describe("resolveImage precedence", () => {
-  // Mirrors DEFAULT_IMAGE in commands/docker.ts. During the bridge
-  // period (no tagged releases yet) this is `:edge`; flip to `:latest`
-  // when the release pipeline cuts the first version.
-  const DEFAULT = "ghcr.io/alexzhaosheng/huko:edge";
+  // Mirrors DEFAULT_IMAGE in commands/docker.ts. Stable channel.
+  const DEFAULT = "ghcr.io/alexzhaosheng/huko:latest";
 
   it("explicit wins over env wins over default", () => {
     assert.equal(

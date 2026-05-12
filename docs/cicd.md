@@ -67,11 +67,11 @@ GHCR 包默认是 **private**。第一次 push 之后去：
 - `paths:` 过滤掉 doc-only 改动，docs/* 不会触发
 - gha cache 加速重复 build（从 ~12min 降到 ~5min for 增量）
 
-### Bridge: 默认 image 为什么是 `:edge` 不是 `:latest`
+### `:latest` 是默认（v0.1.0 之后）
 
-`commands/docker.ts:DEFAULT_IMAGE = "ghcr.io/alexzhaosheng/huko:edge"` —— `:latest` 还不存在（要等 Phase 3 release pipeline 上线 + 第一个 tag）。如果默认是 `:latest`，每个 `huko docker run` 都会 404。
+`commands/docker.ts:DEFAULT_IMAGE = "ghcr.io/alexzhaosheng/huko:latest"`，由 release.yml 在每次 stable tag push 时更新。`:edge` 是 main 滚动的二级 channel，给想试未发版代码的人用。
 
-> **TODO（Phase 3 落地后）**：把 `DEFAULT_IMAGE` 改回 `:latest`，`:edge` 退化为"main branch 滚动"的二级 channel。同步更新 `tests/docker-parse.test.ts` 里的 `DEFAULT` 常量和 `docs/docker.md` 的 image 选择小节。
+> 历史：v0.1.0 之前默认是 `:edge`（bridge 期）。在切第一个 tag 那次 commit 里同步切回 `:latest`。
 
 ---
 
@@ -193,11 +193,11 @@ CI 不依赖 edge-image，反过来也一样：
 - [ ] 仓库 Settings → Secrets and variables → Actions → New repository secret → `NPM_TOKEN` = 上面的 token
 
 ### 2. 代码切换 bridge
-- [ ] `server/cli/commands/docker.ts:DEFAULT_IMAGE` 从 `:edge` 改回 `:latest`
-- [ ] `tests/docker-parse.test.ts` 里的 `DEFAULT` 常量同步
-- [ ] `docs/docker.md` 里 "默认镜像" 行同步
-- [ ] `docs/cicd.md`（本文）这条 checklist 划掉
-- [ ] 提交 commit message 类似 `chore: switch DEFAULT_IMAGE to :latest ahead of v0.1.0 release`
+- [x] `server/cli/commands/docker.ts:DEFAULT_IMAGE` 从 `:edge` 改回 `:latest`
+- [x] `tests/docker-parse.test.ts` 里的 `DEFAULT` 常量同步
+- [x] `docs/docker.md` 里 "默认镜像" 行同步
+- [x] `docs/cicd.md`（本文）这条 checklist 划掉
+- [x] 提交 commit message 类似 `chore: switch DEFAULT_IMAGE to :latest ahead of v0.1.0 release`
 
 ### 3. Version + CHANGELOG
 - [ ] `npm version 0.1.0 --no-git-tag-version` （只改 package.json，不自动打 tag——我们手动控制）

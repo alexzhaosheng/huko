@@ -43,16 +43,13 @@ export type DockerRunArgs = {
 /**
  * Default container image.
  *
- * BRIDGE PERIOD (until first tagged release): points at `:edge` —
- * built on every push to main by .github/workflows/edge-image.yml.
- * `:latest` doesn't exist yet, so defaulting to it would 404 every
- * `huko docker run`. Once the release pipeline (docs/cicd.md phase 3)
- * lands and we cut the first `v0.x.0`, switch this back to `:latest`
- * and `:edge` becomes the moving "fresh from main" channel.
+ * Stable channel: `:latest` is the most recent tagged release pushed
+ * by .github/workflows/release.yml. For "fresh from main" testing
+ * use `:edge` (or a SHA-pinned `:edge-<sha>`) — see docs/docker.md.
  *
  * Override per-call: `--image <name>` or HUKO_DOCKER_IMAGE env.
  */
-const DEFAULT_IMAGE = "ghcr.io/alexzhaosheng/huko:edge";
+const DEFAULT_IMAGE = "ghcr.io/alexzhaosheng/huko:latest";
 
 /**
  * Container-side paths. These match the convention documented in
