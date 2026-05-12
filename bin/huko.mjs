@@ -21,7 +21,7 @@
  * `huko ...`, not where huko itself lives.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as path from "node:path";
 
@@ -30,12 +30,6 @@ const dist = path.resolve(here, "..", "dist", "cli.js");
 
 if (existsSync(dist)) {
   // Production: built artifact present, just run it.
-  // Before doing so, check whether a co-located source tree (server/
-  // and shared/) is newer than dist — i.e. the user pulled but forgot
-  // to rebuild. Warn but still launch (the stale dist is a working
-  // huko, just not the latest one). In a true npm-install layout the
-  // source tree isn't shipped, so this check no-ops silently.
-  warnIfStale(dist);
   await import(pathToFileURL(dist).href);
 } else {
   // Dev fallback: spawn tsx on the .ts source. Cross-platform binary
@@ -72,66 +66,4 @@ if (existsSync(dist)) {
       process.exit(code ?? 0);
     }
   });
-}
-
-/**
- * Warn if any tracked source file is newer than dist/cli.js. Used to
- * catch the "pulled new commits but forgot to rebuild" footgun for
- * users who keep a local-built install (e.g. /usr/local/bin/huko →
- * <release-tree>/bin/huko.mjs and dist/cli.js next to it).
- *
- * Best-effort: any FS / permission error is swallowed so the launcher
- * never blocks on the diagnostic. Walks server/ + shared/ relative to
- * the bin directory; short-circuits on the first file newer than dist.
- * In a `npm install -g huko` layout these directories don't exist (the
- * package.json `files` array ships only bin + dist), so the check
- * silently no-ops.
- */
-function warnIfStale(distPath) {
-  try {
-    const distMtime = statSync(distPath).mtimeMs;
-    const root = path.resolve(here, "..");
-    const newer = findNewerFile(
-      [path.join(root, "server"), path.join(root, "shared")],
-      distMtime,
-    );
-    if (newer === null) return;
-    const rel = path.relative(root, newer);
-    process.stderr.write(
-      `huko: warning: dist/cli.js is older than ${rel} — ` +
-        `run \`npm run build:cli\` to pick up the latest source.\n`,
-    );
-  } catch {
-    /* swallow — diagnostic only */
-  }
-}
-
-function findNewerFile(roots, thresholdMs) {
-  const stack = [];
-  for (const r of roots) {
-    if (existsSync(r)) stack.push(r);
-  }
-  while (stack.length > 0) {
-    const cur = stack.pop();
-    let entries;
-    try {
-      entries = readdirSync(cur, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const e of entries) {
-      const p = path.join(cur, e.name);
-      if (e.isDirectory()) {
-        stack.push(p);
-        continue;
-      }
-      if (!e.isFile()) continue;
-      try {
-        if (statSync(p).mtimeMs > thresholdMs) return p;
-      } catch {
-        /* skip unreadable */
-      }
-    }
-  }
-  return null;
 }
