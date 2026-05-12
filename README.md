@@ -26,6 +26,7 @@ huko docker run -- "audit dependencies for known CVEs"   # sandboxed
 - **Project as context.** State (`sessions`, `keys`, `config`) lives in `<cwd>/.huko/` like `.git`. CD into a repo and huko has its memory; CD out and you're in a different world.
 - **Provider-agnostic.** Anthropic / OpenAI / DeepSeek / Zhipu / MiniMax / OpenRouter / Moonshot / your own gateway. Switch with `huko provider current <name>` or `huko model current <id>`.
 - **Sandboxable.** `huko docker run -- "..."` runs the agent in a container with your project mounted at `/work`. Filesystem isolation by default; pipes still work.
+- **Tool-level safety.** Per-tool `disable` / `deny` / `allow` / `requireConfirm` rules. Disabled tools disappear from the LLM's surface entirely — it can't call what it can't see. Per-project by default; layered with global.
 - **Explicit configuration.** Layered: built-in → `~/.huko/` → `<cwd>/.huko/`. Every value `huko config show` reports its layer of origin.
 - **Two modes.** `full` for production-grade agent work (planning, ~13 tools, project context). `lean` for one-shot questions (~85% smaller per-call overhead).
 
@@ -92,7 +93,10 @@ huko sessions current                        # the active one
 huko sessions switch 7                       # rejoin chat #7
 huko --new -- "start a fresh thread"         # new session, becomes active
 huko --memory -- "one-off, leaves no trace"  # ephemeral, no on-disk state
+huko --chat                                  # interactive REPL
 ```
+
+Short flags for the high-frequency ones: `-n` = `--new`, `-m` = `--memory`, `-c` = `--chat`. (No POSIX bundling — write them separately: `huko -n -m -- "..."`.)
 
 ### Output formats
 
@@ -123,6 +127,23 @@ huko docker run --image myorg/huko-fork:dev -- "..."   # custom image
 
 The container has filesystem isolation (only `$PWD` + `~/.huko` are mounted) but full network egress by default. See [`docs/docker.md`](docs/docker.md) for the precise security model.
 
+### Safety (tool-level controls)
+
+```bash
+huko safety tool                              # list every tool + status + rule counts
+huko safety disable web_fetch                 # remove from LLM surface entirely
+huko safety enable web_fetch                  # put it back
+huko safety deny bash 're:^rm -rf'            # block matching calls
+huko safety allow bash '^ls '                 # auto-approve matching calls
+huko safety require write_file 're:/etc/'    # prompt operator before matching calls
+huko safety unset bash 'rm -rf'               # remove a single pattern
+huko safety unset bash                        # wipe the whole entry
+huko safety list                              # full pattern dump per tool
+huko safety check bash command='rm -rf /'     # dry-run a hypothetical call
+```
+
+Editing verbs default to **project** (`<cwd>/.huko/config.json`); pass `--global` for `~/.huko/config.json`. `disabled` is stronger than `deny` — the LLM never sees the tool's name or schema, so it can't try to call it.
+
 ---
 
 ## Configuration
@@ -143,7 +164,8 @@ Edit through the CLI:
 ```bash
 huko config set mode lean --project          # this project only
 huko config set mode lean --global           # all projects
-huko safety init --project                   # scaffold per-tool safety rules
+huko safety init                             # scaffold per-tool safety rules (project)
+huko safety disable web_fetch                # see Safety section above
 ```
 
 Or just edit the JSON files directly — huko reads them on every run, no caching.
@@ -170,7 +192,7 @@ Or just edit the JSON files directly — huko reads them on every run, no cachin
 git clone https://github.com/alexzhaosheng/huko.git
 cd huko
 npm install
-npm test                  # 530+ tests, cross-platform
+npm test                  # 540+ tests, cross-platform
 npx tsc --noEmit          # strict type check
 npm run build:cli         # esbuild bundle → dist/cli.js
 

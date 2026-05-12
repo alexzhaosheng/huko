@@ -3,28 +3,48 @@
  *
  * `huko safety <verb>` — verb routing for safety-policy management.
  *
- * Verbs:
- *   init [--project | --global]            — scaffold safety template
- *   list                                   — print active rules
- *   check <tool> <field>=<value> ...       — dry-run a hypothetical call
+ * Verbs (rule editing):
+ *   tool                                  — list all tools + per-tool config
+ *   enable <tool>                         — re-enable a previously disabled tool
+ *   disable <tool>                        — remove the tool from the LLM surface
+ *   deny    <tool> <pattern>              — append regex to deny bucket
+ *   allow   <tool> <pattern>              — append regex to allow bucket
+ *   require <tool> <pattern>              — append regex to requireConfirm bucket
+ *   unset   <tool> [pattern]              — remove a single pattern, or wipe the entry
  *
- * Scope default for `init` is `--global` (matches the rest of huko's
- * config commands). `--project` writes into <cwd>/.huko/config.json.
+ * Verbs (read-only / setup):
+ *   init                                  — scaffold safety template
+ *   list                                  — print active rules with patterns
+ *   check <tool> <field>=<value> ...      — dry-run a hypothetical call
+ *
+ * Scope: ALL editing verbs default to PROJECT (`<cwd>/.huko/config.json`)
+ * because safety policy is overwhelmingly per-project (different repos
+ * have different risk profiles). Pass `--global` to write to
+ * `~/.huko/config.json` instead. This is the inverse of provider/model
+ * commands, which default global because providers ARE machine-wide.
  */
 
 import {
+  safetyAppendRuleCommand,
   safetyCheckCommand,
+  safetyDisableCommand,
+  safetyEnableCommand,
   safetyInitCommand,
   safetyListCommand,
+  safetyToolCommand,
+  safetyUnsetCommand,
 } from "../commands/safety.js";
 import type { ConfigScope } from "../../config/index.js";
 import { usage } from "./shared.js";
+
+const VERBS_HELP =
+  "init | list | tool | check | enable | disable | deny | allow | require | unset";
 
 export async function dispatchSafety(rest: string[]): Promise<number> {
   const verb = rest[0];
   if (verb === undefined || verb === "-h" || verb === "--help") {
     if (verb === undefined) {
-      process.stderr.write("huko safety: missing subcommand (init | list | check)\n");
+      process.stderr.write(`huko safety: missing subcommand (${VERBS_HELP})\n`);
     }
     usage(verb === undefined ? 3 : 0);
   }
@@ -35,41 +55,62 @@ export async function dispatchSafety(rest: string[]): Promise<number> {
       return dispatchInit(args);
     case "list":
       return dispatchList(args);
+    case "tool":
+      return dispatchTool(args);
     case "check":
       return dispatchCheck(args);
+    case "enable":
+      return dispatchEnableDisable(args, true);
+    case "disable":
+      return dispatchEnableDisable(args, false);
+    case "deny":
+      return dispatchAppendRule(args, "deny");
+    case "allow":
+      return dispatchAppendRule(args, "allow");
+    case "require":
+      return dispatchAppendRule(args, "requireConfirm");
+    case "unset":
+      return dispatchUnset(args);
     default:
-      process.stderr.write(
-        `huko safety: unknown verb: ${verb} (try: init | list | check)\n`,
-      );
+      process.stderr.write(`huko safety: unknown verb: ${verb} (${VERBS_HELP})\n`);
       usage();
   }
+}
+
+// ─── Scope-flag helper ────────────────────────────────────────────────────
+//
+// Editing verbs default to PROJECT scope; `--global` (or its alias
+// `--project`) is the explicit override. Returns the resolved scope and
+// the leftover argv (with the scope flags stripped).
+
+function pullScope(args: string[]): { scope: ConfigScope; rest: string[] } {
+  let global = false;
+  let projectExplicit = false;
+  const rest: string[] = [];
+  for (const a of args) {
+    if (a === "-h" || a === "--help") usage(0);
+    if (a === "--global") {
+      global = true;
+      continue;
+    }
+    if (a === "--project") {
+      projectExplicit = true;
+      continue;
+    }
+    rest.push(a);
+  }
+  if (global && projectExplicit) {
+    process.stderr.write("huko safety: --global and --project are mutually exclusive\n");
+    usage();
+  }
+  return { scope: global ? "global" : "project", rest };
 }
 
 // ─── init ──────────────────────────────────────────────────────────────────
 
 async function dispatchInit(args: string[]): Promise<number> {
-  let scope: ConfigScope = "global";
-  let scopeSet = false;
-  for (const a of args) {
-    if (a === "-h" || a === "--help") usage(0);
-    if (a === "--global") {
-      if (scopeSet && scope !== "global") {
-        process.stderr.write("huko safety init: --global and --project are mutually exclusive\n");
-        usage();
-      }
-      scope = "global";
-      scopeSet = true;
-      continue;
-    }
-    if (a === "--project") {
-      if (scopeSet && scope !== "project") {
-        process.stderr.write("huko safety init: --global and --project are mutually exclusive\n");
-        usage();
-      }
-      scope = "project";
-      scopeSet = true;
-      continue;
-    }
+  const { scope, rest } = pullScope(args);
+  for (const a of rest) {
     process.stderr.write(`huko safety init: unexpected argument: ${a}\n`);
     usage();
   }
@@ -87,13 +128,102 @@ async function dispatchList(args: string[]): Promise<number> {
   return await safetyListCommand();
 }
 
-// ─── check ─────────────────────────────────────────────────────────────────
+// ─── tool (list-all-tools index) ──────────────────────────────────────────
+
+async function dispatchTool(args: string[]): Promise<number> {
+  for (const a of args) {
+    if (a === "-h" || a === "--help") usage(0);
+    process.stderr.write(`huko safety tool: unexpected argument: ${a}\n`);
+    usage();
+  }
+  return await safetyToolCommand();
+}
+
+// ─── enable / disable ────────────────────────────────────────────────────
+
+async function dispatchEnableDisable(
+  args: string[],
+  enable: boolean,
+): Promise<number> {
+  const verb = enable ? "enable" : "disable";
+  const { scope, rest } = pullScope(args);
+  if (rest.length === 0) {
+    process.stderr.write(
+      `huko safety ${verb}: missing <tool>\n` +
+      `         usage: huko safety ${verb} <tool> [--global]\n`,
+    );
+    usage();
+  }
+  if (rest.length > 1) {
+    process.stderr.write(
+      `huko safety ${verb}: too many arguments (only <tool> is allowed)\n`,
+    );
+    usage();
+  }
+  const toolName = rest[0]!;
+  return enable
+    ? safetyEnableCommand({ toolName, scope })
+    : safetyDisableCommand({ toolName, scope });
+}
+
+// ─── deny / allow / require ──────────────────────────────────────────────
+
+async function dispatchAppendRule(
+  args: string[],
+  bucket: "deny" | "allow" | "requireConfirm",
+): Promise<number> {
+  const verbName = bucket === "requireConfirm" ? "require" : bucket;
+  const { scope, rest } = pullScope(args);
+  if (rest.length < 2) {
+    process.stderr.write(
+      `huko safety ${verbName}: missing arguments\n` +
+      `         usage: huko safety ${verbName} <tool> <pattern> [--global]\n`,
+    );
+    usage();
+  }
+  if (rest.length > 2) {
+    process.stderr.write(
+      `huko safety ${verbName}: too many arguments\n` +
+      `         (got: ${rest.slice(2).join(" ")})\n` +
+      `         If your pattern contains spaces, quote it.\n`,
+    );
+    usage();
+  }
+  const toolName = rest[0]!;
+  const pattern = rest[1]!;
+  return await safetyAppendRuleCommand({ toolName, bucket, pattern, scope });
+}
+
+// ─── unset ────────────────────────────────────────────────────────────────
+
+async function dispatchUnset(args: string[]): Promise<number> {
+  const { scope, rest } = pullScope(args);
+  if (rest.length === 0) {
+    process.stderr.write(
+      "huko safety unset: missing <tool>\n" +
+      "         usage: huko safety unset <tool> [<pattern>] [--global]\n" +
+      "         (no <pattern> = wipe the entire entry, including disabled flag)\n",
+    );
+    usage();
+  }
+  if (rest.length > 2) {
+    process.stderr.write(
+      `huko safety unset: too many arguments (got: ${rest.slice(2).join(" ")})\n`,
+    );
+    usage();
+  }
+  const toolName = rest[0]!;
+  const pattern = rest[1];
+  return await safetyUnsetCommand({
+    toolName,
+    ...(pattern !== undefined ? { pattern } : {}),
+    scope,
+  });
+}
+
+// ─── check (unchanged) ────────────────────────────────────────────────────
 //
 // Argv shape: `huko safety check <tool> <field>=<value> [<field>=<value>...]`
-// Examples:
-//   huko safety check bash command='rm -rf /'
-//   huko safety check write_file path=/etc/passwd
-//   huko safety check move_file from=/a/b to=/c/d
 
 async function dispatchCheck(args: string[]): Promise<number> {
   let toolName: string | undefined;

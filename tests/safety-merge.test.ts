@@ -121,4 +121,34 @@ describe("loader — safety.toolRules union semantics", () => {
     assert.equal(cfg.safety.byDangerLevel.safe, "auto");
     assert.deepEqual(cfg.safety.toolRules, {});
   });
+
+  it("`disabled: true` from any layer wins (OR across layers)", () => {
+    writeUser({ toolRules: { bash: { disabled: true } } });
+    const cfg = loadConfig({ cwd });
+    assert.equal(cfg.safety.toolRules.bash?.disabled, true);
+  });
+
+  it("project `disabled: true` propagates even if global doesn't set it", () => {
+    writeProject({ toolRules: { write_file: { disabled: true } } });
+    const cfg = loadConfig({ cwd });
+    assert.equal(cfg.safety.toolRules.write_file?.disabled, true);
+  });
+
+  it("`disabled: false` is treated as absent (cannot re-enable from a layer)", () => {
+    writeUser({ toolRules: { bash: { disabled: true } } });
+    writeProject({ toolRules: { bash: { disabled: false } } });
+    const cfg = loadConfig({ cwd });
+    // Lower layer disabled, higher layer's `false` doesn't cancel.
+    assert.equal(cfg.safety.toolRules.bash?.disabled, true);
+  });
+
+  it("`disabled` coexists with deny/allow/require buckets", () => {
+    writeUser({ toolRules: { bash: { deny: ["sudo"] } } });
+    writeProject({ toolRules: { bash: { disabled: true, allow: ["ls"] } } });
+    const cfg = loadConfig({ cwd });
+    const bash = cfg.safety.toolRules.bash!;
+    assert.equal(bash.disabled, true);
+    assert.deepEqual(bash.deny, ["sudo"]);
+    assert.deepEqual(bash.allow, ["ls"]);
+  });
 });

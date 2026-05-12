@@ -111,6 +111,39 @@ describe("parseRunArgs — happy path", () => {
     if (b.kind === "ok") assert.equal(b.args.interactive, false);
   });
 
+  it("short flags: -m / -n / -c equal --memory / --new / --chat", () => {
+    const m = parseRunArgs(["-m", "--", "hi"]);
+    assert.equal(m.kind, "ok");
+    if (m.kind === "ok") assert.equal(m.args.ephemeral, true);
+
+    const n = parseRunArgs(["-n", "--", "hi"]);
+    assert.equal(n.kind, "ok");
+    if (n.kind === "ok") assert.equal(n.args.newSession, true);
+
+    const c = parseRunArgs(["-c"]);
+    assert.equal(c.kind, "ok");
+    if (c.kind === "ok") {
+      assert.equal(c.args.chat, true);
+      assert.equal(c.args.prompt, "");
+    }
+  });
+
+  it("short flags compose with each other (no clustering — separate tokens)", () => {
+    const r = parseRunArgs(["-n", "-m", "--", "fix"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.newSession, true);
+    assert.equal(r.args.ephemeral, true);
+    assert.equal(r.args.prompt, "fix");
+  });
+
+  it("clustered short flags (`-nm`) are rejected as unknown — no POSIX bundling", () => {
+    const r = parseRunArgs(["-nm", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /unknown flag: -nm/);
+  });
+
   it("parses --show-tokens", () => {
     const r = parseRunArgs(["--show-tokens", "--", "hi"]);
     assert.equal(r.kind, "ok");

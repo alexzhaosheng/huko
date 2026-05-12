@@ -11,6 +11,7 @@
 
 import type { Tool, ToolParameterSchema } from "../../core/llm/types.js";
 import type { TaskContext } from "../../engine/TaskContext.js";
+import { getConfig, isConfigLoaded } from "../../config/index.js";
 
 // ─── ToolHandlerResult ────────────────────────────────────────────────────────
 
@@ -192,12 +193,35 @@ export function getToolsForLLM(filter?: ToolFilter | ToolFilterContext): Tool[] 
     interactive: ctx.interactive ?? true,
     lean: ctx.lean ?? false,
   };
+  const safetyDisabled = collectSafetyDisabledTools();
   const out: Tool[] = [];
   for (const [name, t] of registry) {
     if (ctx.allowedTools !== undefined && !ctx.allowedTools.includes(name)) continue;
     if (ctx.deniedTools?.includes(name)) continue;
     if (ctx.predicate && !ctx.predicate(name, t.kind)) continue;
+    // Per-tool `disabled: true` in the merged safety config removes the
+    // tool from the LLM's surface entirely — both full and lean modes,
+    // both server and workstation tools. Stronger than `deny` patterns
+    // (which still expose the tool to the LLM and refuse at execution).
+    if (safetyDisabled.has(name)) continue;
     out.push(materialise(t.definition, matCtx));
+  }
+  return out;
+}
+
+/**
+ * Pull the set of tool names whose merged safety config has
+ * `disabled: true`. Best-effort: if the config hasn't been loaded yet
+ * (some test paths skip bootstrap), returns an empty set rather than
+ * forcing a load — calling `getConfig()` before `loadConfig()` would
+ * surface a misleading "config not loaded" error in surprising places.
+ */
+function collectSafetyDisabledTools(): Set<string> {
+  if (!isConfigLoaded()) return new Set();
+  const out = new Set<string>();
+  const rules = getConfig().safety.toolRules;
+  for (const [name, rule] of Object.entries(rules)) {
+    if (rule.disabled === true) out.add(name);
   }
   return out;
 }

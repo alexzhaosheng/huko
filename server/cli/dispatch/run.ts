@@ -137,12 +137,12 @@ export function parseRunArgs(rest: string[]): ParseResult {
       i++;
       continue;
     }
-    if (arg === "--memory") {
+    if (arg === "--memory" || arg === "-m") {
       ephemeral = true;
       i++;
       continue;
     }
-    if (arg === "--new") {
+    if (arg === "--new" || arg === "-n") {
       newSession = true;
       i++;
       continue;
@@ -167,7 +167,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       i++;
       continue;
     }
-    if (arg === "--chat") {
+    if (arg === "--chat" || arg === "-c") {
       chat = true;
       i++;
       continue;
