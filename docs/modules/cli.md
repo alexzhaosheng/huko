@@ -92,14 +92,29 @@ huko -- hello
 
 ### `huko [flags] -- <prompt>`
 
-**Argv 协议**：Flag 放最前面；`--` sentinel **必填**，后面所有内容逐字成为 prompt（包括 `--xxx` 形式的内容）。强制 `--` 是为了让"第一个 bare word"始终明确归属于 subcommand 选择，typo 的子命令（如 `huko sesions list`）不会被静默吞成 prompt 发给 LLM。这意味着：
+**Argv 协议**：Flag 放最前面；`--` sentinel **必填**，后面所有内容逐字成为 prompt（包括 `--xxx` 形式的内容）。强制 `--` 是为了让"第一个 bare word"始终明确归属于 subcommand 选择，typo 的子命令（如 `huko sesions list`）不会被静默吞成 prompt 发给 LLM。
+
+**stdin（pipe-friendly）**：当 stdin 是 pipe 或文件重定向时，自动作为输入数据进入 prompt：
+
+| 调用形式 | 解析结果 |
+|---|---|
+| `huko -- "instruction"` （TTY） | prompt = `"instruction"` |
+| `cat data \| huko -- "instruction"` | prompt = `"<data>\n\n---\n\n<instruction>"`（unix 心智：data 是输入，instruction 是操作） |
+| `cat data \| huko` | prompt = `<data>` |
+| `huko < prompt.txt` | prompt = 文件内容 |
+| `huko -` | prompt = stdin（显式 unix 习惯，不允许 argv prompt） |
+
+实例：
 
 - `huko --new -- explain --no-interaction works` — 合法，prompt 含 `--no-interaction`
 - `huko -- hello` — 合法，prompt = "hello"
-- `huko --new` — 合法（空 prompt → runCommand 决定：读 stdin / 报错）
+- `cat errors.log \| huko -- "extract the root cause" > summary.txt` — pipe-friendly 经典模式
+- `huko --new` — 合法（空 prompt + 无 stdin → 提示 prompt required）
 - `huko -- -3 + 5 = ?` — 合法，prompt 可以以 `-` 开头
 - `huko --new fix the bug` — **错误**：bare positional 没有 `--` 引导
 - `huko sesions list` — **错误**：unknown subcommand（不会被当作 prompt）
+
+**bash tool 嵌套安全**：huko 自带的 `bash` tool 在 exec 时把用户命令包成 `{ ... } </dev/null`（Windows 是 `( ... ) <nul`），inner 命令默认不继承 shell session 的 stdin pipe——这意味着 LLM 在 bash tool 里跑 `huko -- "..."` 不会因为继承 shell stdin 而误读字节。用户写的 pipe（`cat file | huko ...`）照常 work（pipe 优先级高于 group 重定向）。
 
 
 #### Session 选择规则

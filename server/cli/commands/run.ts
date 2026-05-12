@@ -46,7 +46,6 @@ import {
   setActiveSessionId,
 } from "../state.js";
 import { getConfig, loadConfig } from "../../config/index.js";
-import { fstatSync } from "node:fs";
 
 export type RunArgs = {
   prompt: string;
@@ -130,22 +129,17 @@ function deriveTitleFromPrompt(prompt: string, max: number = 40): string {
 function promptRequiredHint(): void {
   process.stderr.write(
     "huko: prompt is required.\n" +
-      "       Try: huko -- fix the bug in main.ts\n" +
-      "       Pipe: echo '...' | huko -        (`-` = read prompt from stdin)\n" +
-      "       File: huko < prompt.txt          (works without `-`)\n" +
-      "       REPL: huko --chat\n",
+      "       Inline:    huko -- fix the bug in main.ts\n" +
+      "       Pipe data: cat errors.log | huko -- extract the root cause\n" +
+      "       Stdin:     echo '...' | huko -            (`-` = stdin is the prompt)\n" +
+      "       File:      huko < prompt.txt\n" +
+      "       REPL:      huko --chat\n",
   );
 }
 
 /**
- * Drain stdin and return its UTF-8 contents. Used only when the caller
- * has *explicit* signal that stdin should be the prompt source — either
- * the `-` argv token or a regular-file FD (`huko < prompt.txt`). For
- * pipes / sockets we never read without `-`, because there's no way to
- * tell at the syscall layer whether bytes on a pipe are intentional
- * input from the user or stale data from an inherited shell pipe (e.g.
- * the next command queued by a parent bash). See chat 2026-05-12 for
- * the failure mode this avoids.
+ * Drain stdin and return its UTF-8 contents. Caller decides whether
+ * stdin should be read at all — see `runCommand`'s precedence comment.
  */
 async function readAllStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -156,17 +150,16 @@ async function readAllStdin(): Promise<string> {
 }
 
 /**
- * True when FD 0 is a regular file — i.e. the operator did
- * `huko < prompt.txt`. Exported because index.ts also needs to make
- * the same TTY-vs-file-vs-pipe decision when deciding whether to
- * print usage for the bare-`huko` (no args) case.
+ * Combine an instruction (from argv `-- ...`) with piped data (from
+ * stdin) into a single LLM prompt. Mirrors the unix mental model of
+ * `cat data | grep PATTERN` / `cat data | jq EXPR` — the data is
+ * implicit input, the argv argument is the operation. We materialise
+ * both into one prompt: the data block first, a separator, then the
+ * instruction. Models read it the same way a human would skim a
+ * "here's some context, now do X" message.
  */
-export function stdinIsRegularFile(): boolean {
-  try {
-    return fstatSync(0).isFile();
-  } catch {
-    return false;
-  }
+function combineDataAndInstruction(data: string, instruction: string): string {
+  return `${data}\n\n---\n\n${instruction}`;
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
@@ -183,29 +176,57 @@ export async function runCommand(args: RunArgs): Promise<number> {
     return await chatCommand(args);
   }
 
-  // Resolve prompt source. Precedence:
-  //   1. argv prompt (`huko -- ...`)                         — wins
-  //   2. explicit `-` token in argv (args.stdinPrompt)       — drain stdin
-  //   3. empty argv + stdin is a regular file (`huko < ...`) — drain stdin
-  //   4. otherwise                                           — "prompt required"
+  // Resolve prompt source. Precedence (pipe-friendly, unix-standard):
   //
-  // We deliberately do NOT auto-drain stdin just because it's a pipe.
-  // A pipe with bytes on it is ambiguous at the syscall layer between
-  // "user piped me a prompt" and "I inherited a parent shell's pipe
-  // with the next queued command in it". Requiring an explicit `-`
-  // for the pipe case eliminates the ambiguity.
+  //   1. `-` in argv (args.stdinPrompt) → stdin IS the prompt, no argv
+  //      prompt allowed (parser enforces). Standard unix idiom.
+  //   2. argv prompt + non-TTY stdin with bytes → COMBINE: the stdin
+  //      is "input data", the argv prompt is "the instruction". This
+  //      is the canonical pipe form: `cat data | huko -- "extract X"`.
+  //   3. argv prompt + (TTY OR empty stdin) → argv only. Plain
+  //      `huko -- "..."` from a terminal, or `huko -- "..." < /dev/null`.
+  //   4. no argv prompt + non-TTY stdin → stdin IS the prompt
+  //      (`echo "..." | huko`, `huko < prompt.txt`).
+  //   5. no argv prompt + TTY (or stdin yields nothing useful) → usage.
+  //
+  // The bash tool's exec wrapper (`{ … } </dev/null`) ensures that
+  // commands invoked from inside another huko's persistent shell don't
+  // inherit that shell's stdin pipe and accidentally consume bytes
+  // queued for the shell itself. With that in place, "non-TTY stdin
+  // with bytes" cleanly means "the user redirected real input here".
   let effectivePrompt = args.prompt;
   let stdinFed = false;
-  if (effectivePrompt.length === 0) {
-    const wantStdin = args.stdinPrompt === true || stdinIsRegularFile();
-    if (!wantStdin) {
-      promptRequiredHint();
-      return 3;
-    }
+  const stdinIsTTY = process.stdin.isTTY === true;
+
+  if (args.stdinPrompt === true) {
+    // Case 1: `huko -` → stdin is the whole prompt.
     effectivePrompt = (await readAllStdin()).trim();
     stdinFed = true;
     if (effectivePrompt.length === 0) {
       process.stderr.write("huko: stdin was empty; no prompt provided\n");
+      return 3;
+    }
+  } else if (effectivePrompt.length > 0) {
+    // Case 2 / 3: argv prompt present. Pull stdin if it's piped + has
+    // data; otherwise leave the argv prompt alone.
+    if (!stdinIsTTY) {
+      const piped = (await readAllStdin()).trim();
+      if (piped.length > 0) {
+        effectivePrompt = combineDataAndInstruction(piped, effectivePrompt);
+        stdinFed = true;
+      }
+    }
+  } else {
+    // Case 4 / 5: no argv prompt. Try stdin first.
+    if (!stdinIsTTY) {
+      const piped = (await readAllStdin()).trim();
+      if (piped.length > 0) {
+        effectivePrompt = piped;
+        stdinFed = true;
+      }
+    }
+    if (effectivePrompt.length === 0) {
+      promptRequiredHint();
       return 3;
     }
   }

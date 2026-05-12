@@ -318,18 +318,31 @@ async function actionExec(
   // Append a unique marker so we can detect command completion AND
   // capture the exit code. POSIX uses $?; Windows cmd uses %ERRORLEVEL%.
   //
-  // The sentinel MUST go on a NEW LINE, not after a `;` — otherwise a
+  // The marker MUST go on a NEW LINE, not glued via `;` — otherwise a
   // command ending in a heredoc delimiter (e.g. `cat << 'EOF'\n…\nEOF`)
   // gets the sentinel glued onto the EOF line, which then doesn't match
-  // bash's "delimiter alone on its line" requirement. The heredoc never
-  // terminates, cat blocks reading stdin, and we time out. Same trap
-  // exists for a command ending in `# comment` — the sentinel would be
-  // commented out. Windows already uses CRLF here; this is the POSIX fix.
+  // bash's "delimiter alone on its line" requirement. Same trap exists
+  // for a command ending in `# comment` — the sentinel would be commented
+  // out.
+  //
+  // The user's command is wrapped in a group with stdin redirected to
+  // the platform's null device. Without this, child processes inherit
+  // the persistent shell's stdin pipe — and any tool that reads stdin
+  // by default (huko, cat, grep, ...) silently consumes the bytes that
+  // were queued for the shell itself, including OUR marker echo line,
+  // which then never runs and the polling loop times out forever. The
+  // group preserves user-written pipes (`cat file | huko ...`) because
+  // pipe redirects override the group's stdin. Marker echo lives
+  // OUTSIDE the group so $? still reflects the user command's exit.
+  //
+  // The closing `}` / `)` MUST also be on its own line (same heredoc /
+  // trailing-comment hazard as the marker) — we never append shell
+  // tokens to the trailing line of the user command.
   const marker = `__HUKO_DONE_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
   const launch =
     process.platform === "win32"
-      ? `${command}\r\necho ${marker}:%ERRORLEVEL%\r\n`
-      : `${command}\necho "${marker}:$?"\n`;
+      ? `(\r\n${command}\r\n) <nul\r\necho ${marker}:%ERRORLEVEL%\r\n`
+      : `{\n${command}\n} </dev/null\necho "${marker}:$?"\n`;
   writeStdin(s.child, launch);
 
   const markerRegex = new RegExp(`${marker}:(\\d+)`);

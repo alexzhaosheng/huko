@@ -68,9 +68,9 @@
         <article class="feature">
           <h2><span class="section-mark">[05]</span> Zero-trace Runs</h2>
           <pre class="terminal"><code><span class="pair"><span class="comment"># run without touching session storage</span>
-<span class="command">huko --memory -- "summarize this build log in 3 bullets"</span></span>
-<span class="pair"><span class="comment"># return machine-readable output</span>
-<span class="command">huko --memory --json -- "return a release note draft"</span></span>
+<span class="command">cat build.log | huko --memory -- "summarize this in 3 bullets"</span></span>
+<span class="pair"><span class="comment"># pipe + JSON output for downstream tooling</span>
+<span class="command">git diff | huko --memory --json -- "return a release note draft"</span></span>
 <span class="pair"><span class="comment"># ask something private and leave no trail</span>
 <span class="command">huko --memory -- "private question"</span></span></code></pre>
         </article>
@@ -78,7 +78,7 @@
         <article class="feature">
           <h2><span class="section-mark">[06]</span> Inspectable Agents</h2>
           <pre class="terminal"><code><span class="pair"><span class="comment"># capture a final result as JSON</span>
-<span class="command">huko --json -- "generate a changelog from these commits"</span></span>
+<span class="command">git log --oneline -50 | huko --json -- "generate a changelog from these commits"</span></span>
 <span class="pair"><span class="comment"># stream semantic events line by line</span>
 <span class="command">huko --jsonl -- "fetch the page and extract the title"</span></span>
 <span class="pair"><span class="comment"># inspect the project-specific agent surface</span>

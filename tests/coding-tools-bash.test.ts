@@ -369,6 +369,47 @@ describe("bash — exec terminator placement (heredoc / comment safety)", () => 
   });
 });
 
+// ─── exec: stdin isolation (the inherited-pipe footgun) ────────────────────
+
+describe("bash — exec wraps user command so stdin doesn't leak from the shell", () => {
+  // Without the `{ … } </dev/null` (POSIX) / `( … ) <nul` (Windows)
+  // wrapper, child processes inherit the persistent shell's stdin pipe.
+  // Tools that read stdin by default (cat, grep, huko, ...) silently
+  // consume the bytes that were queued for the shell — including the
+  // marker echo line, which then never runs and the polling loop
+  // times out forever. These tests pin the wrapper.
+
+  it("`cat` (no args, no input) returns immediately instead of blocking on inherited stdin", { skip: isWin }, async () => {
+    // Pre-wrapper behaviour: this would hang for the full 1500ms
+    // (cat blocks waiting for input that never comes), then return
+    // with a "still running" timeout note. Post-wrapper: cat sees
+    // /dev/null on its stdin, EOFs immediately, exits 0.
+    const sid = freshSession();
+    const start = Date.now();
+    const out = await invoke("bash", {
+      action: "exec",
+      command: "cat",
+      session: sid,
+      timeout_ms: 1500,
+    });
+    const elapsed = Date.now() - start;
+    assert.doesNotMatch(out.content, /still running|timed out|idle timeout/, `unexpected timeout: ${out.content}`);
+    assert.match(out.content, /\[exit code: 0\]/);
+    assert.ok(elapsed < 1000, `cat should EOF immediately, took ${elapsed}ms`);
+  });
+
+  it("user-written pipes still work (pipe redirect overrides the group's </dev/null)", { skip: isWin }, async () => {
+    const out = await invoke("bash", {
+      action: "exec",
+      command: "echo hello-from-pipe | cat",
+      session: freshSession(),
+      timeout_ms: 3000,
+    });
+    assert.match(out.content, /hello-from-pipe/);
+    assert.match(out.content, /\[exit code: 0\]/);
+  });
+});
+
 // ─── helper ─────────────────────────────────────────────────────────────────
 
 async function invoke(
