@@ -91,6 +91,18 @@ describe("buildSystemPrompt — structural blocks", () => {
     assert.match(prompt, /system_reminder/);
     assert.match(prompt, /platform guidance/i);
   });
+
+  it("tells the agent NOT to revisit older user requests after delivery (cross-task drift fix)", async () => {
+    // Regression guard for the bug observed in huko's own session 2 task 6:
+    // agent finished `git push` then auto-resumed an older stopped task's
+    // goal ("write command.md"). The principle below should keep it from
+    // scanning the conversation backwards for "leftover" requests.
+    const prompt = await buildWith({});
+    assert.match(prompt, /scan the conversation for older user requests/i);
+    // The three explanations of why an earlier user_message might be there:
+    // completed / stopped / superseded.
+    assert.match(prompt, /completed.*stopped.*superseded/i);
+  });
 });
 
 // ─── Cache boundary ─────────────────────────────────────────────────────────
