@@ -24,8 +24,9 @@
 
       <section class="feature-list" aria-label="Key features">
         <article class="feature">
-          <h2><span class="section-mark">[01]</span> Full &amp; Lean Modes</h2>
-          <p class="tagline">Production-grade agent or lightweight bash-only — one binary, two shapes.</p>
+          <h2><span class="section-mark">[01]</span> Full Power, Lean Footprint</h2>
+          <p class="tagline"><strong>Full mode</strong> — a production-grade agent with full planning capabilities, complete tool suite, and project context. Built for complex, multi-step workflows.</p>
+          <p class="tagline"><strong>Lean mode</strong> — bash-only, ~400 token overhead, fast even on small models. Perfect for one-shot questions and simple operations.</p>
           <pre class="terminal"><code><span class="pair"><span class="comment"># full — complete agent: planning, 13 tools, project context, role system</span>
 <span class="command">huko -- "review this diff, flag risky changes, suggest fixes"</span></span>
 <span class="pair"><span class="comment"># lean — bash-only, ~400 token overhead, fast even on small models</span>
@@ -33,13 +34,15 @@
         </article>
 
         <article class="feature">
-          <h2><span class="section-mark">[02]</span> Explicit Setup</h2>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># start with the guided path</span>
-<span class="command">huko setup</span></span>
-<span class="pair"><span class="comment"># add a provider definition</span>
-<span class="command">huko provider add --name=OpenRouter --protocol=openai --base-url=https://openrouter.ai/api/v1 --api-key-ref=openrouter</span></span>
-<span class="pair"><span class="comment"># bind the key to a named ref</span>
-<span class="command">huko keys set openrouter sk-or-...</span></span></code></pre>
+          <h2><span class="section-mark">[02]</span> Project as Context</h2>
+          <p class="tagline"><strong>State lives in the project.</strong> Sessions, config, and agent memory are scoped to the directory you're in — <code>.huko/</code>, just like <code>.git/</code>. CD into a repo and huko picks up its full context. CD out and it's a different world.</p>
+          <p class="tagline"><strong>No trace when you want none.</strong> Pass <code>--memory</code> to skip session storage entirely — nothing written to disk, perfect for one-off questions and private queries.</p>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># state lives in .huko/ — scoped to this project, just like git</span>
+<span class="command">cd ~/projects/backend && huko -- "continue the auth refactor"</span></span>
+<span class="pair"><span class="comment"># switch directories, switch worlds — different sessions, different config</span>
+<span class="command">cd ~/projects/frontend && huko -- "review the new component"</span></span>
+<span class="pair"><span class="comment"># one-off, no trace — --memory skips session storage entirely</span>
+<span class="command">huko --memory -- "explain this regex"</span></span></code></pre>
         </article>
 
         <article class="feature">

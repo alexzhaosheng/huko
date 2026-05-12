@@ -93,6 +93,22 @@ h1 {
   line-height: 1.65;
 }
 
+.feature .tagline {
+  max-width: none;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 0.92rem;
+  line-height: 1.6;
+}
+
+.feature .tagline + .tagline {
+  margin-top: 8px;
+}
+
+.feature .tagline strong {
+  font-weight: 600;
+  color: var(--accent);
+}
+
 .feature-list {
   display: grid;
   gap: 0;
@@ -135,9 +151,18 @@ h1 {
 code {
   font-family: inherit;
   display: block;
-  font-size: 0.84rem;
-  line-height: 1.65;
+  font-size: 0.92rem;
+  line-height: 1.15;
   white-space: pre;
+}
+
+.tagline code {
+  display: inline;
+  font-size: 0.85rem;
+  padding: 0 4px;
+  border: 1px solid rgba(154, 255, 188, 0.15);
+  border-radius: 3px;
+  background: rgba(154, 255, 188, 0.06);
 }
 
 .pair,
@@ -147,7 +172,7 @@ code {
 }
 
 .pair {
-  margin-bottom: 0.24rem;
+  margin-bottom: 0;
 }
 
 .pair:last-child {
@@ -155,6 +180,8 @@ code {
 }
 
 .comment {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 0.82rem;
   color: #7f9385;
 }
 
