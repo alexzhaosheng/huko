@@ -150,7 +150,8 @@ CI 不依赖 edge-image，反过来也一样：
 - `actions/setup-node` with `registry-url=https://registry.npmjs.org`
 - `npm ci`
 - `npm publish --provenance --access public`（`prepublishOnly` 在 package.json 里已经跑 check + build:cli，不用单独再跑）
-- `--provenance` 加 SLSA build 见证，npm UI 的 Provenance tab 能看
+- `--access public` 是 scoped 包发 public 的硬要求
+- `--provenance` 加 SLSA build 见证（npm UI 的 Provenance tab 能看），**要求 GitHub repo public**——repo 私有时 npm reject E422
 - 用 `secrets.NPM_TOKEN`
 
 **`docker-publish`** (gated on preflight)：
@@ -294,6 +295,14 @@ docker pull ghcr.io/alexzhaosheng/huko:edge
 - **403** with `You do not have permission`：package 名被别人占了或 npm 锁着。改 `package.json:name` 成 scoped（`@<your-handle>/huko`）；workflow 里 `--access public` 已经存在，scoped 公开包必须的。
 
 > **历史**：v0.1.0 第一次试发时 `huko` 这个 unscoped name 被 npm 锁住（2018 年 unpublished 后命名空间没释放）。决定走 scoped `@alexzhaosheng/huko`——立刻能发，永远不冲突。Bin 名仍然是 `huko`（package.json 的 `bin` field 单独定义），用户 install 后输 `huko --help` 不变。
+
+### release.yml 里 npm publish E422 "Unsupported GitHub Actions source repository visibility: private"
+
+`--provenance` flag 要求 GitHub repo 是 **public**（npm 校验 sigstore bundle 时拒绝 private repo）。两条路：
+- 把 repo 公开（推荐——保留 provenance）
+- 去掉 `--provenance` + 删 workflow 的 `id-token: write` permission（牺牲 SLSA 见证）
+
+v0.1.0 发版时选了第一条；workflow 假定 repo public。如果未来又把 repo 设回 private，记得同步删掉 `--provenance`。
 
 ### release.yml 里 preflight 失败 (`tag X expects version Y but found Z`)
 

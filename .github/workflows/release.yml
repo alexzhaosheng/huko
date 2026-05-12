@@ -29,7 +29,7 @@ on:
 permissions:
   contents: write   # to create the GitHub Release at the end
   packages: write   # to push to ghcr.io
-  id-token: write   # for npm provenance attestation
+  id-token: write   # for npm provenance attestation (requires public repo)
 
 concurrency:
   # One release at a time. Never cancel an in-flight release — partial
@@ -93,13 +93,14 @@ jobs:
       - run: npm ci
 
       - name: Publish to npm (with provenance)
-        # `prepublishOnly` (in package.json) runs check + build:cli, so we
-        # don't need a separate type-check / build step here.
-        # `--provenance` attaches a SLSA build attestation, viewable in
-        # the npm UI under the package's "Provenance" tab.
-        # `--access public` is required for first-time publishes and
-        # harmless thereafter; with a scoped name (e.g. @user/huko) it
-        # would be required to avoid the default-private behavior.
+        # `prepublishOnly` (in package.json) runs check + build:cli,
+        # so we don't need a separate type-check / build step here.
+        # `--access public` is required for scoped packages so they
+        # publish public (scoped default is private).
+        # `--provenance` attaches a SLSA build attestation, viewable
+        # in the npm UI's "Provenance" tab. REQUIRES the GitHub
+        # source repo to be public + id-token: write permission;
+        # otherwise npm rejects with E422.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
