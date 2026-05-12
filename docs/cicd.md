@@ -212,7 +212,7 @@ git push origin v0.1.0       # 这一步触发 release.yml
 ```
 
 ### 5. 验证（release.yml 跑完后）
-- [ ] `npm install -g huko@0.1.0` 装得到
+- [ ] `npm install -g @alexzhaosheng/huko@0.1.0` 装得到
 - [ ] `docker pull ghcr.io/alexzhaosheng/huko:0.1.0` 拉得到
 - [ ] `docker pull ghcr.io/alexzhaosheng/huko:latest` 也能拉到（同一 image digest）
 - [ ] GitHub Releases 页面有 v0.1.0 条目
@@ -251,7 +251,7 @@ docker rmi huko-local:dev
 |---|---|---|
 | ci | 无（独立） | PR / push 自动检查；release 前置 |
 | edge-image | 无（独立） | 用户测 `huko docker run` |
-| release | npm/ghcr secrets 配置 | 用户拉 `:VERSION` 镜像、`npm install -g huko@x.y.z` |
+| release | npm/ghcr secrets 配置 | 用户拉 `:VERSION` 镜像、`npm install -g @alexzhaosheng/huko@x.y.z` |
 
 故意不让 edge-image 依赖 ci——CI 失败不该阻塞已合并代码的镜像发布（image 反正是 `:edge`，本来就是 "main 当前快照"，质量责任在 PR review 不在镜像 build）。如果将来想加严格联动，参考 Phase 1 的"跟 edge-image 的关系"小节。
 
@@ -291,7 +291,9 @@ docker pull ghcr.io/alexzhaosheng/huko:edge
 ### release.yml 里 npm publish 401 / 403
 
 - **401**：`NPM_TOKEN` 没设 / 过期 / 类型不对。要 "Automation" 类型的 token，不是 "Publish"（虽然两者都能用，但 Automation 不需要 2FA 交互）。
-- **403** with `You do not have permission`：package 名被别人占了。改 package.json 的 name 成 scoped（如 `@alexzhaosheng/huko`），workflow 里 `--access public` 自动适用。
+- **403** with `You do not have permission`：package 名被别人占了或 npm 锁着。改 `package.json:name` 成 scoped（`@<your-handle>/huko`）；workflow 里 `--access public` 已经存在，scoped 公开包必须的。
+
+> **历史**：v0.1.0 第一次试发时 `huko` 这个 unscoped name 被 npm 锁住（2018 年 unpublished 后命名空间没释放）。决定走 scoped `@alexzhaosheng/huko`——立刻能发，永远不冲突。Bin 名仍然是 `huko`（package.json 的 `bin` field 单独定义），用户 install 后输 `huko --help` 不变。
 
 ### release.yml 里 preflight 失败 (`tag X expects version Y but found Z`)
 

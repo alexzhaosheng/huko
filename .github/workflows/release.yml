@@ -190,7 +190,7 @@ jobs:
 
             **npm**:
             ```bash
-            npm install -g huko@${{ needs.preflight.outputs.version }}
+            npm install -g @alexzhaosheng/huko@${{ needs.preflight.outputs.version }}
             ```
 
             **Docker**:
