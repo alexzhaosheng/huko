@@ -64,6 +64,16 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           process.stderr.write(dimErr(event.delta));
           break;
 
+        case "llm_progress_tick":
+          // Heartbeat during silent LLM waits — emitted only when no
+          // chunk has arrived for ~10s (see llm-call.ts). Renders as
+          // a single dim middle-dot so pipe consumers (e.g. the bash
+          // tool of a parent huko, watching for idle output) see we're
+          // alive while a thinking model takes its time on time-to-
+          // first-token. No newline — keeps the dots clustered.
+          process.stderr.write(dimErr("·"));
+          break;
+
         case "assistant_complete":
           if (assistantStreaming) {
             process.stdout.write("\n");

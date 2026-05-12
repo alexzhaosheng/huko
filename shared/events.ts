@@ -86,6 +86,29 @@ export type AssistantThinkingDeltaEvent = {
 };
 
 /**
+ * Heartbeat fired during long, silent LLM calls — the wait between
+ * "request sent" and "first token received" can be 30s+ on thinking
+ * models. Without these ticks, callers piping huko's output (especially
+ * `huko` invoked from another huko's bash tool) see no activity for
+ * minutes and may treat the process as hung.
+ *
+ * Cadence: emitted every ~10s by `task/pipeline/llm-call.ts` while no
+ * stream chunk has arrived in the same window. Stops as soon as the
+ * first content/thinking delta lands. The text formatter renders it
+ * as a single dim "·" on stderr; jsonl passes it through; the json
+ * (final-only) formatter ignores it.
+ */
+export type LLMProgressTickEvent = {
+  type: "llm_progress_tick";
+  entryId: number;
+  taskId: number;
+  sessionId: number;
+  sessionType: SessionType;
+  /** Milliseconds since the LLM call began. */
+  elapsedMs: number;
+};
+
+/**
  * The assistant turn finalised. `content` is authoritative — whatever the
  * frontend reconstructed via deltas should match. `toolCalls`, when
  * present, will each receive a follow-up `tool_result` event.
@@ -275,6 +298,7 @@ export type HukoEvent =
   | AssistantContentDeltaEvent
   | AssistantThinkingDeltaEvent
   | AssistantCompleteEvent
+  | LLMProgressTickEvent
   | ToolResultEvent
   | SystemNoticeEvent
   | SystemReminderEvent

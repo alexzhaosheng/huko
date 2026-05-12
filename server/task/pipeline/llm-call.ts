@@ -32,6 +32,19 @@ export type LLMCallOutcome =
 
 const DB_FLUSH_MS = 100;
 
+// ─── Heartbeat ────────────────────────────────────────────────────────────────
+
+/**
+ * How often to emit `llm_progress_tick` while waiting on the LLM. The
+ * tick is only emitted when no stream chunk has arrived in the same
+ * window — so streaming responses produce zero ticks. The point is
+ * keeping pipe consumers (e.g. another huko's bash tool, watching for
+ * idle output) aware that we're alive during the slow time-to-first-
+ * token gap on thinking models. 10s is comfortably under the bash
+ * tool's 30s default idle timeout.
+ */
+const HEARTBEAT_INTERVAL_MS = 10_000;
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
@@ -78,6 +91,8 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
   let lastDbFlush = 0;
   let pendingDbFlush: ReturnType<typeof setTimeout> | null = null;
   let inflightFlush: Promise<void> | null = null;
+  let lastChunkAt = Date.now();
+  const callStart = lastChunkAt;
 
   const flushDb = (): void => {
     if (!dbDirty) return;
@@ -96,6 +111,7 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
   };
 
   const onPartial = (e: PartialEvent): void => {
+    lastChunkAt = Date.now();
     if (e.type === "content") {
       content += e.delta;
       sc.emit({
@@ -130,6 +146,25 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     }
   };
 
+  // ── 4b. Heartbeat timer ──────────────────────────────────────────────────
+  // Fires every HEARTBEAT_INTERVAL_MS; emits a tick ONLY if no chunk has
+  // arrived in that window. Streaming responses (chunks every few hundred
+  // ms) keep `lastChunkAt` fresh and produce zero ticks. Long silent
+  // pre-stream waits — common on thinking models — generate a tick every
+  // 10s so pipe consumers see we're alive.
+  const heartbeatTimer = setInterval(() => {
+    if (Date.now() - lastChunkAt < HEARTBEAT_INTERVAL_MS) return;
+    sc.emit({
+      type: "llm_progress_tick",
+      entryId,
+      taskId: ctx.taskId,
+      sessionId: ctx.sessionId,
+      sessionType: ctx.sessionType,
+      elapsedMs: Date.now() - callStart,
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
+
   // ── 5. Invoke ────────────────────────────────────────────────────────────
   let result: LLMTurnResult;
   try {
@@ -149,6 +184,7 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     };
     result = await invoke(callOptions);
   } catch (err: unknown) {
+    clearInterval(heartbeatTimer);
     if (pendingDbFlush) clearTimeout(pendingDbFlush);
     ctx.masterAbort.signal.removeEventListener("abort", onMasterAbort);
     ctx.currentLlmAbort = null;
@@ -167,6 +203,7 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     throw err;
   }
 
+  clearInterval(heartbeatTimer);
   if (pendingDbFlush) clearTimeout(pendingDbFlush);
   ctx.masterAbort.signal.removeEventListener("abort", onMasterAbort);
   ctx.currentLlmAbort = null;
