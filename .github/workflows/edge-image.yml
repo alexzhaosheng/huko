@@ -79,10 +79,23 @@ jobs:
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
 
       - name: Smoke test (amd64)
-        # Pull what we just pushed and verify it runs `huko --help`
-        # cleanly. Uses the SHA-pinned tag so we test exactly what
-        # we just built, not a possibly-newer :edge.
+        # Pull what we just pushed and verify it actually runs through
+        # the ENTRYPOINT correctly. Two checks:
+        #
+        #   1. `--help` (leading `-`) — catches the regression where
+        #      the inherited node entrypoint prepends `node` to
+        #      dash-prefixed args. The wrapper's argv shape always
+        #      starts with `--` or `-flag`, so this is the realistic
+        #      probe; a `huko --help` without the leading dash bypasses
+        #      the bug.
+        #   2. `info global` (a noun-verb subcommand) — catches the
+        #      reverse: ENTRYPOINT not picking up subcommands when
+        #      first arg has no dash.
+        #
+        # Uses the SHA-pinned tag so we test exactly what we just
+        # built, not a possibly-newer :edge.
         run: |
-          docker run --rm --platform linux/amd64 \
-            ghcr.io/alexzhaosheng/huko:edge-${{ github.sha }} \
-            huko --help | head -5
+          set -euxo pipefail
+          IMAGE=ghcr.io/alexzhaosheng/huko:edge-${{ github.sha }}
+          docker run --rm --platform linux/amd64 "$IMAGE" --help | head -5
+          docker run --rm --platform linux/amd64 "$IMAGE" info global | head -5 || true

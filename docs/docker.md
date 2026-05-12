@@ -15,9 +15,11 @@ docker run --rm -i \
   -v "$PWD:/work" \
   -v "$HOME/.huko:/root/.huko" \
   --workdir /work \
-  ghcr.io/alexzhaosheng/huko:latest \
+  ghcr.io/alexzhaosheng/huko:edge \
   -- "fix the bug in main.ts"
 ```
+
+**镜像 ENTRYPOINT 契约**：image 的 `ENTRYPOINT` 是 `["huko"]`，所以 docker 的位置参数直接当作 huko 的 argv。`docker run … <image> sessions list` 跑 `huko sessions list`；`docker run … <image> -- "prompt"` 跑 `huko -- "prompt"`。这跟在 host 直接敲 `huko ...` 完全一致。
 
 `huko docker run` 这个 wrapper 的全部职责就是**把那串 `-v ... -v ... --workdir ...` 模板免去**，其它语义跟主 huko 一模一样：相同的 flags、相同的 `--` sentinel、相同的 pipe-friendly stdin。
 

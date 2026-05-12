@@ -62,6 +62,14 @@ RUN ln -s /opt/huko/bin/huko.mjs /usr/local/bin/huko
 # (without the wrapper) lands in the right place.
 WORKDIR /work
 
-# No ENTRYPOINT — users (and the wrapper) pass arbitrary `huko`
-# subcommands as docker args, no quoting around an entrypoint.
-CMD ["huko", "--help"]
+# Override the inherited ENTRYPOINT (`docker-entrypoint.sh` from the
+# node base image), which prepends `node` to any arg starting with
+# `-`. Without this override the wrapper's `-- "<prompt>"` becomes
+# `node -- "<prompt>"`, and node tries to load `<prompt>` as a script.
+#
+# With ENTRYPOINT=["huko"], `docker run <image> [args...]` becomes
+# `huko [args...]` — exactly the contract the wrapper expects, and
+# the same as users typing `huko ...` on the host. CMD provides the
+# default args when none are given (`docker run <image>` alone).
+ENTRYPOINT ["huko"]
+CMD ["--help"]
