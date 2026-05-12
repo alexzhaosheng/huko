@@ -1,0 +1,88 @@
+# =============================================================================
+# Line-ending policy for huko
+# =============================================================================
+#
+# huko is developed across Windows (Node + native editors) AND a WSL bash
+# sandbox. Bash heredoc writes LF; Windows editors / git autocrlf=true love
+# CRLF; the two combine into perpetual whole-file diff noise.
+#
+# This file forces every text file to LF in BOTH the repository AND the
+# working tree (eol=lf, not the weaker text=auto-only). Effects:
+#
+#   - Bash heredoc rewrites no longer show 100% CRLF↔LF diff.
+#   - Windows editors with EditorConfig / VS Code defaults handle LF fine.
+#   - git checkout never injects CRLF on Windows, so cross-FS state is
+#     deterministic.
+#
+# Windows-only scripts (.bat / .cmd / .ps1) are forced to CRLF because
+# cmd.exe / PowerShell refuse to execute scripts with LF line endings.
+#
+# After adding this file, run once:
+#
+#   git add --renormalize .
+#   git commit -m "normalise line endings to LF (per .gitattributes)"
+#
+# to retroactively apply the rules to already-tracked files.
+# =============================================================================
+
+# Default: every text file is LF, normalised on entry, LF in working tree.
+* text=auto eol=lf
+
+# ─── Source code ────────────────────────────────────────────────────────────
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.jsx       text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.json      text eol=lf
+*.jsonc     text eol=lf
+*.json5     text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+*.scss      text eol=lf
+*.md        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.toml      text eol=lf
+
+# ─── Shell / config — POSIX form ────────────────────────────────────────────
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.env       text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+.editorconfig  text eol=lf
+Makefile    text eol=lf
+
+# ─── Windows-only scripts MUST stay CRLF ────────────────────────────────────
+# cmd.exe and PowerShell choke on LF in batch / PS1 files.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+*.psm1      text eol=crlf
+*.psd1      text eol=crlf
+
+# ─── Binary blobs — never touch ─────────────────────────────────────────────
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.webp      binary
+*.bmp       binary
+*.pdf       binary
+*.zip       binary
+*.tar       binary
+*.gz        binary
+*.tgz       binary
+*.7z        binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.eot       binary
+*.otf       binary
+*.db        binary
+*.sqlite    binary
+*.sqlite3   binary
+*.node      binary
