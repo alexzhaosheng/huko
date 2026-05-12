@@ -12,7 +12,11 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { parseDockerRun } from "../server/cli/dispatch/docker.js";
-import { _buildDockerArgsForTest, _resolveImageForTest } from "../server/cli/commands/docker.js";
+import {
+  _buildDockerArgsForTest,
+  _collectKeyEnvVarsForTest,
+  _resolveImageForTest,
+} from "../server/cli/commands/docker.js";
 
 // ─── parseDockerRun ─────────────────────────────────────────────────────────
 
@@ -175,5 +179,64 @@ describe("buildDockerArgs", () => {
     const args = _buildDockerArgsForTest("img:1", inner, baseOpts);
     const after = args.slice(args.indexOf("img:1") + 1);
     assert.deepEqual(after, inner);
+  });
+
+  it("inserts -e <NAME> for each forwarded env var, before the mounts", () => {
+    const args = _buildDockerArgsForTest("img:1", ["--", "go"], {
+      ...baseOpts,
+      forwardedEnvVars: ["DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"],
+    });
+    // -e flags appear after the interactive flag and before the -v mounts,
+    // each as TWO argv entries (no value on -e).
+    const interactiveIdx = args.indexOf("-i");
+    const firstMountIdx = args.indexOf("-v");
+    const between = args.slice(interactiveIdx + 1, firstMountIdx);
+    assert.deepEqual(between, ["-e", "DEEPSEEK_API_KEY", "-e", "OPENROUTER_API_KEY"]);
+  });
+
+  it("inserts no -e flags when forwardedEnvVars is empty / omitted", () => {
+    const a = _buildDockerArgsForTest("img:1", [], { ...baseOpts, forwardedEnvVars: [] });
+    const b = _buildDockerArgsForTest("img:1", [], baseOpts); // omitted
+    assert.equal(a.includes("-e"), false);
+    assert.equal(b.includes("-e"), false);
+  });
+});
+
+describe("_collectKeyEnvVarsForTest", () => {
+  it("derives <REF>_API_KEY from each ref + filters to set+non-empty in env", () => {
+    const refs = ["deepseek", "openrouter", "anthropic"];
+    const env = {
+      DEEPSEEK_API_KEY: "sk-deepseek-xxx",
+      ANTHROPIC_API_KEY: "sk-ant-xxx",
+      OTHER_VAR: "irrelevant",
+    };
+    const result = _collectKeyEnvVarsForTest(refs, env);
+    // openrouter not in env → not forwarded; anthropic + deepseek included
+    assert.deepEqual(result.sort(), ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"].sort());
+  });
+
+  it("dedupes when multiple providers share the same ref", () => {
+    const refs = ["openrouter", "openrouter"];
+    const env = { OPENROUTER_API_KEY: "sk-or-xxx" };
+    const result = _collectKeyEnvVarsForTest(refs, env);
+    assert.deepEqual(result, ["OPENROUTER_API_KEY"]);
+  });
+
+  it("treats empty string as unset (filtered out)", () => {
+    const refs = ["foo"];
+    const env = { FOO_API_KEY: "" };
+    const result = _collectKeyEnvVarsForTest(refs, env);
+    assert.deepEqual(result, []);
+  });
+
+  it("normalises non-alphanum chars in refs (matches envVarNameFor convention)", () => {
+    const refs = ["my-corp.gateway"];
+    const env = { MY_CORP_GATEWAY_API_KEY: "sk-xxx" };
+    const result = _collectKeyEnvVarsForTest(refs, env);
+    assert.deepEqual(result, ["MY_CORP_GATEWAY_API_KEY"]);
+  });
+
+  it("returns empty when refs is empty", () => {
+    assert.deepEqual(_collectKeyEnvVarsForTest([], { DEEPSEEK_API_KEY: "x" }), []);
   });
 });

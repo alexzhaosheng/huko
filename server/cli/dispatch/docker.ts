@@ -125,9 +125,12 @@ function printDockerHelp(): void {
       "  $PWD       → /work        (project: .huko/, source files, etc.)\n" +
       "  ~/.huko    → /root/.huko  (global infra config: providers/keys)\n" +
       "\n" +
-      "Keys: resolved from the mounted ~/.huko/keys.json. Env-var-based\n" +
-      "keys aren't auto-forwarded — for those, drop the wrapper and run\n" +
-      "`docker run -e KEY=... <image> -- ...` yourself.\n" +
+      "Keys: two paths — both work without extra flags.\n" +
+      "  - keys.json    : resolved through the mounted ~/.huko/keys.json\n" +
+      "  - env vars     : auto-forwarded for every provider in your config\n" +
+      "                   (we derive the names from each provider's\n" +
+      "                    apiKeyRef and pass `-e <NAME>` for those that\n" +
+      "                    are set + non-empty in your shell)\n" +
       "\n" +
       "See docs/docker.md for the full convention + the v1 limits.\n",
   );

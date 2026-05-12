@@ -25,6 +25,9 @@ import { spawn } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { loadInfraConfig } from "../../config/index.js";
+import { envVarNameFor } from "../../security/keys.js";
+
 export type DockerRunArgs = {
   /** Image to run; falls back to HUKO_DOCKER_IMAGE env, then a built-in default. */
   image?: string;
@@ -106,46 +109,86 @@ function resolveImage(explicit: string | undefined): string {
 }
 
 function buildDockerArgs(image: string, innerArgv: string[]): string[] {
-  const cwd = process.cwd();
-  const home = os.homedir();
-  const hostHukoDir = path.join(home, ".huko");
+  return _buildDockerArgsForTest(image, innerArgv, {
+    cwd: process.cwd(),
+    home: os.homedir(),
+    isTTY: process.stdin.isTTY === true,
+    forwardedEnvVars: collectKeyEnvVars(),
+  });
+}
 
-  // `-i` keeps stdin open so pipe-friendly use (`cat data | huko docker
-  // run -- "..."`) works. `-t` allocates a TTY only when we have one
-  // ourselves — needed for chat REPL, harmful in piped contexts (would
-  // mangle stdin into TTY mode and kill cat-style pipes).
-  const interactive = process.stdin.isTTY === true ? "-it" : "-i";
-
-  const out: string[] = [
-    "run",
-    "--rm",
-    interactive,
-    "-v", `${cwd}:${CONTAINER_PROJECT_DIR}`,
-    "-v", `${hostHukoDir}:${CONTAINER_HOME_HUKO}`,
-    "--workdir", CONTAINER_PROJECT_DIR,
-    image,
-  ];
-  out.push(...innerArgv);
-  return out;
+/**
+ * Collect API-key env vars to forward into the container.
+ *
+ * Strategy: load the host's merged providers config, derive the
+ * conventional env-var name from each provider's `apiKeyRef` (via the
+ * same `envVarNameFor` helper huko itself uses to resolve keys), and
+ * filter to vars that are actually set + non-empty in `process.env`.
+ *
+ * Why this is bounded and safe:
+ *   - We only forward vars that providers explicitly DECLARE they
+ *     might use — no blanket "anything matching *_API_KEY".
+ *   - We pass `-e NAME` (no value), so docker forwards the value from
+ *     the current shell env without us touching it. Empty/unset vars
+ *     are filtered out so we don't accidentally clear a value the
+ *     container would otherwise pick up from mounted keys.json.
+ *   - Best-effort: if loadInfraConfig throws (no config yet, broken
+ *     JSON, ...) we forward nothing and the container falls back to
+ *     mount-based key resolution. Never blocks the launch.
+ */
+function collectKeyEnvVars(): string[] {
+  try {
+    const infra = loadInfraConfig({ cwd: process.cwd() });
+    const refs = infra.providers.map((p) => p.apiKeyRef);
+    return _collectKeyEnvVarsForTest(refs, process.env);
+  } catch {
+    return [];
+  }
 }
 
 /** Exposed for tests — pure function, no I/O. */
 export function _buildDockerArgsForTest(
   image: string,
   innerArgv: string[],
-  opts: { cwd: string; home: string; isTTY: boolean },
+  opts: { cwd: string; home: string; isTTY: boolean; forwardedEnvVars?: string[] },
 ): string[] {
   const interactive = opts.isTTY ? "-it" : "-i";
+  const envFlags: string[] = [];
+  for (const name of opts.forwardedEnvVars ?? []) {
+    envFlags.push("-e", name);
+  }
   return [
     "run",
     "--rm",
     interactive,
+    ...envFlags,
     "-v", `${opts.cwd}:${CONTAINER_PROJECT_DIR}`,
     "-v", `${path.join(opts.home, ".huko")}:${CONTAINER_HOME_HUKO}`,
     "--workdir", CONTAINER_PROJECT_DIR,
     image,
     ...innerArgv,
   ];
+}
+
+/**
+ * Exposed for tests — pure function, no I/O.
+ *
+ * Given a list of `apiKeyRef` strings (typically pulled from the
+ * merged providers config) and an env snapshot, return the unique
+ * env-var names that should be `-e`-forwarded into the container:
+ * the conventional `<REF>_API_KEY` shape, intersected with refs that
+ * have a non-empty value in `env`.
+ */
+export function _collectKeyEnvVarsForTest(
+  apiKeyRefs: Iterable<string>,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const names = new Set<string>();
+  for (const ref of apiKeyRefs) names.add(envVarNameFor(ref));
+  return [...names].filter((name) => {
+    const v = env[name];
+    return typeof v === "string" && v.length > 0;
+  });
 }
 
 /** Exposed for tests — pure function, no I/O. */

@@ -59,19 +59,20 @@ docker run --rm -i \
 
 如果你已经在 host 上跑过 `huko keys set <ref> <value>` 或者 `huko setup`，那 key 已经存在 `~/.huko/keys.json` 或 `<cwd>/.huko/keys.json` 里。**两个目录都被 mount 了**——容器里的 huko 透过 `/root/.huko` 和 `/work/.huko` 自动读到，无需任何额外操作。
 
-### 2. 环境变量（绕开 wrapper）
+### 2. 环境变量（自动 forward）
 
-如果你的 key 走的是 `DEEPSEEK_API_KEY=...` 这种 shell env，wrapper 不会自动 forward——不想猜该 forward 哪个变量。要 forward 就直接 bypass wrapper 用原生 docker：
+Wrapper 会**自动**把每个 provider 需要的 env-var 形式 key 透传进容器：
 
-```bash
-docker run --rm -i \
-  -v "$PWD:/work" \
-  -v "$HOME/.huko:/root/.huko" \
-  --workdir /work \
-  -e DEEPSEEK_API_KEY \
-  ghcr.io/alexzhaosheng/huko:latest \
-  -- "your prompt"
-```
+1. 读取 host 上 merged providers 配置（`~/.huko/providers.json` + `<cwd>/.huko/providers.json`）
+2. 对每个 provider，按惯例 `<REF>_API_KEY`（参考 `envVarNameFor`）算出 env 变量名
+3. 凡是在你当前 shell `process.env` 里**有值**的，加 `-e <NAME>` 给 docker（只传名字不传值，docker 自己去读 host env）
+
+举例：你 `export DEEPSEEK_API_KEY=sk-xxx` + 在配置里有 deepseek provider，那 `huko docker run -- "..."` 自动包含 `-e DEEPSEEK_API_KEY`，容器里的 huko 解析 key 时就能拿到。
+
+边界：
+- **只 forward 配置里声明过 apiKeyRef 的变量**，不会盲目 `-e *_API_KEY` 全扫
+- 没在 host env 里 set 的（或者 set 成空字符串）跳过——避免容器里覆盖掉它本来能从 mount 拿到的值
+- loadInfraConfig 失败（config 文件还没建、JSON 坏了等）→ wrapper 不 forward 任何 env，但仍正常启动，容器内 huko 走 mount 的 keys.json 兜底
 
 ### 3. `.env` 文件
 
