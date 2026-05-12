@@ -1,0 +1,99 @@
+name: ci
+
+# Cross-platform sanity for every PR + every main push.
+#
+#   test          — tsc + test suite + build, on Linux/macOS/Windows × node 24
+#   docker-build  — Linux-only: builds docker/Dockerfile + smoke-runs --help
+#                   so PRs that break the image fail BEFORE merge (and before
+#                   edge-image.yml tries to publish a broken image).
+#
+# We deliberately don't push the docker image from this workflow; that's
+# edge-image.yml's job (only on main pushes).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Newer pushes / commits to a PR supersede in-flight runs on the same
+  # ref. Distinct from edge-image's concurrency group — they don't fight.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      # See ALL OS failures, not just the first. CI signal is more useful
+      # when you can tell "Windows-only" from "everywhere" at a glance.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
+
+      - name: Build (esbuild bundle)
+        # Verifies dist/cli.js builds without import / type errors that
+        # only surface at bundle time.
+        run: npm run build:cli
+
+  docker-build:
+    name: docker-build (sanity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        # Single-arch only — this job is "did the Dockerfile still
+        # build?", not "is multi-arch correct?". The latter is
+        # edge-image.yml's job, which runs after merge.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: huko:ci-sanity
+          cache-from: type=gha,scope=ci-sanity
+          cache-to: type=gha,mode=max,scope=ci-sanity
+
+      - name: Smoke (--help via wrapper-shaped argv)
+        # Mirrors the realistic argv the wrapper produces — first arg
+        # starts with `-`, which is exactly the shape that revealed
+        # the inherited-ENTRYPOINT bug previously. If the image's
+        # ENTRYPOINT is misconfigured, this fails fast.
+        run: |
+          set -euxo pipefail
+          docker run --rm huko:ci-sanity --help | head -5

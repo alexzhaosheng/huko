@@ -10,7 +10,7 @@ CI/CD 分三个互相独立的 workflow：
 
 | Phase | Workflow | 触发 | 现状 |
 |---|---|---|---|
-| 1 | **CI**（lint + test 跨平台） | PR / main push | ⏳ 未实现 |
+| 1 | **CI**（lint + test 跨平台 + docker sanity） | PR / main push | ✅ **已实现** |
 | 2 | **edge-image**（docker `:edge`） | main push | ✅ **已实现**（commit d69888c+） |
 | 3 | **release**（npm + docker `:VERSION` + `:latest`） | tag push | ⏳ 未实现 |
 
@@ -75,43 +75,59 @@ GHCR 包默认是 **private**。第一次 push 之后去：
 
 ---
 
-## Phase 1: CI（未实现）
+## Phase 1: CI（已实现）
 
-### 计划
+### 文件
 
-`.github/workflows/ci.yml`：
+- `.github/workflows/ci.yml`
 
-```yaml
-on: [pull_request, push]
-jobs:
-  test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [24]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: ${{ matrix.node }} }
-      - run: npm ci
-      - run: npx tsc --noEmit
-      - run: npm test
-      - run: npm run build:cli
-```
+### 触发
 
-### 为什么三平台
+- 任何 PR
+- `push` 到 `main`
+- 手动 `workflow_dispatch`
+
+### 两个 job
+
+**`test` (matrix: ubuntu / macos / windows × node 24)**：
+1. checkout
+2. setup-node + npm cache
+3. `npm ci`
+4. `npx tsc --noEmit`
+5. `npm test`（536 个 test，POSIX-only 的部分自带 `isWin` skip）
+6. `npm run build:cli`（验证 esbuild bundle 在每个平台都能成功打出来）
+
+`fail-fast: false` → 三个 OS 的失败都看得见，不会因为 Linux 先挂就把 macOS/Windows 取消掉。
+
+`concurrency: ci-${{ github.ref }} cancel-in-progress: true` → 同一个 PR 连推 commit 会取消老的 run，省时间。
+
+**`docker-build` (Linux-only)**：
+1. setup-buildx
+2. `docker buildx build` linux/amd64 single-arch（不 push，只 load 到本地）
+3. smoke：`docker run --rm huko:ci-sanity --help | head -5`
+
+这一步存在的意义：**在 PR 阶段抓 Dockerfile 回归**，不要等到 merge 进 main 再让 edge-image.yml 失败。Smoke 用 `--help`（首字符 `-`）的 argv 形态——这正是之前 ENTRYPOINT bug 的复现路径，所以这条 smoke 既覆盖现状也防回归。
+
+### 为什么三平台 + docker
 
 - `bash.ts` 有 cmd.exe / bash 两条码路径
 - `commands/docker.ts` 用 `docker.exe` vs `docker`
 - `commands/run.ts` 的 stdin 处理 / `fstatSync` 在 Windows 上有 quirk
-- 当前 5xx 个 test 大部分 POSIX-only（`isWin` skip），但 parser / 路径解析等纯逻辑在 Windows 也得过
+- Dockerfile 错配只能在 docker build/run 时露出来，本地 unit test 抓不住
+
+### 跟 edge-image 的关系
+
+CI 不依赖 edge-image，反过来也一样：
+- CI fail 不阻断 edge-image（edge 就是"main 当前快照"，质量责任在 PR review 不在镜像 build）
+- edge-image fail 不影响 CI 的 PR 状态
+
+如果哪天希望严格联动（比如 main 必须 CI 绿才让 edge-image 跑），加 GitHub branch protection 或者改 edge-image 的 `on: workflow_run`。**现在不做**——目前两套互相独立够清晰。
 
 ### Cost
 
 - public repo GHA 免费
-- macOS runner 慢但 OK；Windows runner 也行
-- 一次完整 matrix run 约 5-8 分钟
+- 一次完整 ci.yml run 约 **5-8 分钟**（macOS runner 最慢；Windows next）
+- docker-build job 走 gha cache，重复 build 约 **1-2 分钟**
 
 ---
 
@@ -160,11 +176,11 @@ docker rmi huko-local:dev
 
 | Workflow | 依赖谁 | 谁依赖它 |
 |---|---|---|
+| ci | 无（独立） | PR / push 自动检查；release 前置 |
 | edge-image | 无（独立） | 用户测 `huko docker run` |
-| ci | 无（独立） | release 前手动检查（暂时） |
 | release | npm/ghcr secrets 配置 | 用户拉 `:VERSION` 镜像、`npm install -g huko@x.y.z` |
 
-故意不让 edge-image 依赖 ci——CI 失败不该阻塞已合并代码的镜像发布（image 反正是 `:edge`，本来就是 "main 当前快照"，质量责任在 PR review 不在镜像 build）。
+故意不让 edge-image 依赖 ci——CI 失败不该阻塞已合并代码的镜像发布（image 反正是 `:edge`，本来就是 "main 当前快照"，质量责任在 PR review 不在镜像 build）。如果将来想加严格联动，参考 Phase 1 的"跟 edge-image 的关系"小节。
 
 ---
 
@@ -188,3 +204,13 @@ docker pull ghcr.io/alexzhaosheng/huko:edge
 ### `huko docker run` 报 docker 不在 PATH
 
 工具的契约：exit 4 + 提示装 docker。这是预期行为，不是 bug。
+
+### CI test job Windows-only 失败
+
+最常见两类：
+1. **better-sqlite3 native compile fail**：node 24 + 该平台没有预编译二进制时，npm ci 会触发 node-gyp build。Windows 上需要 Visual Studio Build Tools；setup-node 默认带的应该够，挂了的话可能要加 `microsoft/setup-msbuild` action。
+2. **路径分隔符 / glob 展开**：`npm test` 走 `node --test "tests/*.test.ts"`，node 22+ 自己展开 glob，不依赖 shell；如果挂在路径上，多半是某条 test 直接拼了 `/` 没用 `path.join`。
+
+### CI docker-build job 失败
+
+跟 edge-image 同根同源——两者用的 Dockerfile 同一份。CI 只 build linux/amd64，挂了说明 Dockerfile 在 amd64 也坏；arm64-only 的问题（rare）等 edge-image 跑出来才能看见。
