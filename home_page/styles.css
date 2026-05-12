@@ -93,6 +93,34 @@ h1 {
   line-height: 1.65;
 }
 
+.install-line {
+  margin: 14px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.install-line code {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(154, 255, 188, 0.06);
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
+.install-line a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.88rem;
+  letter-spacing: 0.02em;
+}
+
+.install-line a:hover {
+  text-decoration: underline;
+}
+
 .feature .tagline {
   max-width: none;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>huko-explicit</title>
+    <title>huko agent</title>
     <meta
       name="description"
       content="Minimalist CLI. Maximalist intelligence. Configurable all the way down."
@@ -14,19 +14,22 @@
     <main class="shell">
       <section class="hero">
         <div class="prompt-line">
-          <span class="prompt-user">root</span>@<span class="prompt-host">huko</span>:<span class="prompt-path">~</span>$ ./launch
+          <span class="prompt-user">root</span>@<span class="prompt-host">huko</span>:<span class="prompt-path">~</span>$ huko -- who are you?
         </div>
-        <h1>huko-explicit</h1>
+        <h1>huko agent</h1>
         <p class="tagline">
-          Minimalist CLI. Maximalist intelligence. Configurable all the way down.
+          Minimalist CLI. Maximalist intelligence. Tool-level control, steel-grade safety.
+        </p>
+        <p class="install-line">
+          <code>npm install -g @alexzhaosheng/huko</code>
+          <a href="https://github.com/alexzhaosheng/huko">github.com/alexzhaosheng/huko</a>
         </p>
       </section>
 
       <section class="feature-list" aria-label="Key features">
         <article class="feature">
           <h2><span class="section-mark">[01]</span> Full Power, Lean Footprint</h2>
-          <p class="tagline"><strong>Full mode</strong> — a production-grade agent with full planning capabilities, complete tool suite, and project context. Built for complex, multi-step workflows.</p>
-          <p class="tagline"><strong>Lean mode</strong> — bash-only, ~400 token overhead, fast even on small models. Perfect for one-shot questions and simple operations.</p>
+          <p class="tagline"><strong>Full mode.</strong> Commercial-grade planning and context management, full tool suite — built for complex multi-step work. <strong>Lean mode.</strong> Bash-only, ~400 token overhead, fast on small models — one-shot questions, zero ceremony.</p>
           <pre class="terminal"><code><span class="pair"><span class="comment"># full — complete agent: planning, 13 tools, project context, role system</span>
 <span class="command">huko -- "review this diff, flag risky changes, suggest fixes"</span></span>
 <span class="pair"><span class="comment"># lean — bash-only, ~400 token overhead, fast even on small models</span>
@@ -35,8 +38,7 @@
 
         <article class="feature">
           <h2><span class="section-mark">[02]</span> Project as Context</h2>
-          <p class="tagline"><strong>State lives in the project.</strong> Sessions, config, and agent memory are scoped to the directory you're in — <code>.huko/</code>, just like <code>.git/</code>. CD into a repo and huko picks up its full context. CD out and it's a different world.</p>
-          <p class="tagline"><strong>No trace when you want none.</strong> Pass <code>--memory</code> to skip session storage entirely — nothing written to disk, perfect for one-off questions and private queries.</p>
+          <p class="tagline"><code>.huko/</code> — like <code>.git/</code>, but for your agent. Sessions, config, memory scoped to the directory. <code>cd</code> in, full context. <code>cd</code> out, clean slate. Pass <code>--memory</code> and nothing touches disk at all.</p>
           <pre class="terminal"><code><span class="pair"><span class="comment"># state lives in .huko/ — scoped to this project, just like git</span>
 <span class="command">cd ~/projects/backend && huko -- "continue the auth refactor"</span></span>
 <span class="pair"><span class="comment"># switch directories, switch worlds — different sessions, different config</span>
@@ -46,44 +48,27 @@
         </article>
 
         <article class="feature">
-          <h2><span class="section-mark">[03]</span> Layered Config</h2>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># inspect the resolved runtime config</span>
-<span class="command">huko config show</span></span>
-<span class="pair"><span class="comment"># inspect the merged infra view</span>
-<span class="command">huko info</span></span>
-<span class="pair"><span class="comment"># inspect only the global layer</span>
-<span class="command">huko info global</span></span></code></pre>
+          <h2><span class="section-mark">[03]</span> CLI-Native, Pipe-Friendly</h2>
+          <p class="tagline">stdin in, stdout out. Pipe logs, scripts, data; pipe results to files, jq, the next command. Output as text, <code>--json</code>, or <code>--jsonl</code>. Works anywhere the terminal does. <code>--chat</code> for REPL mode.</p>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># plain text — drop-in replacement for grep, awk, or a manual scan</span>
+<span class="command">huko -- "find every TODO in src/ and sort by file"</span></span>
+<span class="pair"><span class="comment"># stdin in, stdout out — pipe like any other CLI tool</span>
+<span class="command">cat errors.log | huko -- "extract the root cause in one sentence" &gt; summary.txt</span></span>
+<span class="pair"><span class="comment"># structured output — feed the result into jq, Python, or CI</span>
+<span class="command">huko --json -- "list open ports and their owning processes" &gt; ports.json</span></span>
+<span class="pair"><span class="comment"># interactive REPL — keep the conversation going</span>
+<span class="command">huko --chat</span></span></code></pre>
         </article>
 
         <article class="feature">
-          <h2><span class="section-mark">[04]</span> Project Memory</h2>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># continue work inside this repo</span>
-<span class="command">huko -- continue the refactor plan</span></span>
-<span class="pair"><span class="comment"># list saved sessions for this project</span>
-<span class="command">huko sessions list</span></span>
-<span class="pair"><span class="comment"># branch into a fresh thread</span>
-<span class="command">huko --new --title="release triage" -- summarize today's blockers</span></span></code></pre>
+          <h2><span class="section-mark">[04]</span> Tool-Level Security</h2>
+          <p class="tagline">Risk levels. Injection-resistant context. Now the real part: <strong>per-tool regex rules</strong> — <code>deny</code>, <code>allow</code>, <code>requireConfirm</code> — matched against every parameter before the call leaves your machine. Control exactly what your agent can touch, down to the path and domain. Need more? <code>huko docker run</code>. Container. Zero side effects.</p>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># block write_file to anything outside src/ and tests/</span>
+<span class="command">huko config set safety.deny.0 '{"tool":"write_file","path":"^(?!(src/|tests/))"}' --project</span></span>
+<span class="pair"><span class="comment"># full container isolation: clean install with zero host risk</span>
+<span class="command">huko docker run -- "delete all node_modules, clear npm cache, reinstall everything"</span></span></code></pre>
         </article>
 
-        <article class="feature">
-          <h2><span class="section-mark">[05]</span> Zero-trace Runs</h2>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># run without touching session storage</span>
-<span class="command">cat build.log | huko --memory -- "summarize this in 3 bullets"</span></span>
-<span class="pair"><span class="comment"># pipe + JSON output for downstream tooling</span>
-<span class="command">git diff | huko --memory --json -- "return a release note draft"</span></span>
-<span class="pair"><span class="comment"># ask something private and leave no trail</span>
-<span class="command">huko --memory -- "private question"</span></span></code></pre>
-        </article>
-
-        <article class="feature">
-          <h2><span class="section-mark">[06]</span> Inspectable Agents</h2>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># capture a final result as JSON</span>
-<span class="command">git log --oneline -50 | huko --json -- "generate a changelog from these commits"</span></span>
-<span class="pair"><span class="comment"># stream semantic events line by line</span>
-<span class="command">huko --jsonl -- "fetch the page and extract the title"</span></span>
-<span class="pair"><span class="comment"># inspect the project-specific agent surface</span>
-<span class="command">huko info project</span></span></code></pre>
-        </article>
       </section>
     </main>
   </body>
