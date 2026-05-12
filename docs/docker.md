@@ -83,7 +83,16 @@ docker run --rm -i \
 |---|---|---|
 | 最高 | `--image <name>` flag | `huko docker run --image myorg/fork:dev -- ...` |
 | 中 | `HUKO_DOCKER_IMAGE` env | `export HUKO_DOCKER_IMAGE=myreg/huko:0.2.0` |
-| 默认 | 内置 | `ghcr.io/alexzhaosheng/huko:latest` |
+| 默认 | 内置 | `ghcr.io/alexzhaosheng/huko:edge` |
+
+### Bridge 期：默认是 `:edge` 不是 `:latest`
+
+第一个正式 release 之前，`:latest` tag 还不存在。默认 image 暂时指向 `:edge`——`.github/workflows/edge-image.yml` 在每次 main push 后自动 build 并推到 ghcr.io 的 multi-arch（amd64 + arm64）镜像。第一个 release 落地后会切回 `:latest`。详见 [`docs/cicd.md`](./cicd.md)。
+
+要 pin 一个特定 commit 的镜像（精确测试用）：
+```bash
+huko docker run --image ghcr.io/alexzhaosheng/huko:edge-<short-sha> -- "..."
+```
 
 ---
 

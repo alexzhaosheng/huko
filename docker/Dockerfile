@@ -7,29 +7,61 @@
 #     -v "$PWD:/work" \
 #     -v "$HOME/.huko:/root/.huko" \
 #     --workdir /work \
-#     ghcr.io/alexzhaosheng/huko:latest -- "your prompt"
+#     ghcr.io/alexzhaosheng/huko:edge \
+#     -- "your prompt"
 #
 # `huko docker run -- "your prompt"` builds exactly that argv for you.
-# See docs/docker.md for the full convention.
+# See docs/docker.md for the full convention and docs/cicd.md for how
+# this image gets published.
+#
+# Multi-stage build: builder compiles native deps + esbuild bundle,
+# runtime stage drops build tools so the published image stays small.
+# Multi-arch (linux/amd64 + linux/arm64) handled by buildx + QEMU in
+# .github/workflows/edge-image.yml — the build runs INSIDE the target
+# arch so better-sqlite3's native module gets built correctly.
 
-FROM node:24-alpine
+ARG NODE_VERSION=24
 
-# Tools the agent needs to actually be useful: a real shell, git for
-# read/write, curl for fetches the WebFetch tool delegates to. Add to
-# this list ONLY for things broadly useful — keep the image small.
+# ─── Build stage ────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS builder
+
+# Native build tools for better-sqlite3 (the only dep that compiles
+# native code). These get dropped from the runtime image entirely.
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /src
+
+# Copy package files first so `npm ci` can be cached when only source
+# changes. Native module compile happens here.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Now the source. Build the esbuild bundle, then prune devDeps so the
+# node_modules we ship to runtime is the minimal prod set.
+COPY . .
+RUN npm run build:cli && npm prune --omit=dev
+
+# ─── Runtime stage ──────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine
+
+# Tools the agent actually needs to be useful: a real shell (the bash
+# tool spawns it explicitly), git for read/write workflows, curl for
+# the WebFetch tool's network operations, and CA bundle so HTTPS works
+# without surprises.
 RUN apk add --no-cache bash git curl ca-certificates
 
-# huko itself. Pin via build-arg so the same Dockerfile produces a
-# reproducible build per release: `docker build --build-arg HUKO_VERSION=0.1.0 ...`.
-ARG HUKO_VERSION=latest
-RUN npm install -g huko@${HUKO_VERSION}
+# Copy the built tree wholesale — it's already pruned to prod-only.
+COPY --from=builder /src /opt/huko
+
+# Symlink instead of `npm install -g .` — same result, no lifecycle
+# hooks, no second download.
+RUN ln -s /opt/huko/bin/huko.mjs /usr/local/bin/huko
 
 # /work is the project mount point. The wrapper sets --workdir /work
 # explicitly; setting WORKDIR here too means a bare `docker run image`
-# (no wrapper) lands in the right place.
+# (without the wrapper) lands in the right place.
 WORKDIR /work
 
-# No ENTRYPOINT — we want users (and the wrapper) to be able to invoke
-# arbitrary `huko` subcommands without quoting around an entrypoint
-# wrapper. CMD defaults to showing usage.
+# No ENTRYPOINT — users (and the wrapper) pass arbitrary `huko`
+# subcommands as docker args, no quoting around an entrypoint.
 CMD ["huko", "--help"]
