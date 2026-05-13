@@ -1,136 +1,85 @@
-# TaskLoop
+# Task Loop
 
-> `server/task/task-loop.ts` + `server/task/resume.ts` —— 主状态机。
->
-> 见 [架构总览](../architecture.md) 了解跨模块原则。
+> `server/task/task-loop.ts` runs the main agent state machine.
 
----
+See [architecture.md](../architecture.md) for cross-module principles.
 
-## 文件
+## Files
 
-```
+```text
 server/task/
-  task-loop.ts         TaskLoop 类 + interject/stop + iteration 循环
-  resume.ts            ⏳ stub —— orphan 恢复
+  task-loop.ts       TaskLoop class, interject/stop, iteration budget
+  resume.ts          recovery support for interrupted tasks
 ```
 
----
+## One Iteration
 
-## 一次迭代
+1. Check abort state and iteration/tool budgets.
+2. Execute a deferred tool call first if one exists.
+3. Call the LLM.
+4. If the user interjected, continue so the new message is visible in the next turn.
+5. If tool calls exist, execute the first one and defer the rest.
+6. If content exists and no tool call is needed, set `finalResult` and finish.
+7. If the model returns no useful content or tool call, inject a corrective system reminder and retry within a bounded limit.
+8. Run context management.
 
-```
-1. guards: isAborted? iter / tool 预算超了?
-2. 队列优先：deferredCalls.shift() → executeAndPersist → continue
-3. consumeInterjectionFlag()
-4. callLLM() → ok | aborted{stopped|interjected}
-       stopped → break
-       interjected → continue（新用户消息已在 context，下一轮重新调 LLM）
-5. result.toolCalls 非空？
-       [first, ...rest] → executeAndPersist(first) + deferredCalls.push(...rest)
-       outcome.shouldBreak ? break (DONE，丢弃 deferred) : continue
-6. 否则：content 非空 → 设 finalResult, break (DONE)
-       否则：注入纠正 SystemReminder，bounded 重试，超限 break (FAILED)
-7. manageContext(ctx)（目前 stub，见 [pipeline.md](./pipeline.md)）
-```
+## Interject vs Stop
 
----
-
-## interject vs stop 的语义边界
-
-| 操作 | 触发 abort | 结果 | 调用方责任 |
+| Operation | Abort target | Result | Caller responsibility |
 |---|---|---|---|
-| `interject()` | 仅 `currentLlmAbort` | 当前 LLM call 被打断；下轮带新 context 重新调 LLM；任务**不**终止 | **先** `sessionContext.append(用户新消息)`，**再**调 `interject()` |
-| `stop()` | `masterAbort` | 当前 LLM 和当前 tool 都被 race 出来；循环退出，status="stopped" | 无 |
+| `interject()` | current LLM call only | The current LLM call is interrupted and the loop continues | Append the new user message before calling |
+| `stop()` | master abort | Current LLM and tool work are stopped | Mark or report task termination |
 
-**关键**：`interject()` 只**翻 flag + abort 当前 LLM**。它不持久化用户消息——那是 gateway / 调用方的责任。
+`interject()` flips a flag and aborts the current LLM call. It does not persist the user message.
 
----
+## `shouldBreak`
 
-## shouldBreak —— tool 主动结束 task
+Server tools can return `ToolHandlerResult.shouldBreak = true`. After the tool result is persisted:
 
-server tool handler 返回 `ToolHandlerResult.shouldBreak = true` 时：
+1. The result is written normally.
+2. The outcome returns to `TaskLoop`.
+3. Deferred calls from the same LLM turn are discarded.
+4. The loop exits with status `done`.
 
-1. tool result 正常持久化
-2. `outcome.shouldBreak = true` 流回 TaskLoop
-3. TaskLoop **清空** `deferredCalls`（这一轮其它 tool 调用不再有意义）
-4. 直接 break，`resolveStatus()` 返回 `done`
+The `message` tool in `result` mode uses this path to finish a task without another LLM call.
 
-典型用户：`message`（mode=result）—— 设 `finalResult` 同时 break。
-这条路径**不**额外调一次 LLM；用户看到的就是 tool 提供的 finalResult。
+## Single-Step Tool Execution
 
----
+When a model returns multiple tool calls, huko executes one at a time and queues the rest. This costs more loop iterations, but it allows abort/interject checks between tools and keeps persistence boundaries simple.
 
-## 单步执行的代价与好处
+## Limits
 
-- **代价**：N 个 tool call 要 N 轮迭代（中间不调 LLM，所以不慢，但每 tool 都过一次 loop）
-- **好处**：每个 tool 之间都重新检查 `isAborted` / `interjected` / 预算；worker 队列里能精确插入 reschedule。比批量并行更"反应灵敏"。
-
-队列在 [`TaskContext.deferredCalls`](./engine.md#deferredcalls-队列)。
-
----
-
-## 容量限制
-
-| 常量 | 默认值 | 触发结果 |
+| Constant | Default | Result |
 |---|---|---|
-| `MAX_ITERATIONS` | 200 | 任务标记 failed |
-| `MAX_TOOL_CALLS` | 200 | 任务标记 failed |
-| `MAX_EMPTY_RETRIES` | 3 | LLM 连续空回 3 次后 failed |
+| `MAX_ITERATIONS` | 200 | task fails |
+| `MAX_TOOL_CALLS` | 200 | task fails |
+| `MAX_EMPTY_RETRIES` | 3 | task fails after repeated empty LLM turns |
 
-数值是防御性兜底。生产看到频繁触发说明上游有问题（prompt 设计、模型选择、tool 描述），不是把数字调大就解决。
+Frequent limit hits indicate an upstream issue such as bad prompting, bad model config, or tool loops.
 
----
+## Summary
 
-## TaskRunSummary
+`run()` returns a summary with status, final result, token counts, tool-call count, iteration count, and elapsed time.
 
-`run()` 返回的总结：
+## Pitfalls
 
-- `status: "done" | "failed" | "stopped"`
-- `finalResult: string` —— 最后一次 LLM 文本回复（或空）
-- `hasExplicitResult: boolean`
-- `iterationCount` / `toolCallCount` / 三个 token 计数 / `elapsedMs`
+- Do not persist user messages inside `interject()`.
+- Do not expect `interject()` to make the LLM see the new message immediately; it only aborts the current call.
+- Do not throw abort errors from tool handlers; return a structured error result.
+- Do not bypass `deferredCalls` by running tool calls in parallel.
 
----
-
-## resume.ts（⏳ stub）
-
-未来：
-
-- 检测进程退出时 `tasks.status` 仍非终态的任务
-- 从 `task_context` history 重建 SessionContext / TaskContext
-- 修复三种孤儿状态：
-  - `waiting_for_reply` —— 重新弹给用户，不再问 LLM
-  - `waiting_for_approval` —— 同上
-  - `running` 中断的 tool —— 注入合成 tool_result 表示中断，让 LLM 决策重试或 move on
-- 把恢复后的 TaskContext 交给新 `TaskLoop.run()`
-
-**契约保证 `TaskLoop.run()` 永远不知道 resume 这回事**——只走干净正向流程。
-
----
-
-## 易踩的坑
-
-- **不要**在 `interject()` 里持久化用户消息——这是调用方的责任。
-- **不要**期望 `interject()` 立即让 LLM 看到新消息——只 abort 当前 call，下一轮才会带新 context。
-- **不要**在 tool handler 里抛 abort——返回 `{result: "", error: "..."}`，让 LLM 自己看到错误纠正。真正的 abort 由 pipeline 的 `raceAbort` 统一处理。
-- **不要**绕过 `deferredCalls` 队列直接批量并行 tool——会破坏 single-step enforcement。
-
----
-
-## 验证
+## Verification
 
 ```bash
-OPENROUTER_API_KEY=sk-or-... npx tsx scripts/engine-demo.ts
+npm run check
+npm test
 ```
 
-端到端跑一次"加法 task"——会看到 LLM 调 add tool、收到结果、最终回复。
+End-to-end demos should show an LLM call, a tool call, a tool result, and a final answer.
 
----
+## See Also
 
-## 见
-
-- [engine.md](./engine.md) —— TaskContext / SessionContext 的契约
-- [pipeline.md](./pipeline.md) —— TaskLoop 委托给 pipeline 的具体步骤
-- [tools.md](./tools.md) —— `result.toolCalls` 怎么路由
-
-
+- [engine.md](./engine.md)
+- [pipeline.md](./pipeline.md)
+- [tools.md](./tools.md)
+- [resume.md](./resume.md)

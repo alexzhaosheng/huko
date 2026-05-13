@@ -1,14 +1,14 @@
-# `huko` 在 Docker 里跑
+# Running `huko` in Docker
 
 > `server/cli/commands/docker.ts` + `docker/Dockerfile`
 
-## 一句话
+## One-Liner
 
 ```bash
 huko docker run -- "fix the bug in main.ts"
 ```
 
-完全等价于：
+This is equivalent to:
 
 ```bash
 docker run --rm -i \
@@ -19,102 +19,91 @@ docker run --rm -i \
   -- "fix the bug in main.ts"
 ```
 
-**镜像 ENTRYPOINT 契约**：image 的 `ENTRYPOINT` 是 `["huko"]`，所以 docker 的位置参数直接当作 huko 的 argv。`docker run … <image> sessions list` 跑 `huko sessions list`；`docker run … <image> -- "prompt"` 跑 `huko -- "prompt"`。这跟在 host 直接敲 `huko ...` 完全一致。
+The image `ENTRYPOINT` is `["huko"]`, so Docker positional arguments become huko argv. `docker run ... <image> sessions list` runs `huko sessions list`; `docker run ... <image> -- "prompt"` runs `huko -- "prompt"`.
 
-`huko docker run` 这个 wrapper 的全部职责就是**把那串 `-v ... -v ... --workdir ...` 模板免去**，其它语义跟主 huko 一模一样：相同的 flags、相同的 `--` sentinel、相同的 pipe-friendly stdin。
-
----
-
-## 它做什么 / 不做什么
-
-**它做的**：
-
-1. **三个固定 mount**（不可关闭——这就是约定）：
-   | Host | Container | 用途 |
-   |---|---|---|
-   | `$PWD` | `/work` | 项目目录（含 `.huko/huko.db`、`.huko/keys.json`、源码…）|
-   | `$HOME/.huko` | `/root/.huko` | 全局 infra 配置（`providers.json`、`keys.json`、`config.json`）|
-   | —— | `--workdir /work` | inner huko 的 cwd 跟 host 用户的 cwd 对齐 |
-
-2. **stdin / stdout 透传**：检测 `process.stdin.isTTY`，是 TTY 就 `-it`，否则 `-i`。这意味着 `cat data | huko docker run -- "..."` 和 `huko docker run --chat` 都自然 work。
-
-3. **`--image <name>` flag**（也认 `HUKO_DOCKER_IMAGE` 环境变量），覆盖默认镜像。
-
-4. **退出码透传**：docker 退什么码 huko 就退什么；docker 被信号杀掉时 huko 重新 raise 信号，让 shell 的 `$?` 得到 128+signo 这种 unix 标准编码。
-
-**它不做的（v1 边界）**：
-
-- **不自动 build / pull image**——让 docker 自己处理 image 不存在的情况。
-- **不复刻 docker 的功能**——网络、额外 mount、env 注入、user 切换，统统让用户用原生 `docker run` 自己组合。
-- **不解析 `providers.json` 反推该 forward 哪些 env var**——env-var 形式的 key 让用户用 `docker run -e KEY ...` 自己处理；mount-based key（keys.json）已经覆盖大多数场景。
-- **不探测 docker daemon 健康**——`docker` 不在 PATH 我们报 exit 4，其他 docker 错误就让 docker 自己说。
+The `huko docker run` wrapper only removes the need to type the volume and workdir template. All other semantics match normal huko: same flags, same `--` sentinel, and the same pipe-friendly stdin behavior.
 
 ---
 
-## API key 怎么进容器
+## What It Does
 
-按优先级三种走法：
+1. **Adds three fixed mounts.** These are part of the convention and cannot be disabled.
 
-### 1. `keys.json`（推荐，零配置）
-
-如果你已经在 host 上跑过 `huko keys set <ref> <value>` 或者 `huko setup`，那 key 已经存在 `~/.huko/keys.json` 或 `<cwd>/.huko/keys.json` 里。**两个目录都被 mount 了**——容器里的 huko 透过 `/root/.huko` 和 `/work/.huko` 自动读到，无需任何额外操作。
-
-### 2. 环境变量（自动 forward）
-
-Wrapper 会**自动**把每个 provider 需要的 env-var 形式 key 透传进容器：
-
-1. 读取 host 上 merged providers 配置（`~/.huko/providers.json` + `<cwd>/.huko/providers.json`）
-2. 对每个 provider，按惯例 `<REF>_API_KEY`（参考 `envVarNameFor`）算出 env 变量名
-3. 凡是在你当前 shell `process.env` 里**有值**的，加 `-e <NAME>` 给 docker（只传名字不传值，docker 自己去读 host env）
-
-举例：你 `export DEEPSEEK_API_KEY=sk-xxx` + 在配置里有 deepseek provider，那 `huko docker run -- "..."` 自动包含 `-e DEEPSEEK_API_KEY`，容器里的 huko 解析 key 时就能拿到。
-
-边界：
-- **只 forward 配置里声明过 apiKeyRef 的变量**，不会盲目 `-e *_API_KEY` 全扫
-- 没在 host env 里 set 的（或者 set 成空字符串）跳过——避免容器里覆盖掉它本来能从 mount 拿到的值
-- loadInfraConfig 失败（config 文件还没建、JSON 坏了等）→ wrapper 不 forward 任何 env，但仍正常启动，容器内 huko 走 mount 的 keys.json 兜底
-
-### 3. `.env` 文件
-
-`<cwd>/.env` 同样自动可见（在 `/work/.env`），huko 的 key 解析三层会找到它。
-
----
-
-## 镜像选择
-
-| 优先级 | 来源 | 例子 |
+| Host | Container | Purpose |
 |---|---|---|
-| 最高 | `--image <name>` flag | `huko docker run --image myorg/fork:dev -- ...` |
-| 中 | `HUKO_DOCKER_IMAGE` env | `export HUKO_DOCKER_IMAGE=myreg/huko:0.2.0` |
-| 默认 | 内置 | `ghcr.io/alexzhaosheng/huko:latest` |
+| `$PWD` | `/work` | Project directory, including `.huko/huko.db`, `.huko/keys.json`, and source files |
+| `$HOME/.huko` | `/root/.huko` | Global infra config such as providers, keys, and config |
+| n/a | `--workdir /work` | Aligns the inner huko cwd with the host cwd |
 
-### `:latest` vs `:edge` vs `:VERSION`
+2. **Passes stdin/stdout through.** The wrapper uses `-it` for TTY sessions and `-i` for piped input, so both `cat data | huko docker run -- "..."` and interactive modes work naturally.
+3. **Supports `--image <name>`**, with `HUKO_DOCKER_IMAGE` as an env override.
+4. **Propagates exit codes.** Docker's exit code becomes huko's exit code. If Docker exits from a signal, huko re-raises the signal so the shell sees the standard Unix `128 + signo` result.
 
-- **`:latest`**（默认）：最新正式 release 的镜像，由 tag push 触发的 `release.yml` 推到 ghcr.io
-- **`:edge`**：main 分支当前快照，每次 main push 自动 rebuild。想试还没发版的最新代码用这个
-- **`:0.1.0` / `:0.1`** 等具体版本：每次 release 都会推
-- **`:edge-<short-sha>`**：edge 分支某个 commit 的精确镜像，回归测试 / 复现 bug 用
+## What It Does Not Do
 
-切换示例：
+- It does not automatically build or pull the image. Docker reports missing images itself.
+- It does not reimplement Docker. Extra networks, mounts, env injection, and user switching stay in native `docker run`.
+- It does not parse providers and guess every env var. Mount-based keys cover most cases; env-var keys can be passed through native Docker when needed.
+- It does not health-check the Docker daemon. Missing `docker` exits with code 4; other Docker failures are reported by Docker.
+
+---
+
+## How API Keys Enter the Container
+
+### 1. `keys.json` - recommended
+
+If the host has already run `huko keys set <ref> <value>` or `huko setup`, keys exist in `~/.huko/keys.json` or `<cwd>/.huko/keys.json`. Both directories are mounted, so the container reads them automatically.
+
+### 2. Environment variables - automatic forwarding
+
+The wrapper forwards configured provider env-var keys:
+
+1. Read merged provider config from `~/.huko/providers.json` and `<cwd>/.huko/providers.json`.
+2. Compute the env var name by convention, such as `<REF>_API_KEY`.
+3. If that variable exists in the host shell, pass `-e <NAME>` to Docker.
+
+Only variables declared by provider config are forwarded. Empty or missing variables are skipped, and config read failures simply fall back to mounted `keys.json`.
+
+### 3. `.env`
+
+`<cwd>/.env` is visible as `/work/.env`, and huko's key lookup can read it there.
+
+---
+
+## Image Selection
+
+| Priority | Source | Example |
+|---|---|---|
+| Highest | `--image <name>` flag | `huko docker run --image myorg/fork:dev -- ...` |
+| Middle | `HUKO_DOCKER_IMAGE` env | `export HUKO_DOCKER_IMAGE=myreg/huko:0.2.0` |
+| Default | Built-in value | `ghcr.io/alexzhaosheng/huko:latest` |
+
+### `:latest`, `:edge`, and `:VERSION`
+
+- `:latest` is the default stable release image, updated by `release.yml`.
+- `:edge` is the current `main` snapshot and rebuilds on every main push.
+- `:0.1.0`, `:0.1`, and similar tags are release images.
+- `:edge-<short-sha>` pins one exact edge commit for regression testing or reproduction.
+
 ```bash
 huko docker run --image ghcr.io/alexzhaosheng/huko:edge -- "..."
 huko docker run --image ghcr.io/alexzhaosheng/huko:0.1.0 -- "..."
+export HUKO_DOCKER_IMAGE=ghcr.io/alexzhaosheng/huko:edge
 ```
-或者 `export HUKO_DOCKER_IMAGE=ghcr.io/alexzhaosheng/huko:edge` 一劳永逸切。
 
-详见 [`docs/cicd.md`](./cicd.md)。
-
----
-
-## Stateful 与并发
-
-**State 默认持久化**：`/work/.huko/huko.db`、`state.json` 都在 mount 里——跑完 `--rm` 销毁的只是容器进程，会话数据留在 host 文件系统上，下次 `huko docker run -- ...` 接着用。
-
-**并发 / lock**：huko 用 `<cwd>/.huko/lock` 做 per-cwd 互斥。这个 lock 是 PID-based，host 进程和 container 进程 PID 互不可见，所以**同一个 project 同时跑 host 上的 huko 和容器里的 huko 是 unsupported**——会互相覆盖 session、可能写坏 entries。挑一个就行。
+See [cicd.md](./cicd.md).
 
 ---
 
-## 自己 build image
+## State and Concurrency
+
+State persists by default because `/work/.huko/huko.db` and `state.json` are mounted from the host. `--rm` removes only the container process; session data remains on the host.
+
+Concurrency is intentionally limited. huko uses `<cwd>/.huko/lock` for per-cwd mutual exclusion. Host and container PIDs are not mutually visible, so running host huko and container huko against the same project at the same time is unsupported.
+
+---
+
+## Build Your Own Image
 
 ```bash
 cd huko/docker
@@ -122,14 +111,14 @@ docker build -t huko-local:latest --build-arg HUKO_VERSION=latest .
 HUKO_DOCKER_IMAGE=huko-local:latest huko docker run -- "..."
 ```
 
-或者基于这份 Dockerfile fork——加你自己的工具（aws-cli、kubectl 等等），huko 主流程不会感知。
+You can fork the Dockerfile to add tools such as aws-cli or kubectl. The main huko flow does not need to know.
 
 ---
 
-## 常见坑
+## Common Pitfalls
 
-- **docker 没装** → `huko docker: docker not found in PATH`，exit 4。装 [Docker Desktop](https://docs.docker.com/get-docker/) 或 docker-ce 后重试。
-- **第一次跑很慢** → 在 pull 镜像。后续走本地缓存就快了。
-- **Windows 下路径** → Docker Desktop 自动处理 Windows 风格路径转 Unix mount，无需额外操作；`-v "$PWD:/work"` 的 `$PWD` 在 PowerShell / cmd 里换成 `${PWD}` 或 `%cd%`。huko docker wrapper 跨平台都用 `process.cwd()`，自己处理。
-- **想用 host 的 git 凭据** → `~/.gitconfig` 没自动 mount。要的话用原生 docker run 加 `-v "$HOME/.gitconfig:/root/.gitconfig:ro"`。
-- **会话路径权限** → 容器里默认 root 写出来的 `.huko/huko.db` 在 host 上属于 root。Linux 用户可以加 `--user "$(id -u):$(id -g)"`，但要原生 docker run，wrapper 不动这个旋钮（容器内 huko 需要 home dir 写权限，user 切换会引入额外配置）。
+- **Docker is not installed:** `huko docker: docker not found in PATH`, exit 4. Install Docker Desktop or docker-ce and retry.
+- **First run is slow:** the image is being pulled. Later runs use the local cache.
+- **Windows paths:** Docker Desktop handles Windows-to-Unix mount conversion. Native `docker run` examples need `${PWD}` in PowerShell or `%cd%` in cmd. The wrapper uses `process.cwd()` and is cross-platform.
+- **Host git credentials:** `~/.gitconfig` is not mounted automatically. Use native Docker with `-v "$HOME/.gitconfig:/root/.gitconfig:ro"` if needed.
+- **Session file ownership:** on Linux, root-written `.huko/huko.db` may be owned by root on the host. Native Docker can use `--user "$(id -u):$(id -g)"`; the wrapper does not expose that control.
