@@ -28,6 +28,7 @@ body {
   margin: 0;
   min-height: 100vh;
   font-family: var(--mono);
+  overflow-x: hidden;
 }
 
 body::before {
@@ -97,8 +98,15 @@ h1 {
   margin: 14px 0 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   flex-wrap: wrap;
+}
+
+.install-chunk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .icon {
@@ -181,6 +189,7 @@ h1 {
   border: 1px solid rgba(0, 0, 0, 0.3);
   border-radius: 6px;
   background: #050706;
+  max-width: 100%;
 }
 
 code {
@@ -188,7 +197,8 @@ code {
   display: block;
   font-size: 0.92rem;
   line-height: 1.15;
-  white-space: pre;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tagline code {
@@ -304,9 +314,17 @@ span::selection {
     border-radius: 4px;
   }
 
+  .install-line code {
+    white-space: normal;
+    word-break: break-all;
+  }
+
   code {
     font-size: 0.78rem;
     line-height: 1.35;
+    max-width: 100%;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   .comment {
