@@ -61,8 +61,8 @@
         </article>
 
         <article class="feature">
-          <h2><span class="section-mark">[04]</span> Tool-Level Security</h2>
-          <p class="tagline"><code>disable</code> tools from the LLM's surface. <code>deny</code> / <code>allow</code> / <code>requireConfirm</code> regex on every parameter. Control down to the path and domain. Container sandbox with <code>huko docker run</code>.</p>
+          <h2><span class="section-mark">[04]</span> Tool-Level Security + Redaction</h2>
+          <p class="tagline"><code>disable</code> tools. <code>deny</code> / <code>allow</code> / <code>requireConfirm</code> regex on every call. <code>huko docker run</code> sandboxing. Secrets scrubbed before the LLM sees them — <code>[REDACTED:name]</code> in, real value out.</p>
           <pre class="terminal"><code><span class="pair"><span class="comment"># inspect the tool surface — what's available, what's restricted</span>
 <span class="command">huko safety tool</span></span>
 <span class="pair"><span class="comment"># take a tool off the LLM's menu entirely — it can't call what it can't see</span>
@@ -70,18 +70,9 @@
 <span class="pair"><span class="comment"># regex-gate dangerous patterns — block, allow, or prompt</span>
 <span class="command">huko safety deny bash 're:^rm -rf'</span></span>
 <span class="pair"><span class="comment"># full container isolation: clean install with zero host risk</span>
-<span class="command">huko docker run -- "delete all node_modules, clear npm cache, reinstall everything"</span></span></code></pre>
-        </article>
-
-        <article class="feature">
-          <h2><span class="section-mark">[05]</span> Three-Layer Redaction</h2>
-          <p class="tagline">Built-in regex catches the shapes (<code>sk-…</code>, <code>ghp_…</code>, <code>AKIA…</code>, PEM, JWT). Your <strong>vault</strong> catches exact strings you register. Both run on every outbound message; the LLM only ever sees <code>[REDACTED:name]</code>. The killer feature: when the LLM emits a tool call referencing a placeholder, huko expands it back to the real value before execution — your secret never reaches the model AND the agent can still USE it symbolically.</p>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># register a secret — hidden prompt, ≥ 8 chars, stored chmod 600</span>
-<span class="command">huko vault add github-token</span></span>
-<span class="pair"><span class="comment"># now the agent can "use github-token" without ever seeing its value</span>
-<span class="command">huko -- "push the current branch using my github token"</span></span>
-<span class="pair"><span class="comment"># debug: see exactly what your scrubber would redact</span>
-<span class="command">echo "my key is sk-proj-aaaaaaaaaaaaaaaaaa" | huko vault test</span></span></code></pre>
+<span class="command">huko docker run -- "delete all node_modules, clear npm cache, reinstall everything"</span></span>
+<span class="pair"><span class="comment"># the LLM never sees your token — but the git push still works</span>
+<span class="command">huko -- "push the current branch using my github token"</span></span></code></pre>
         </article>
 
       </section>
