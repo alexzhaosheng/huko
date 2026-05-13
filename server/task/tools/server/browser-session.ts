@@ -20,6 +20,7 @@ import { getConfig } from "../../../config/index.js";
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
 const CMD_TIMEOUT_MS = 30_000;
+const WAIT_FOR_CLIENT_MS = 10_000; // wait up to 10s for extension to connect
 const IDLE_CLOSE_MS = 5 * 60_000; // 5 min idle → close server
 
 // ─── Protocol types ──────────────────────────────────────────────────────────
@@ -167,19 +168,28 @@ async function stopServer(): Promise<void> {
 
 // ─── Command dispatch ────────────────────────────────────────────────────────
 
+async function waitForClient(): Promise<void> {
+  if (client && client.readyState === 1 /* WebSocket.OPEN */) return;
+
+  const deadline = Date.now() + WAIT_FOR_CLIENT_MS;
+  while (Date.now() < deadline) {
+    if (client && client.readyState === 1) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  throw new Error(
+    "Chrome extension did not connect in time.\n" +
+    "Make sure the huko browser extension is installed and Chrome is running.\n" +
+    `The extension will auto-connect to ws://127.0.0.1:${getConfig().tools.browser.wsPort}`,
+  );
+}
+
 async function sendCommand(cmd: BrowserCommand): Promise<{
   text: string;
   attachment?: { filename: string; data: string };
 }> {
   await ensureServer();
-
-  if (!client || client.readyState !== 1 /* WebSocket.OPEN */) {
-    throw new Error(
-      "Chrome extension is not connected.\n" +
-      "Make sure the huko browser extension is installed and Chrome is running.\n" +
-      `The extension will auto-connect to ws://127.0.0.1:${getConfig().tools.browser.wsPort}`,
-    );
-  }
+  await waitForClient();
 
   const id = nextId++;
   const attachment: { value?: { filename: string; data: string } } = {};
@@ -193,7 +203,8 @@ async function sendCommand(cmd: BrowserCommand): Promise<{
     pending.set(id, { resolve, reject, attachment, timer });
   });
 
-  client.send(JSON.stringify(outgoing));
+  // waitForClient() guarantees client is non-null and OPEN here
+  client!.send(JSON.stringify(outgoing));
 
   try {
     const text = await promise;
