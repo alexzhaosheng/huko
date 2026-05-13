@@ -52,6 +52,7 @@
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "nanoid": "^5.0.0",
+    "puppeteer-core": "^24.43.1",
     "socket.io": "^4.8.0",
     "socket.io-client": "^4.8.0",
     "ws": "^8.20.1",
