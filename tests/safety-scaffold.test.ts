@@ -53,7 +53,7 @@ describe("buildSafetyTemplate", () => {
     assert.equal(lvl["dangerous"], "prompt");
   });
 
-  it("lists ONLY moderate/dangerous tools in toolRules (no safe tools)", () => {
+  it("lists writable tools + read_file (path-deny defaults) in toolRules", () => {
     const t = buildSafetyTemplate() as Record<string, unknown>;
     const rules = t["toolRules"] as Record<string, unknown>;
     const names = Object.keys(rules);
@@ -61,10 +61,25 @@ describe("buildSafetyTemplate", () => {
     for (const expected of ["bash", "write_file", "edit_file", "delete_file", "move_file"]) {
       assert.ok(names.includes(expected), `expected ${expected} in template`);
     }
-    // Safe tools must NOT appear.
-    for (const forbidden of ["read_file", "list_dir", "grep", "glob", "web_fetch", "web_search", "plan", "message"]) {
+    // read_file is included specifically for the Layer-1 path-deny
+    // defaults (sensitive paths the agent shouldn't read). Other safe
+    // tools (list_dir, grep, ...) still don't appear — they fall
+    // through to byDangerLevel.safe.
+    assert.ok(names.includes("read_file"), "read_file should be in template (Layer 1 defaults)");
+    for (const forbidden of ["list_dir", "grep", "glob", "web_fetch", "web_search", "plan", "message"]) {
       assert.ok(!names.includes(forbidden), `${forbidden} should not be in template`);
     }
+  });
+
+  it("read_file gets prefilled deny patterns for sensitive paths", () => {
+    const t = buildSafetyTemplate() as Record<string, unknown>;
+    const rf = (t["toolRules"] as Record<string, Record<string, unknown>>)["read_file"]!;
+    const deny = rf["deny"] as string[];
+    // Spot-check the canonical sensitive paths.
+    assert.ok(deny.some((p) => p.includes(".ssh")), `expected .ssh deny pattern, got ${JSON.stringify(deny)}`);
+    assert.ok(deny.some((p) => p.includes("\\.env")), "expected .env deny pattern");
+    assert.ok(deny.some((p) => p.includes(".pem")), "expected .pem deny pattern");
+    assert.ok(deny.some((p) => p.includes("id_rsa")), "expected id_rsa deny pattern");
   });
 
   it("non-bash tools have all three buckets empty", () => {

@@ -8,6 +8,7 @@
 import "../task/tools/index.js";
 
 import { SessionContext, type Emitter } from "../engine/SessionContext.js";
+import { expandPlaceholdersDeep, scrubAndRecord } from "../security/scrubber.js";
 import { TaskContext } from "../engine/TaskContext.js";
 import { TaskLoop, type TaskRunSummary } from "../task/task-loop.js";
 import { getToolsForLLM, getToolPromptHints, type ToolFilterContext } from "../task/tools/registry.js";
@@ -522,6 +523,17 @@ export class TaskOrchestrator {
       sessionType,
     );
 
+    // Wire the scrubber: SessionContext gets a function that turns
+    // any outbound entry-content string into its redacted form,
+    // recording new substitutions in the per-session table. Closing
+    // over `this.session` keeps SessionContext's interface narrow
+    // (it doesn't need to know the full SessionPersistence shape).
+    const persistence = this.session;
+    const scrubText = async (text: string): Promise<string> =>
+      scrubAndRecord(text, { sessionId, sessionType, persistence });
+    const expandArgs = async (value: unknown): Promise<unknown> =>
+      expandPlaceholdersDeep(value, { sessionId, sessionType, persistence });
+
     const sc = new SessionContext({
       sessionId,
       sessionType,
@@ -529,6 +541,8 @@ export class TaskOrchestrator {
       updateDb: this.session.entries.update,
       emitter,
       initialContext,
+      scrubText,
+      expandArgs,
     });
 
     this.liveSessions.set(key, sc);

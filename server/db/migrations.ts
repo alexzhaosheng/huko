@@ -83,4 +83,25 @@ CREATE INDEX idx_task_context_session ON task_context(session_id, session_type, 
 CREATE INDEX idx_task_context_task ON task_context(task_id);
 `,
   },
+  {
+    // Adds the per-session secret-substitution table that backs the
+    // redaction system (vault hits + auto-discovered regex hits).
+    // Strict primary key on (session_id, session_type, placeholder)
+    // because the scrubber's idempotence rule says: same placeholder
+    // within a session means same raw value, always.
+    version: "0002_session_substitutions",
+    sql: `
+CREATE TABLE session_substitutions (
+  session_id    INTEGER NOT NULL,
+  session_type  TEXT NOT NULL,
+  placeholder   TEXT NOT NULL,
+  raw_value     TEXT NOT NULL,
+  source        TEXT NOT NULL,
+  created_at    INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  PRIMARY KEY (session_id, session_type, placeholder)
+);
+CREATE INDEX idx_session_substitutions_raw
+  ON session_substitutions(session_id, session_type, raw_value);
+`,
+  },
 ];

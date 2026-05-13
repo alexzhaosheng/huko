@@ -73,6 +73,17 @@
 <span class="command">huko docker run -- "delete all node_modules, clear npm cache, reinstall everything"</span></span></code></pre>
         </article>
 
+        <article class="feature">
+          <h2><span class="section-mark">[05]</span> Three-Layer Redaction</h2>
+          <p class="tagline">Built-in regex catches the shapes (<code>sk-…</code>, <code>ghp_…</code>, <code>AKIA…</code>, PEM, JWT). Your <strong>vault</strong> catches exact strings you register. Both run on every outbound message; the LLM only ever sees <code>[REDACTED:name]</code>. The killer feature: when the LLM emits a tool call referencing a placeholder, huko expands it back to the real value before execution — your secret never reaches the model AND the agent can still USE it symbolically.</p>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># register a secret — hidden prompt, ≥ 8 chars, stored chmod 600</span>
+<span class="command">huko vault add github-token</span></span>
+<span class="pair"><span class="comment"># now the agent can "use github-token" without ever seeing its value</span>
+<span class="command">huko -- "push the current branch using my github token"</span></span>
+<span class="pair"><span class="comment"># debug: see exactly what your scrubber would redact</span>
+<span class="command">echo "my key is sk-proj-aaaaaaaaaaaaaaaaaa" | huko vault test</span></span></code></pre>
+        </article>
+
       </section>
     </main>
     <footer class="site-footer">

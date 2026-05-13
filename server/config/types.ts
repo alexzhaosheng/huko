@@ -119,6 +119,25 @@ export type HukoConfig = {
       dangerous: SafetyAction;
     };
     toolRules: Record<string, ToolSafetyRules>;
+    /**
+     * Layer 2 of the redaction system: regex patterns matched against
+     * every outbound message. Matches get replaced with placeholders
+     * (`[REDACTED:<name>]`) and recorded in the session-substitution
+     * table so the inverse direction (placeholder → raw) works for
+     * tool calls the LLM emits with the placeholder.
+     *
+     * The shipped built-in pack
+     * (`server/security/builtin-redact-patterns.ts`) covers OpenAI /
+     * Anthropic / GitHub / AWS / Google / Slack / PEM / JWT shapes —
+     * always-on, not configurable from here. This field is for
+     * **adding** patterns specific to your environment (corporate
+     * gateway tokens, internal hostnames, etc.). Write user patterns
+     * carefully — anything that matches normal text will redact it.
+     *
+     * Layered: union across layers (additive), same as toolRules
+     * arrays. Project never silently relaxes a global redaction.
+     */
+    redactPatterns?: Array<{ name: string; pattern: string }>;
   };
 
   cli: {
@@ -192,6 +211,15 @@ export const DEFAULT_CONFIG: HukoConfig = {
       dangerous: "auto",
     },
     toolRules: {},
+    // Layer 1 path-deny defaults are NOT baked into DEFAULT_CONFIG —
+    // they go through the `huko safety init` scaffold instead. Why:
+    // (1) "explicit configuration" — the user sees what's protecting
+    // them, can edit / extend / `safety unset` individual rules;
+    // (2) regex-on-bash-args only catches the literal `cat .env`
+    // shape, missing `nano`, `python -c "open(...)"`, etc. Pretending
+    // those are blocked would give false confidence. The scaffold
+    // pairs the default rules with comments calling out the
+    // limitation and pointing at `huko docker run` for real isolation.
   },
 };
 

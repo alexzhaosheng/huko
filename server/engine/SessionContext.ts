@@ -82,6 +82,10 @@ export class SessionContext {
   private readonly persist: PersistFn;
   private readonly updateDb: UpdateFn;
   private readonly emitter: Emitter;
+  private readonly scrubText: ((text: string) => Promise<string>) | null;
+  private readonly expandArgs:
+    | ((value: unknown) => Promise<unknown>)
+    | null;
 
   constructor(opts: {
     sessionId: number;
@@ -90,6 +94,25 @@ export class SessionContext {
     updateDb: UpdateFn;
     emitter: Emitter;
     initialContext?: LLMMessage[];
+    /**
+     * Optional outbound-text scrubber. When provided, every entry's
+     * `content` field is run through it before persistence + before
+     * it lands in the in-memory llmContext that gets handed to the
+     * LLM. Passed by the orchestrator wired to the redaction system
+     * (`server/security/scrubber.ts`); test fixtures can omit it for
+     * pass-through behavior.
+     */
+    scrubText?: (text: string) => Promise<string>;
+    /**
+     * Optional inverse: expand `[REDACTED:<name>]` placeholders back
+     * to raw values inside JSON-shaped data. Used by tool-execute to
+     * resolve placeholders the LLM emitted in tool arguments before
+     * the handler runs (so the actual `git push https://<token>@...`
+     * happens with the real token).
+     *
+     * Recursively walks objects + arrays.
+     */
+    expandArgs?: (value: unknown) => Promise<unknown>;
   }) {
     this.sessionId = opts.sessionId;
     this.sessionType = opts.sessionType;
@@ -97,6 +120,17 @@ export class SessionContext {
     this.updateDb = opts.updateDb;
     this.emitter = opts.emitter;
     this.llmContext = opts.initialContext ? [...opts.initialContext] : [];
+    this.scrubText = opts.scrubText ?? null;
+    this.expandArgs = opts.expandArgs ?? null;
+  }
+
+  /**
+   * Public surface for tool-execute: expand placeholders in coerced
+   * tool args. Pass-through when no expander was wired.
+   */
+  async expandToolArgs(value: unknown): Promise<unknown> {
+    if (this.expandArgs === null) return value;
+    return this.expandArgs(value);
   }
 
   // ─── Public Read API ───────────────────────────────────────────────────────
@@ -140,14 +174,15 @@ export class SessionContext {
     payload: AppendPayload,
     opts?: { knownEntryId?: number },
   ): Promise<number> {
+    const scrubbed = await this.scrubPayload(payload);
     const entryId =
       opts?.knownEntryId !== undefined
         ? opts.knownEntryId
-        : await this.persistEntry(payload);
-    const event = this.entryToEvent(entryId, payload, /*started=*/ false);
+        : await this.persistEntry(scrubbed);
+    const event = this.entryToEvent(entryId, scrubbed, /*started=*/ false);
     if (event) this.emit(event);
-    if (isLLMVisible(payload.kind)) {
-      this.llmContext.push(toMessage(payload, entryId));
+    if (isLLMVisible(scrubbed.kind)) {
+      this.llmContext.push(toMessage(scrubbed, entryId));
     }
     return entryId;
   }
@@ -155,10 +190,31 @@ export class SessionContext {
   // ─── appendDraft() ─────────────────────────────────────────────────────────
 
   async appendDraft(payload: AppendPayload): Promise<number> {
-    const entryId = await this.persistEntry(payload);
-    const event = this.entryToEvent(entryId, payload, /*started=*/ true);
+    const scrubbed = await this.scrubPayload(payload);
+    const entryId = await this.persistEntry(scrubbed);
+    const event = this.entryToEvent(entryId, scrubbed, /*started=*/ true);
     if (event) this.emit(event);
     return entryId;
+  }
+
+  // ─── scrubPayload() ────────────────────────────────────────────────────────
+
+  /**
+   * Run the optional outbound-text scrubber over the entry's `content`.
+   * No-op when no scrubber was wired in (test fixtures, or when
+   * redaction is genuinely off).
+   */
+  private async scrubPayload(payload: AppendPayload): Promise<AppendPayload> {
+    if (this.scrubText === null) return payload;
+    const text = payload.content;
+    if (text.length === 0) return payload;
+    // Idempotent: scrubbing already-scrubbed text is a no-op (vault +
+    // patterns have already replaced everything they would). The
+    // small per-call cost is fine; we'd rather pay it than risk
+    // missing a secret that snuck in via a parallel write path.
+    const scrubbed = await this.scrubText(text);
+    if (scrubbed === text) return payload;
+    return { ...payload, content: scrubbed };
   }
 
   // ─── commitToContext() ─────────────────────────────────────────────────────

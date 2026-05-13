@@ -138,6 +138,35 @@ function buildToolRulesTemplate(): Record<string, unknown> {
       out[name] = base;
     }
   }
+
+  // Layer 1 path-deny defaults for read_file. We pre-populate these
+  // because they're universally-sensitive and easy to forget. Only
+  // for read_file (the tool that gives the agent a clean typed entry
+  // point to file content) — for bash, regex-on-args misses too many
+  // cases (nano, python, custom scripts) to be worth a false sense
+  // of security. Real isolation lives in `huko docker run`.
+  out["read_file"] = {
+    _comment:
+      "Patterns match against: `path`. Layer 1 of the redaction story " +
+      "— stop the agent from even reading sensitive files. For broader " +
+      "isolation use `huko docker run` to sandbox the whole agent.",
+    _comment_alternative_paths:
+      "Note: bash with `cat`, `nano`, `python -c \"open(...)\"` etc. " +
+      "could still read these files — regex-matching shell args isn't " +
+      "comprehensive enough to catch everything. Add to `bash.deny` " +
+      "below if you need broader coverage on a SPECIFIC command shape.",
+    deny: [
+      "re:(^|/)\\.ssh(/|$)",
+      "re:(^|/)\\.aws/credentials($|\\s)",
+      "re:(^|/)\\.npmrc($|\\s)",
+      "re:(^|/)id_rsa(\\.[a-z]+)?$",
+      "re:\\.pem$",
+      "re:(^|/)\\.env(\\.[a-z0-9_-]+)?$",
+    ],
+    allow: [] as string[],
+    requireConfirm: [] as string[],
+  };
+
   return out;
 }
 

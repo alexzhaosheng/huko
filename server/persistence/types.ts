@@ -167,6 +167,68 @@ export interface SessionPersistence {
     listNonTerminal(): Promise<TaskRow[]>;
   };
 
+  /**
+   * Per-session secret-substitution table — backs Layers 2/3 of the
+   * redaction system (vault hits + auto-discovered regex hits).
+   *
+   * Each row maps a placeholder (e.g. `[REDACTED:github-token]` or
+   * `[REDACTED:secret-3]`) to its raw value. The scrubber writes here
+   * when it finds a new secret outbound; tool-execute reads here when
+   * a placeholder appears in tool args (expand back to raw before
+   * running the tool). Scoped to (sessionId, sessionType) so secrets
+   * never bleed between sessions.
+   */
+  readonly substitutions: {
+    /**
+     * Insert a (placeholder, rawValue) mapping. Idempotent: if the same
+     * placeholder already exists with the same value, no-op. If the
+     * placeholder exists with a DIFFERENT value, that's a bug in the
+     * caller (placeholder allocation should be deterministic for a
+     * given raw value within a session) — implementations may throw.
+     */
+    record(input: SubstitutionRecord): Promise<void>;
+    /** Look up the raw value for a placeholder, or null if unknown. */
+    lookupByPlaceholder(
+      sessionId: number,
+      sessionType: SessionType,
+      placeholder: string,
+    ): Promise<string | null>;
+    /**
+     * Look up the placeholder previously assigned to `rawValue`, or
+     * null if this is a fresh secret. Used by the scrubber for
+     * idempotence (same secret in two outbound messages → same
+     * placeholder, so the LLM sees stable references).
+     */
+    lookupByRaw(
+      sessionId: number,
+      sessionType: SessionType,
+      rawValue: string,
+    ): Promise<string | null>;
+    /** All substitutions for a session — diagnostics + tests. */
+    listForSession(
+      sessionId: number,
+      sessionType: SessionType,
+    ): Promise<SubstitutionRow[]>;
+  };
+
   /** Graceful shutdown — close connections, flush WAL, etc. */
   close(): Promise<void> | void;
 }
+
+// ─── Session substitutions (redaction layer) ─────────────────────────────────
+
+export type SubstitutionSource =
+  | "vault"
+  | `scrub:${string}`; // e.g. "scrub:openai-key"
+
+export type SubstitutionRecord = {
+  sessionId: number;
+  sessionType: SessionType;
+  placeholder: string;
+  rawValue: string;
+  source: SubstitutionSource;
+};
+
+export type SubstitutionRow = SubstitutionRecord & {
+  createdAt: number;
+};
