@@ -97,8 +97,15 @@ h1 {
   margin: 14px 0 0;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 8px;
   flex-wrap: wrap;
+}
+
+.icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  color: var(--muted);
 }
 
 .install-line code {
