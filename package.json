@@ -1,6 +1,6 @@
 {
   "name": "@alexzhaosheng/huko",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "An explicit, scriptable AI agent for the command line. Pipe data in, get the answer out.",
   "keywords": [
     "ai",
