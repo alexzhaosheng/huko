@@ -106,3 +106,25 @@ export const taskContext = sqliteTable(
     taskIdx: index("idx_task_context_task").on(table.taskId),
   }),
 );
+
+// ─── session_substitutions ─── per-session secret-substitution table ─────────
+
+export const sessionSubstitutions = sqliteTable(
+  "session_substitutions",
+  {
+    sessionId: integer("session_id").notNull(),
+    sessionType: text("session_type").$type<SessionType>().notNull(),
+    placeholder: text("placeholder").notNull(),
+    rawValue: text("raw_value").notNull(),
+    /** "vault" or "scrub:<pattern-name>". */
+    source: text("source").notNull(),
+    createdAt: integer("created_at").notNull().default(epochMs),
+  },
+  (table) => ({
+    rawIdx: index("idx_session_substitutions_raw").on(
+      table.sessionId,
+      table.sessionType,
+      table.rawValue,
+    ),
+  }),
+);

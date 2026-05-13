@@ -38,13 +38,15 @@ import type {
   CreateTaskWithInitialEntryInput,
   EntryRow,
   SessionPersistence,
+  SubstitutionRecord,
+  SubstitutionRow,
   TaskRow,
   UpdateTaskPatch,
 } from "./types.js";
 import type { LLMMessage } from "../core/llm/types.js";
 import type { SessionType } from "../../shared/types.js";
 
-const { chatSessions, tasks, taskContext } = schema;
+const { chatSessions, tasks, taskContext, sessionSubstitutions } = schema;
 
 export type SqliteSessionPersistenceOptions = {
   /** Working directory the project DB lives under. Defaults to process.cwd(). */
@@ -60,6 +62,7 @@ export class SqliteSessionPersistence implements SessionPersistence {
   readonly entries: SessionPersistence["entries"];
   readonly sessions: SessionPersistence["sessions"];
   readonly tasks: SessionPersistence["tasks"];
+  readonly substitutions: SessionPersistence["substitutions"];
 
   constructor(opts: SqliteSessionPersistenceOptions = {}) {
     const cwd = opts.cwd ?? process.cwd();
@@ -222,6 +225,77 @@ export class SqliteSessionPersistence implements SessionPersistence {
           .map(toTaskRow);
       },
     };
+
+    // ── substitutions ──────────────────────────────────────────────────────
+    this.substitutions = {
+      record: async (input: SubstitutionRecord): Promise<void> => {
+        // INSERT OR IGNORE: same (sessionId, sessionType, placeholder)
+        // already there → no-op. Strict idempotence rule (caller must
+        // allocate the same placeholder for the same raw value within
+        // a session) makes "ignore" the right choice over "replace".
+        this.sqlite
+          .prepare(
+            `INSERT OR IGNORE INTO session_substitutions
+               (session_id, session_type, placeholder, raw_value, source)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(
+            input.sessionId,
+            input.sessionType,
+            input.placeholder,
+            input.rawValue,
+            input.source,
+          );
+      },
+      lookupByPlaceholder: async (sessionId, type, placeholder): Promise<string | null> => {
+        const row = await db
+          .select({ rawValue: sessionSubstitutions.rawValue })
+          .from(sessionSubstitutions)
+          .where(
+            and(
+              eq(sessionSubstitutions.sessionId, sessionId),
+              eq(sessionSubstitutions.sessionType, type),
+              eq(sessionSubstitutions.placeholder, placeholder),
+            ),
+          )
+          .get();
+        return row?.rawValue ?? null;
+      },
+      lookupByRaw: async (sessionId, type, rawValue): Promise<string | null> => {
+        const row = await db
+          .select({ placeholder: sessionSubstitutions.placeholder })
+          .from(sessionSubstitutions)
+          .where(
+            and(
+              eq(sessionSubstitutions.sessionId, sessionId),
+              eq(sessionSubstitutions.sessionType, type),
+              eq(sessionSubstitutions.rawValue, rawValue),
+            ),
+          )
+          .get();
+        return row?.placeholder ?? null;
+      },
+      listForSession: async (sessionId, type): Promise<SubstitutionRow[]> => {
+        const rows = await db
+          .select()
+          .from(sessionSubstitutions)
+          .where(
+            and(
+              eq(sessionSubstitutions.sessionId, sessionId),
+              eq(sessionSubstitutions.sessionType, type),
+            ),
+          )
+          .all();
+        return rows.map((r) => ({
+          sessionId: r.sessionId,
+          sessionType: r.sessionType,
+          placeholder: r.placeholder,
+          rawValue: r.rawValue,
+          source: r.source as SubstitutionRecord["source"],
+          createdAt: r.createdAt,
+        }));
+      },
+    };
   }
 
   close(): void {
@@ -242,6 +316,7 @@ huko.db-journal
 huko.db-wal
 huko.db-shm
 keys.json
+vault.json
 state.json
 lock
 `;

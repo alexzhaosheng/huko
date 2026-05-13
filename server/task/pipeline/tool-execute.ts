@@ -80,14 +80,31 @@ export async function executeAndPersist(
   const coerced = coerceArgs(call.name, call.arguments);
   const coercedCall: ToolCall = { ...call, arguments: coerced };
 
+  // ── Placeholder expansion ──────────────────────────────────────────────
+  // The LLM only ever sees placeholders for vault entries + auto-
+  // discovered secrets (Layers 2/3 of the redaction system). Tool
+  // calls it emits will reference those placeholders — we expand
+  // them back to raw values BEFORE both (a) the safety policy gate
+  // (so deny patterns can match the actual content, not the
+  // placeholder) and (b) the tool handler (which needs real args
+  // to do real work). The PLACEHOLDER form (`coercedCall`) is what
+  // we persist to the entry metadata, so the on-disk history never
+  // contains the raw secret either.
+  const runtimeArgs = (await ctx.sessionContext.expandToolArgs(coerced)) as Record<string, unknown>;
+  const runtimeCall: ToolCall = { ...call, arguments: runtimeArgs };
+
   // ── Safety policy gate ─────────────────────────────────────────────────
   // Evaluate per-tool rules + dangerLevel default BEFORE running the
   // handler. If denied (by rule, by missing operator confirmation, or
   // by operator's "no" reply), persist a `policy_denied` tool_result and
   // skip handler execution entirely — the LLM gets to see the reason
-  // and can retry differently.
-  const refusal = await applyPolicyGate(ctx, coercedCall, tool.definition);
+  // and can retry differently. Uses the EXPANDED args so deny regexes
+  // match the actual secret-laden values (otherwise placeholders
+  // would let an LLM smuggle restricted content past the gate).
+  const refusal = await applyPolicyGate(ctx, runtimeCall, tool.definition);
   if (refusal !== null) {
+    // Persist using the placeholder form (`coercedCall`) so the DB
+    // never sees raw secrets even on a denied call.
     const entryId = await persistResult(
       ctx,
       coercedCall,
@@ -100,7 +117,11 @@ export async function executeAndPersist(
   }
 
   let outcome: Normalised;
-  const racePromise = raceAbort(ctx, () => runTool(ctx, coercedCall, tool));
+  // Tool handler gets the EXPANDED args so it can actually use the
+  // secret. The result it returns goes through the outbound scrubber
+  // (in SessionContext.append) before persistence + before the next
+  // LLM turn.
+  const racePromise = raceAbort(ctx, () => runTool(ctx, runtimeCall, tool));
   ctx.currentToolPromise = racePromise.catch(() => undefined);
   try {
     outcome = await racePromise;

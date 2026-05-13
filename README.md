@@ -27,6 +27,7 @@ huko docker run -- "audit dependencies for known CVEs"   # sandboxed
 - **Provider-agnostic.** Anthropic / OpenAI / DeepSeek / Zhipu / MiniMax / OpenRouter / Moonshot / your own gateway. Switch with `huko provider current <name>` or `huko model current <id>`.
 - **Sandboxable.** `huko docker run -- "..."` runs the agent in a container with your project mounted at `/work`. Filesystem isolation by default; pipes still work.
 - **Tool-level safety.** Per-tool `disable` / `deny` / `allow` / `requireConfirm` rules. Disabled tools disappear from the LLM's surface entirely — it can't call what it can't see. Per-project by default; layered with global.
+- **Three-layer redaction.** Built-in regex scrubs OpenAI / Anthropic / GitHub / AWS / PEM / JWT shapes from every outbound message; a global vault registers exact strings (`huko vault add github-token`) that never leave the machine; auto-allocated placeholders work BOTH ways — the LLM uses `[REDACTED:foo]` symbolically in tool calls and we expand to the real value before execution.
 - **Explicit configuration.** Layered: built-in → `~/.huko/` → `<cwd>/.huko/`. Every value `huko config show` reports its layer of origin.
 - **Two modes.** `full` for production-grade agent work (planning, ~13 tools, project context). `lean` for one-shot questions (~85% smaller per-call overhead).
 
@@ -144,6 +145,24 @@ huko safety check bash command='rm -rf /'     # dry-run a hypothetical call
 
 Editing verbs default to **project** (`<cwd>/.huko/config.json`); pass `--global` for `~/.huko/config.json`. `disabled` is stronger than `deny` — the LLM never sees the tool's name or schema, so it can't try to call it.
 
+### Vault (per-string redaction)
+
+```bash
+huko vault add github-token                   # hidden prompt for the value
+huko vault add prod-db-pw --value 'p@ssw0rd!' # direct (scripting only — leaks to history)
+huko vault list                               # names + lengths (NEVER values)
+huko vault remove old-token                   # unregister
+echo "my password is p@ssw0rd!" | huko vault test   # debug: see what gets redacted
+```
+
+Three-layer redaction every outbound message goes through:
+
+1. **Built-in regex** (always on) — known shapes like `sk-...`, `ghp_...`, `AKIA...`, PEM private keys, JWTs.
+2. **`safety.redactPatterns`** (project / global config) — your own regex for environment-specific secret shapes.
+3. **Vault** (`~/.huko/vault.json`, chmod 600) — exact strings you registered. **Round-trips**: when the LLM emits a tool call referencing a placeholder, huko expands it back to the real value before the tool runs — the LLM never sees raw, but can still USE the secret symbolically.
+
+Storage is global only; project-specific redactions belong in regex (Layer 2). For real isolation use `huko docker run` to sandbox the whole agent.
+
 ---
 
 ## Configuration
@@ -192,7 +211,7 @@ Or just edit the JSON files directly — huko reads them on every run, no cachin
 git clone https://github.com/alexzhaosheng/huko.git
 cd huko
 npm install
-npm test                  # 540+ tests, cross-platform
+npm test                  # 549+ tests, cross-platform
 npx tsc --noEmit          # strict type check
 npm run build:cli         # esbuild bundle → dist/cli.js
 

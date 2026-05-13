@@ -26,6 +26,8 @@ import type {
   CreateTaskWithInitialEntryInput,
   EntryRow,
   SessionPersistence,
+  SubstitutionRecord,
+  SubstitutionRow,
   TaskRow,
   UpdateTaskPatch,
 } from "./types.js";
@@ -41,6 +43,10 @@ export class MemorySessionPersistence implements SessionPersistence {
   readonly entries: SessionPersistence["entries"];
   readonly sessions: SessionPersistence["sessions"];
   readonly tasks: SessionPersistence["tasks"];
+  readonly substitutions: SessionPersistence["substitutions"];
+
+  // (sessionId|sessionType) → (placeholder → row)
+  private readonly _subs = new Map<string, Map<string, SubstitutionRow>>();
 
   constructor() {
     const allocId = (): number => this.nextId++;
@@ -213,6 +219,41 @@ export class MemorySessionPersistence implements SessionPersistence {
           }
         }
         return out;
+      },
+    };
+
+    const subKey = (sid: number, type: SessionType): string => `${sid}|${type}`;
+    const subBucket = (sid: number, type: SessionType) => {
+      const k = subKey(sid, type);
+      let b = this._subs.get(k);
+      if (b === undefined) {
+        b = new Map();
+        this._subs.set(k, b);
+      }
+      return b;
+    };
+    this.substitutions = {
+      record: async (input: SubstitutionRecord): Promise<void> => {
+        const bucket = subBucket(input.sessionId, input.sessionType);
+        if (bucket.has(input.placeholder)) return; // ignore — strict idempotence
+        bucket.set(input.placeholder, {
+          ...input,
+          createdAt: now(),
+        });
+      },
+      lookupByPlaceholder: async (sid, type, placeholder): Promise<string | null> => {
+        return this._subs.get(subKey(sid, type))?.get(placeholder)?.rawValue ?? null;
+      },
+      lookupByRaw: async (sid, type, rawValue): Promise<string | null> => {
+        const bucket = this._subs.get(subKey(sid, type));
+        if (!bucket) return null;
+        for (const row of bucket.values()) {
+          if (row.rawValue === rawValue) return row.placeholder;
+        }
+        return null;
+      },
+      listForSession: async (sid, type): Promise<SubstitutionRow[]> => {
+        return [...(this._subs.get(subKey(sid, type))?.values() ?? [])];
       },
     };
   }
