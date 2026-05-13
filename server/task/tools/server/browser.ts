@@ -1,10 +1,11 @@
 /**
  * Tool: browser
  *
- * Operate the user's real Chrome browser through the Chrome DevTools
- * Protocol (CDP). Connects to a running Chrome instance that was started
- * with `--remote-debugging-port`. All cookies, logins, and sessions are
- * live — the agent sees exactly what the user sees.
+ * Operate the user's real Chrome browser through a lightweight extension.
+ * huko starts a WebSocket server on demand; the Chrome extension connects
+ * and executes commands in the user's real browsing environment.
+ * All cookies, logins, and sessions are live — the agent sees and
+ * interacts with exactly what the user sees.
  *
  * Actions:
  *   - navigate    — open a URL in a new tab, return visible page text
@@ -19,14 +20,12 @@
  *   - switch_page — switch the active tab by index
  *
  * Browser lifecycle:
- *   - Connection is established lazily on first use and shared across
- *     calls within a session.
- *   - Disconnects automatically after 30 minutes of inactivity.
+ *   - WS server starts lazily on first use, shuts down after 5 min idle.
+ *   - Extension auto-connects when it detects the server.
  *
  * Setup (one-time):
- *   1. npm install puppeteer-core
- *   2. Start Chrome: chrome --remote-debugging-port=9222
- *   3. Configure a different port: huko config set tools.browser.cdpPort 9223
+ *   1. Load the extension in Chrome from extensions/chrome/
+ *   2. The extension icon shows connection status
  */
 
 import { writeFileSync } from "node:fs";
@@ -49,7 +48,7 @@ import {
 // ─── Description ────────────────────────────────────────────────────────────
 
 const DESCRIPTION =
-  "Operate the user's real Chrome browser through CDP.\n\n" +
+  "Operate the user's real Chrome browser through a Chrome extension.\n\n" +
   "<actions>\n" +
   "- `navigate`   : Open a URL in a new tab. Returns visible page text.\n" +
   "- `click`      : Click the first element matching a CSS selector.\n" +
@@ -69,6 +68,7 @@ const DESCRIPTION =
   "- Use `screenshot` when you need visual confirmation (layout, CAPTCHAs, UI verification).\n" +
   "- This operates on the USER's browser — all logins, cookies, and sessions are live.\n" +
   "- The user can watch what you're doing in their browser.\n" +
+  "- First-time setup: load the extension from extensions/chrome/ in chrome://extensions\n" +
   "</instructions>";
 
 const PROMPT_HINT =
@@ -82,9 +82,9 @@ const PROMPT_HINT =
   "- The user watches what you do — be transparent in your plan summary.";
 
 const LEAN_DESCRIPTION =
-  "Operate the user's Chrome browser via CDP.\n" +
+  "Operate the user's Chrome browser via extension.\n" +
   "Actions: navigate, click, type, scroll, get_text, get_html, screenshot, wait, list_pages, switch_page.\n" +
-  "Connect first: chrome --remote-debugging-port=9222";
+  "Requires the huko Chrome extension loaded from extensions/chrome/";
 
 // ─── Parameter schema ───────────────────────────────────────────────────────
 

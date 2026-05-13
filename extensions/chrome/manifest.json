@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "huko browser control",
+  "version": "1.0",
+  "description": "Lets huko operate your browser — navigate, click, type, and read pages on your behalf.",
+  "permissions": ["tabs", "scripting", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
