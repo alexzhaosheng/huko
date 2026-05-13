@@ -34,14 +34,13 @@
  */
 
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
-  writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { atomicWriteFile } from "./atomic-write.js";
 
 export type ResolveKeyOptions = {
   /**
@@ -251,12 +250,9 @@ function writeKeyToFile(p: string, ref: string, value: string): void {
   mkdirSync(path.dirname(p), { recursive: true });
   const existing = readKeysJson(p) ?? {};
   const next: Record<string, unknown> = { ...existing, [ref]: value };
-  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
-  try {
-    chmodSync(p, 0o600);
-  } catch {
-    /* Windows / non-POSIX — best effort, keys.json is gitignored anyway. */
-  }
+  // Atomic + 0o600 in a single open() — no permission race, no
+  // truncated file if we crash mid-write. See atomic-write.ts.
+  atomicWriteFile(p, JSON.stringify(next, null, 2) + "\n", 0o600);
 }
 
 function removeKeyFromFile(p: string, ref: string): boolean {
@@ -267,12 +263,7 @@ function removeKeyFromFile(p: string, ref: string): boolean {
   const next: Record<string, unknown> = { ...existing };
   delete next[ref];
 
-  writeFileSync(p, JSON.stringify(next, null, 2) + "\n", "utf8");
-  try {
-    chmodSync(p, 0o600);
-  } catch {
-    /* see writeKeyToFile */
-  }
+  atomicWriteFile(p, JSON.stringify(next, null, 2) + "\n", 0o600);
   return true;
 }
 

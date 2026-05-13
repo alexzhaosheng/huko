@@ -129,6 +129,10 @@ export class MemorySessionPersistence implements SessionPersistence {
         for (const [eid, e] of this._entries) {
           if (droppedTaskIds.has(e.taskId)) this._entries.delete(eid);
         }
+        // Substitutions carry raw vault/scrub values — drop them on
+        // session delete so we don't retain plaintext past the
+        // conversation's lifetime. Matches the Sqlite backend.
+        this._subs.delete(`${id}|chat`);
       },
     };
 
