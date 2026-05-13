@@ -39,7 +39,20 @@ const TOOL_RESULT_PREVIEW_MAX = 200; // chars when verbose
 export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false }): Formatter {
   const verbose = opts.verbose;
   let assistantStreaming = false;
+  let thinkingActive = false;
   const printedToolCallsFor = new Set<number>();
+
+  /**
+   * Close out the dim thinking section with a blank line. Called when
+   * we transition from thinking → content / tool calls / assistant
+   * complete, so the user sees a visual break instead of the answer
+   * running off the tail of the CoT mid-word.
+   */
+  function flushThinking(): void {
+    if (!thinkingActive) return;
+    process.stderr.write("\n\n");
+    thinkingActive = false;
+  }
 
   const emitter: Emitter = {
     emit(event) {
@@ -52,15 +65,21 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           // No-op — assistantStreaming flips on at the first real
           // content_delta, so turns that emit only thinking + a
           // message tool call don't print a stray trailing newline.
+          // thinkingActive resets implicitly at the previous turn's
+          // assistant_complete (which flushes).
           break;
 
         case "assistant_content_delta":
+          // Thinking → content transition: terminate the dim CoT block
+          // with a blank line before the answer starts on stdout.
+          flushThinking();
           assistantStreaming = true;
           process.stdout.write(event.delta);
           break;
 
         case "assistant_thinking_delta":
           // Thinking is diagnostic-ish; dim, on stderr.
+          thinkingActive = true;
           process.stderr.write(dimErr(event.delta));
           break;
 
@@ -75,6 +94,10 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           break;
 
         case "assistant_complete":
+          // Thinking-only turn (no streamed content, just tool calls)
+          // also needs a separator before the `→ tool(...)` lines, so
+          // flush BEFORE the streaming-content newline check.
+          flushThinking();
           if (assistantStreaming) {
             process.stdout.write("\n");
             assistantStreaming = false;
