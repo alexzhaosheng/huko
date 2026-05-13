@@ -45,7 +45,7 @@ import {
   getActiveSessionId,
   setActiveSessionId,
 } from "../state.js";
-import { getConfig, loadConfig } from "../../config/index.js";
+import { getConfig } from "../../config/index.js";
 
 export type RunArgs = {
   prompt: string;
@@ -270,9 +270,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
 
   // Effective verbosity: CLI flag wins, otherwise inherit HukoConfig.cli.verbose
   // (default false). Only affects the `text` formatter; json/jsonl ignore it.
-  // Bootstrap also calls loadConfig later — idempotent, so calling here first
-  // is safe and lets the formatter see the on-disk verbose setting.
-  loadConfig({ cwd });
+  // getConfig() self-loads on first access.
   const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
   const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
 
@@ -409,7 +407,6 @@ export async function runCommand(args: RunArgs): Promise<number> {
     // ── Run the LLM call ──────────────────────────────────────────────────
     // Resolve effective mode: CLI flag wins, otherwise inherit from
     // HukoConfig (layered default → global → project → env → explicit).
-    // Bootstrap above already called loadConfig(), so getConfig() is hot.
     const effectiveMode: "lean" | "full" = args.mode ?? getConfig().mode;
     const lean = effectiveMode === "lean";
 

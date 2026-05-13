@@ -62,9 +62,10 @@ export async function bootstrap(
   formatter: Formatter,
   options: BootstrapOptions = {},
 ): Promise<CliBootstrap> {
-  // Load runtime config FIRST — kernel modules read it via getConfig() at task
-  // start. Layered: defaults < ~/.huko/config.json < <cwd>/.huko/config.json
-  // < HUKO_CONFIG env. See docs/modules/config.md.
+  // Load runtime config eagerly. Not strictly required — getConfig()
+  // self-loads on first access — but bootstrap is the canonical entry
+  // and this lets us surface any malformed-config warnings up front
+  // rather than at the first kernel read.
   loadConfig({ cwd: process.cwd() });
 
   // Infra config is sync, file-based. Same in both persistent and

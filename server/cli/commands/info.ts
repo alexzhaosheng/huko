@@ -39,7 +39,6 @@ import * as path from "node:path";
 import {
   getConfigLayers,
   getValueByPath,
-  loadConfig,
   loadInfraConfig,
   parsePath,
   type ConfigSource,
@@ -108,9 +107,6 @@ export async function infoCommand(args: InfoArgs): Promise<number> {
   try {
     const cwd = process.cwd();
     const cfg = loadInfraConfig({ cwd });
-    // Ensure runtime config layers are loaded — bootstrap usually does
-    // this, but `huko info` can run before bootstrap on a fresh install.
-    loadConfig({ cwd });
     const eff = effectiveForScope(cfg, args.scope, cwd);
 
     if (args.format === "json") {

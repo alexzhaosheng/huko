@@ -27,7 +27,6 @@ import {
   getConfigLayers,
   getValueByPath,
   inferPathSchema,
-  loadConfig,
   parsePath,
   setConfigValue,
   unsetConfigValue,
@@ -35,8 +34,6 @@ import {
 
 export async function configShowCommand(): Promise<number> {
   try {
-    loadConfig({ cwd: process.cwd() });
-
     const resolved = getConfig();
     const layers = getConfigLayers();
 
@@ -66,7 +63,6 @@ export async function configGetCommand(args: { path: string }): Promise<number> 
       return 3;
     }
 
-    loadConfig({ cwd: process.cwd() });
     const resolved = getConfig() as unknown;
     const parts = parsePath(args.path);
     const value = getValueByPath(resolved, parts);

@@ -42,7 +42,7 @@ import {
   getActiveSessionId,
   setActiveSessionId,
 } from "../state.js";
-import { getConfig, loadConfig } from "../../config/index.js";
+import { getConfig } from "../../config/index.js";
 import { openPrompter, PromptCancelled, type Prompter } from "./prompts.js";
 import { bold, cyan, dim, green, red, yellow } from "../colors.js";
 import { formatTokenBreakdown } from "./run.js";
@@ -78,9 +78,7 @@ export async function chatCommand(args: RunArgs): Promise<number> {
     lock = result.lock;
   }
 
-  // Formatter (same plumbing as run.ts). Load config eagerly so verbose
-  // picks up on-disk preference.
-  loadConfig({ cwd });
+  // Formatter (same plumbing as run.ts). getConfig() self-loads.
   const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
   const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
 
