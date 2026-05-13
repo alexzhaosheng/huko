@@ -315,7 +315,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
 
   try {
     ctx = await bootstrap(formatter, {
-      ...(args.ephemeral ? { ephemeral: true } : {}),
+      mode: args.ephemeral ? "memory" : "persistent",
     });
 
     const handlerFormat: "text" | "json" | "jsonl" =

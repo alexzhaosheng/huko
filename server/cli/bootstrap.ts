@@ -13,12 +13,12 @@
  *   - `TaskOrchestrator` — built around the SessionPersistence; receives
  *     a pre-resolved ResolvedModel per call from the caller (run.ts).
  *
- * Two modes:
+ * Two modes (`{ mode }`, required):
  *
- *   1. Default (persistent):
+ *   1. `"persistent"`:
  *        - SqliteSessionPersistence at <cwd>/.huko/huko.db
  *
- *   2. Ephemeral (`{ ephemeral: true }`, surfaced as `--memory` on the CLI):
+ *   2. `"memory"` (surfaced as `--memory` on the CLI):
  *        - MemorySessionPersistence (sessions/tasks/entries vanish on exit)
  *
  * Note: `--memory` only swaps the SESSION layer. InfraConfig is read
@@ -46,9 +46,17 @@ import { TaskOrchestrator } from "../services/index.js";
 import { loadConfig, loadInfraConfig, type InfraConfig } from "../config/index.js";
 import type { Formatter } from "./formatters/index.js";
 
+export type SessionMode = "persistent" | "memory";
+
 export type BootstrapOptions = {
-  /** When true, the session DB is in-memory; .huko/state.json untouched. */
-  ephemeral?: boolean;
+  /**
+   * Session-layer mode. `"persistent"` opens the SQLite DB under
+   * `<cwd>/.huko/`; `"memory"` runs entirely in-memory. Required so
+   * every callsite makes the choice explicit — there is no sensible
+   * default that's both safe (don't write to disk by surprise) and
+   * useful (you usually DO want persistence).
+   */
+  mode: SessionMode;
 };
 
 export type CliBootstrap = {
@@ -60,7 +68,7 @@ export type CliBootstrap = {
 
 export async function bootstrap(
   formatter: Formatter,
-  options: BootstrapOptions = {},
+  options: BootstrapOptions,
 ): Promise<CliBootstrap> {
   // Load runtime config eagerly. Not strictly required — getConfig()
   // self-loads on first access — but bootstrap is the canonical entry
@@ -69,11 +77,12 @@ export async function bootstrap(
   loadConfig({ cwd: process.cwd() });
 
   // Infra config is sync, file-based. Same in both persistent and
-  // ephemeral modes — providers / models are user configuration, not
+  // memory modes — providers / models are user configuration, not
   // session state.
   const infra = loadInfraConfig({ cwd: process.cwd() });
 
-  const session: SessionPersistence = options.ephemeral
+  const memory = options.mode === "memory";
+  const session: SessionPersistence = memory
     ? new MemorySessionPersistence()
     : new SqliteSessionPersistence({ cwd: process.cwd() });
 
@@ -86,9 +95,9 @@ export async function bootstrap(
 
   // Heal any orphan tasks left over from a crashed previous process —
   // mark them failed, inject synthetic tool_results to keep history valid
-  // for any future continue-conversation. Skipped in ephemeral mode (the
+  // for any future continue-conversation. Skipped in memory mode (the
   // memory backend has nothing to find).
-  if (!options.ephemeral) {
+  if (!memory) {
     const report = await orchestrator.recoverOrphans();
     if (report.healed > 0) {
       const now = Date.now();

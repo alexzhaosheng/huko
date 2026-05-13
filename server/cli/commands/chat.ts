@@ -121,7 +121,7 @@ export async function chatCommand(args: RunArgs): Promise<number> {
 
   try {
     ctx = await bootstrap(formatter, {
-      ...(args.ephemeral ? { ephemeral: true } : {}),
+      mode: args.ephemeral ? "memory" : "persistent",
     });
 
     // Subscribe to ask/decision events on the orchestrator (no
