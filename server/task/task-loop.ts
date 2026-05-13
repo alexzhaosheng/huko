@@ -106,7 +106,7 @@ export class TaskLoop {
           continue;
         }
 
-        ctx.consumeInterjectionFlag();
+        ctx.clearInterjectionFlag();
 
         const llmOutcome = await callLLM(ctx);
 
