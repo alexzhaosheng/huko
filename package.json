@@ -34,7 +34,7 @@
     "dist"
   ],
   "scripts": {
-    "build:cli": "esbuild server/cli/index.ts --platform=node --packages=external --bundle --format=esm --outfile=dist/cli.js",
+    "build:cli": "node scripts/build-cli.mjs",
     "check": "tsc --noEmit",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "huko": "tsx server/cli/index.ts",

@@ -49,7 +49,7 @@ import {
   type ResolvedProvider,
 } from "../../config/index.js";
 import { estimateContextWindow } from "../../core/llm/model-context-window.js";
-import { getHukoVersion } from "../../version.js";
+import { getHukoVersion, getBuildInfo } from "../../version.js";
 import {
   describeKeySource,
   globalKeysPath,
@@ -362,8 +362,15 @@ function printText(eff: Effective, cwd: string, scope: InfoScope): void {
       ? "effective configuration"
       : `${scope} layer only`;
 
+  const buildInfo = getBuildInfo();
   out.write(header(`huko info — ${scopeNote}`) + "\n");
-  out.write(`version: ${emphasis("v" + getHukoVersion())}\n`);
+  out.write(`version: ${emphasis(getHukoVersion())}\n`);
+  if (buildInfo !== null) {
+    out.write(`commit:  ${emphasis(buildInfo.commit)}\n`);
+    out.write(`built:   ${emphasis(buildInfo.date)}\n`);
+  } else {
+    out.write(`build:   ${emphasis("dev")}\n`);
+  }
   out.write(`cwd:     ${emphasis(cwd)}\n`);
   if (scope !== "all") {
     out.write(
@@ -563,7 +570,15 @@ function pad(s: string, width: number): string {
 // ─── JSON payload ───────────────────────────────────────────────────────────
 
 type Payload = {
-  header: { cwd: string; scope: InfoScope; version: string };
+  header: {
+    cwd: string;
+    scope: InfoScope;
+    version: string;
+    /** Short git SHA. `null` in dev (unbundled). */
+    commit: string | null;
+    /** ISO date YYYY-MM-DD. `null` in dev. */
+    buildDate: string | null;
+  };
   currentMode: {
     value: "lean" | "full";
     /** Layer that set the value (display label: "global" not "user"). */
@@ -644,7 +659,13 @@ function buildPayload(eff: Effective, cwd: string, scope: InfoScope): Payload {
       : [];
 
   return {
-    header: { cwd, scope, version: getHukoVersion() },
+    header: {
+      cwd,
+      scope,
+      version: getHukoVersion(),
+      commit: getBuildInfo()?.commit ?? null,
+      buildDate: getBuildInfo()?.date ?? null,
+    },
     currentMode: {
       value: eff.mode.value,
       source: eff.mode.source !== null ? displaySource(eff.mode.source) : null,
