@@ -200,21 +200,58 @@ export class SessionContext {
   // ─── scrubPayload() ────────────────────────────────────────────────────────
 
   /**
-   * Run the optional outbound-text scrubber over the entry's `content`.
-   * No-op when no scrubber was wired in (test fixtures, or when
-   * redaction is genuinely off).
+   * Run the optional outbound-text scrubber over every plaintext-bearing
+   * field of the entry: `content`, `thinking`, and (recursively, via
+   * JSON round-trip) the `arguments` of any tool call the assistant
+   * emitted. No-op when no scrubber was wired in.
+   *
+   * Why scrub `thinking` and tool-call args, not just `content`: an
+   * assistant message can echo a token back inside its CoT or paste it
+   * into a tool argument like `bash command: "curl -H 'Authorization:
+   * sk-…'"`. Both paths get persisted and replayed to the next LLM
+   * turn; if we only scrubbed `content`, vault/regex hits in those
+   * other fields would leak unredacted.
+   *
+   * Idempotent: scrubbing already-scrubbed text is a no-op.
    */
   private async scrubPayload(payload: AppendPayload): Promise<AppendPayload> {
     if (this.scrubText === null) return payload;
-    const text = payload.content;
-    if (text.length === 0) return payload;
-    // Idempotent: scrubbing already-scrubbed text is a no-op (vault +
-    // patterns have already replaced everything they would). The
-    // small per-call cost is fine; we'd rather pay it than risk
-    // missing a secret that snuck in via a parallel write path.
-    const scrubbed = await this.scrubText(text);
-    if (scrubbed === text) return payload;
-    return { ...payload, content: scrubbed };
+    const scrub = this.scrubText;
+
+    let next = payload;
+
+    if (next.content.length > 0) {
+      const scrubbed = await scrub(next.content);
+      if (scrubbed !== next.content) next = { ...next, content: scrubbed };
+    }
+
+    if (typeof next.thinking === "string" && next.thinking.length > 0) {
+      const scrubbed = await scrub(next.thinking);
+      if (scrubbed !== next.thinking) next = { ...next, thinking: scrubbed };
+    }
+
+    if (next.toolCalls && next.toolCalls.length > 0) {
+      const scrubbedCalls: ToolCall[] = [];
+      let changed = false;
+      for (const call of next.toolCalls) {
+        // JSON round-trip: serialise the args, scrub the whole string,
+        // parse back. Safe because tool-call arguments are by-protocol
+        // pure JSON. The placeholder `[REDACTED:name]` survives the
+        // round-trip as a literal string value and gets re-expanded
+        // at tool-execute time by `expandPlaceholdersDeep`.
+        const serialised = JSON.stringify(call.arguments);
+        const scrubbed = await scrub(serialised);
+        if (scrubbed === serialised) {
+          scrubbedCalls.push(call);
+        } else {
+          scrubbedCalls.push({ ...call, arguments: JSON.parse(scrubbed) });
+          changed = true;
+        }
+      }
+      if (changed) next = { ...next, toolCalls: scrubbedCalls };
+    }
+
+    return next;
   }
 
   // ─── commitToContext() ─────────────────────────────────────────────────────

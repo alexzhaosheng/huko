@@ -23,7 +23,11 @@ import type {
   TaskRow,
 } from "../persistence/index.js";
 import type { ResolvedModel } from "../config/infra-config-types.js";
-import type { TaskSummary } from "../../shared/events.js";
+import type {
+  AskUserEvent,
+  DecisionRequiredEvent,
+  TaskSummary,
+} from "../../shared/events.js";
 import { buildSystemPrompt } from "./build-system-prompt.js";
 import { buildLeanSystemPrompt } from "./build-lean-system-prompt.js";
 import type { RequestDecisionCallback } from "../engine/TaskContext.js";
@@ -96,9 +100,73 @@ export class TaskOrchestrator {
     }
   >();
 
+  // First-class subscription channels for ask_user / decision_required
+  // events. Frontends (CLI, daemon, IDE plugin) register a handler here
+  // AFTER constructing the orchestrator — no monkey-patching of the
+  // emitter, no "must attach before bootstrap" ordering rule. Each
+  // subscribe-call returns an unsubscribe function.
+  //
+  // Order vs. the formatter: subscribers fire AFTER the event has been
+  // pushed through the SessionContext emitter, so the formatter has
+  // already rendered the question by the time a subscriber gets the
+  // chance to open a prompter.
+  private readonly askSubscribers = new Set<(e: AskUserEvent) => void>();
+  private readonly decisionSubscribers = new Set<
+    (e: DecisionRequiredEvent) => void
+  >();
+
   constructor(opts: OrchestratorOptions) {
     this.session = opts.session;
     this.emitterFactory = opts.emitterFactory;
+  }
+
+  /**
+   * Register a handler invoked every time an `ask_user` event fires.
+   * The handler runs after the formatter has rendered the question,
+   * so it can safely open an interactive prompt without overlapping
+   * the rendered output. Returns an unsubscribe function.
+   */
+  onAskUser(handler: (e: AskUserEvent) => void): () => void {
+    this.askSubscribers.add(handler);
+    return () => {
+      this.askSubscribers.delete(handler);
+    };
+  }
+
+  /**
+   * Register a handler invoked every time a `decision_required` event
+   * fires (safety gate asking for y/n/a). Same ordering as `onAskUser`:
+   * runs after the formatter renders. Returns an unsubscribe function.
+   */
+  onDecision(handler: (e: DecisionRequiredEvent) => void): () => void {
+    this.decisionSubscribers.add(handler);
+    return () => {
+      this.decisionSubscribers.delete(handler);
+    };
+  }
+
+  private notifyAskSubscribers(event: AskUserEvent): void {
+    for (const sub of this.askSubscribers) {
+      try {
+        sub(event);
+      } catch (err) {
+        process.stderr.write(
+          `huko: ask_user subscriber threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+  }
+
+  private notifyDecisionSubscribers(event: DecisionRequiredEvent): void {
+    for (const sub of this.decisionSubscribers) {
+      try {
+        sub(event);
+      } catch (err) {
+        process.stderr.write(
+          `huko: decision_required subscriber threw: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
   }
 
   async recoverOrphans(): Promise<RecoveryReport> {
@@ -337,10 +405,11 @@ export class TaskOrchestrator {
 
     const askResolvers = this.askResolvers;
     const sessionPersistence = this.session;
+    const notifyAsk = (event: AskUserEvent): void => this.notifyAskSubscribers(event);
     const waitForReply: NonNullable<ConstructorParameters<typeof TaskContext>[0]["waitForReply"]> =
       async (payload) => {
         await sessionPersistence.tasks.update(taskId, { status: "waiting_for_reply" });
-        sessionContext.emit({
+        const event: AskUserEvent = {
           type: "ask_user",
           taskId,
           toolCallId: payload.toolCallId,
@@ -348,7 +417,9 @@ export class TaskOrchestrator {
           ...(payload.options ? { options: payload.options } : {}),
           ...(payload.selectionType ? { selectionType: payload.selectionType } : {}),
           ts: Date.now(),
-        });
+        };
+        sessionContext.emit(event);
+        notifyAsk(event);
         try {
           return await new Promise<{
             content: string;
@@ -370,10 +441,12 @@ export class TaskOrchestrator {
     // its absence is the fail-closed signal that tool-execute uses to
     // turn `prompt` decisions into deny when -y / non-interactive.
     const decisionResolvers = this.decisionResolvers;
+    const notifyDecision = (event: DecisionRequiredEvent): void =>
+      this.notifyDecisionSubscribers(event);
     const requestDecision: RequestDecisionCallback | undefined = (input.interactive ?? true)
       ? (async (req) => {
           await sessionPersistence.tasks.update(taskId, { status: "waiting_for_reply" });
-          sessionContext.emit({
+          const event: DecisionRequiredEvent = {
             type: "decision_required",
             taskId,
             toolCallId: req.toolCallId,
@@ -384,7 +457,9 @@ export class TaskOrchestrator {
             ...(req.matchedField !== undefined ? { matchedField: req.matchedField } : {}),
             ...(req.matchedValue !== undefined ? { matchedValue: req.matchedValue } : {}),
             ts: Date.now(),
-          });
+          };
+          sessionContext.emit(event);
+          notifyDecision(event);
           try {
             return await new Promise<{
               kind: "allow" | "deny" | "allow_and_remember";

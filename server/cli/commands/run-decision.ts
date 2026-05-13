@@ -1,12 +1,13 @@
 /**
  * server/cli/commands/run-decision.ts
  *
- * Bridge between `decision_required` HukoEvents (emitted by the
+ * Bridge between `decision_required` events (emitted by the
  * orchestrator when the safety-policy gate decides to PROMPT before a
  * tool call) and the user's terminal.
  *
- * Parallel to `run-ask.ts` — same emit-hook pattern, separate map of
- * resolvers. Different from `ask_user` because:
+ * Parallel to `run-ask.ts` — same subscription pattern via
+ * `orchestrator.onDecision(handler)`. Different from `ask_user`
+ * because:
  *   - The prompter is initiated by the TOOL PIPELINE, not the LLM.
  *   - The reply is ternary (allow / deny / always allow), not free text.
  *   - "always allow" persists the matched pattern to the global
@@ -16,12 +17,10 @@
  * Format-aware: text mode shows a coloured y/n/a select; json / jsonl
  * modes surface the event but don't prompt — controllers (daemon /
  * future tooling) consume the JSON event and call respondToDecision
- * themselves. CLI sandboxes don't have an operator to type y/n there.
+ * themselves.
  */
 
-import type { Emitter } from "../../engine/SessionContext.js";
 import type { TaskOrchestrator } from "../../services/index.js";
-import type { Formatter } from "../formatters/index.js";
 import type { DecisionRequiredEvent } from "../../../shared/events.js";
 import { bold, dim, red, yellow } from "../colors.js";
 import {
@@ -30,19 +29,19 @@ import {
   type Prompter,
 } from "./prompts.js";
 
-export type AttachDecisionHandlerOptions = {
-  formatter: Formatter;
+export type InstallDecisionHandlerOptions = {
+  orchestrator: TaskOrchestrator;
   format: "text" | "jsonl" | "json";
-  /** Late-bound — orchestrator isn't constructed yet at attach time. */
-  getOrchestrator: () => TaskOrchestrator | null;
 };
 
 export type DecisionHandlerHandle = {
+  /** Unsubscribe + close any open prompter. Idempotent. */
   close(): void;
 };
 
-export function attachDecisionHandler(opts: AttachDecisionHandlerOptions): DecisionHandlerHandle {
-  const inner: Emitter = opts.formatter.emitter;
+export function installDecisionHandler(
+  opts: InstallDecisionHandlerOptions,
+): DecisionHandlerHandle {
   let prompter: Prompter | null = null;
   let closed = false;
 
@@ -109,22 +108,17 @@ export function attachDecisionHandler(opts: AttachDecisionHandlerOptions): Decis
     } catch (err) {
       if (err instanceof PromptCancelled) {
         process.stderr.write(red("\nhuko: decision cancelled — treating as deny\n", "stderr"));
-        opts.getOrchestrator()?.respondToDecision(event.toolCallId, { kind: "deny" });
+        opts.orchestrator.respondToDecision(event.toolCallId, { kind: "deny" });
         return;
       }
       process.stderr.write(
         red(`\nhuko: decision prompt failed: ${err instanceof Error ? err.message : String(err)}\n`, "stderr"),
       );
-      opts.getOrchestrator()?.respondToDecision(event.toolCallId, { kind: "deny" });
+      opts.orchestrator.respondToDecision(event.toolCallId, { kind: "deny" });
       return;
     }
 
-    const orch = opts.getOrchestrator();
-    if (!orch) {
-      process.stderr.write(red("\nhuko: orchestrator unavailable; decision discarded\n", "stderr"));
-      return;
-    }
-    const ok = orch.respondToDecision(event.toolCallId, { kind: outcome });
+    const ok = opts.orchestrator.respondToDecision(event.toolCallId, { kind: outcome });
     if (!ok) {
       process.stderr.write(
         yellow(
@@ -135,18 +129,15 @@ export function attachDecisionHandler(opts: AttachDecisionHandlerOptions): Decis
     }
   }
 
-  const originalEmit = inner.emit.bind(inner);
-  inner.emit = (event) => {
-    originalEmit(event);
-    if (event.type === "decision_required") {
-      void handle(event);
-    }
-  };
+  const unsubscribe = opts.orchestrator.onDecision((event) => {
+    void handle(event);
+  });
 
   return {
     close() {
       if (closed) return;
       closed = true;
+      unsubscribe();
       if (prompter) {
         prompter.close();
         prompter = null;

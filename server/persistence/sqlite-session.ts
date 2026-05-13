@@ -15,7 +15,7 @@
  */
 
 import { eq, and, asc, desc } from "drizzle-orm";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import Database, {
   type Database as BetterSqlite3Database,
@@ -58,6 +58,7 @@ export type SqliteSessionPersistenceOptions = {
 export class SqliteSessionPersistence implements SessionPersistence {
   private readonly sqlite: BetterSqlite3Database;
   private readonly db: SessionDb;
+  private readonly dbPath!: string;
 
   readonly entries: SessionPersistence["entries"];
   readonly sessions: SessionPersistence["sessions"];
@@ -84,6 +85,19 @@ export class SqliteSessionPersistence implements SessionPersistence {
     this.db = drizzle(this.sqlite, { schema });
 
     runMigrations(this.sqlite, sessionMigrations);
+
+    // Tighten file mode on the DB and its sidecars. The `session_substitutions`
+    // table stores the raw values that the scrubber redacted out of outbound
+    // messages (vault hits + regex hits) — i.e. the same plaintext we keep out
+    // of keys.json / vault.json (both chmod 600). On multi-user POSIX, the
+    // default file mode is the process umask (commonly 0644); without this,
+    // any local user can `cat huko.db | strings | grep ghp_`. Best-effort:
+    // .wal/.shm are created lazily, so they may not exist yet — we re-chmod
+    // on close() once the checkpoint has flushed them.
+    chmodIfExists(dbPath, 0o600);
+    chmodIfExists(dbPath + "-wal", 0o600);
+    chmodIfExists(dbPath + "-shm", 0o600);
+    this.dbPath = dbPath;
 
     const db = this.db;
 
@@ -139,6 +153,19 @@ export class SqliteSessionPersistence implements SessionPersistence {
         return row ? toChatSessionRow(row) : null;
       },
       delete: async (id: number): Promise<void> => {
+        // chat_sessions → tasks → task_context cascade via FK. The
+        // session_substitutions table is NOT FK-bound to chat_sessions
+        // (the same table holds both chat- and agent-session rows
+        // distinguished by session_type), so we delete its rows here
+        // explicitly. Otherwise plaintext vault hits and scrubber
+        // captures live on after the session is gone — same security
+        // boundary as keys.json / vault.json.
+        this.sqlite
+          .prepare(
+            `DELETE FROM session_substitutions
+              WHERE session_id = ? AND session_type = 'chat'`,
+          )
+          .run(id);
         await db.delete(chatSessions).where(eq(chatSessions.id, id)).run();
       },
     };
@@ -300,10 +327,26 @@ export class SqliteSessionPersistence implements SessionPersistence {
 
   close(): void {
     try {
+      // Truncate the WAL into the main DB so we don't leave a
+      // `.db-wal` sidecar carrying queued writes (which can contain
+      // session_substitutions raw values). The wal/shm files vanish
+      // (or shrink to zero) after a successful TRUNCATE checkpoint
+      // when the last connection closes.
+      try {
+        this.sqlite.pragma("wal_checkpoint(TRUNCATE)");
+      } catch {
+        /* checkpoint can fail under concurrent readers — close anyway */
+      }
       this.sqlite.close();
     } catch {
       /* already closed */
     }
+    // Re-chmod after close: sidecars may have been (re)created during
+    // the lifetime of this connection. If they survive close (some
+    // platforms keep them around), we still want 0600 on them.
+    chmodIfExists(this.dbPath, 0o600);
+    chmodIfExists(this.dbPath + "-wal", 0o600);
+    chmodIfExists(this.dbPath + "-shm", 0o600);
   }
 }
 
@@ -328,6 +371,15 @@ function ensureGitignore(hukoDir: string): void {
     writeFileSync(giPath, DEFAULT_GITIGNORE, { flag: "wx" });
   } catch {
     /* lost race with another writer; harmless */
+  }
+}
+
+function chmodIfExists(p: string, mode: number): void {
+  if (!existsSync(p)) return;
+  try {
+    chmodSync(p, mode);
+  } catch {
+    /* Windows / non-POSIX FS — best effort. The DB is auto-gitignored. */
   }
 }
 

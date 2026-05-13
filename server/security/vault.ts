@@ -35,14 +35,13 @@
  */
 
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
-  writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { atomicWriteFile } from "./atomic-write.js";
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -172,11 +171,7 @@ function writeVault(entries: VaultEntry[]): void {
   const p = vaultPath();
   mkdirSync(path.dirname(p), { recursive: true });
   const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
-  writeFileSync(p, JSON.stringify({ entries: sorted }, null, 2) + "\n", "utf8");
-  try {
-    chmodSync(p, 0o600);
-  } catch {
-    // Windows / non-POSIX FS — best effort. The file is auto-gitignored
-    // (see SqliteSessionPersistence's DEFAULT_GITIGNORE).
-  }
+  // Atomic + 0o600 in a single open() — no permission race, no
+  // truncated file if we crash mid-write. See atomic-write.ts.
+  atomicWriteFile(p, JSON.stringify({ entries: sorted }, null, 2) + "\n", 0o600);
 }

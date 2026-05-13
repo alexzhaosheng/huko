@@ -4,10 +4,14 @@
  * `huko keys <verb>` — manage API-key resolution for the cwd.
  *
  * Verbs:
- *   - `set <ref> <value>`    write to <cwd>/.huko/keys.json (chmod 600)
- *   - `unset <ref>`          remove from <cwd>/.huko/keys.json
- *   - `list`                 show every provider ref + which layer
- *                            currently resolves it (NOT the value)
+ *   - `set <ref>`                  prompt hidden for value, write to
+ *                                   <cwd>/.huko/keys.json (chmod 600)
+ *   - `set <ref> --value <secret>` direct value via flag (scripting;
+ *                                   not recommended — leaks to shell
+ *                                   history / /proc/<pid>/cmdline)
+ *   - `unset <ref>`                remove from <cwd>/.huko/keys.json
+ *   - `list`                       show every provider ref + which layer
+ *                                   currently resolves it (NOT the value)
  *
  * Each command returns `Promise<number>` (exit code). The single
  * `process.exit()` site lives in `cli/index.ts`.
@@ -19,11 +23,12 @@
  *
  * Resolution order (highest first, set in `server/security/keys.ts`):
  *   1. <cwd>/.huko/keys.json
- *   2. process.env.<REF_UPPER>_API_KEY
- *   3. <cwd>/.env
+ *   2. ~/.huko/keys.json
+ *   3. process.env.<REF_UPPER>_API_KEY
+ *   4. <cwd>/.env
  *
  * Exit codes:
- *   0  ok    1  internal error    4  not found (unset)
+ *   0  ok    1  internal error    3  user error    4  not found (unset)
  */
 
 import { loadInfraConfig } from "../../config/index.js";
@@ -34,16 +39,44 @@ import {
   setProjectKey,
   unsetProjectKey,
 } from "../../security/keys.js";
+import { PromptCancelled, openPrompter } from "./prompts.js";
 
-export type KeysSetArgs = { ref: string; value: string };
+export type KeysSetArgs = {
+  ref: string;
+  /** Direct value, skipping the hidden prompt. Discouraged. */
+  inlineValue?: string;
+};
 export type KeysUnsetArgs = { ref: string };
 
 // ─── set ─────────────────────────────────────────────────────────────────────
 
 export async function keysSetCommand(args: KeysSetArgs): Promise<number> {
   const cwd = process.cwd();
+  let value = args.inlineValue;
+  if (value === undefined) {
+    const p = openPrompter();
+    try {
+      value = await p.promptHidden(
+        `Enter API key for "${args.ref}" (input hidden)`,
+      );
+    } catch (err) {
+      p.close();
+      if (err instanceof PromptCancelled) {
+        process.stderr.write("\nhuko keys set: cancelled\n");
+        return 130;
+      }
+      throw err;
+    }
+    p.close();
+  }
+
+  if (!value || value.length === 0) {
+    process.stderr.write("huko keys set: empty value, aborting\n");
+    return 3;
+  }
+
   try {
-    setProjectKey(args.ref, args.value, { cwd });
+    setProjectKey(args.ref, value, { cwd });
     process.stderr.write(
       `huko: wrote key "${args.ref}" to ${cwd}/.huko/keys.json (chmod 600)\n`,
     );
@@ -148,9 +181,10 @@ export async function keysListCommand(): Promise<number> {
     if (out.some((r) => r.layer === "unset")) {
       process.stderr.write(
         "\nResolution order (highest wins):\n" +
-          "  1. <cwd>/.huko/keys.json   (huko keys set <ref> <value>)\n" +
-          "  2. process.env             (export <REF_UPPER>_API_KEY=...)\n" +
-          "  3. <cwd>/.env              (<REF_UPPER>_API_KEY=...)\n",
+          "  1. <cwd>/.huko/keys.json   (huko keys set <ref>)\n" +
+          "  2. ~/.huko/keys.json       (set by `huko setup`; same shape)\n" +
+          "  3. process.env             (export <REF_UPPER>_API_KEY=...)\n" +
+          "  4. <cwd>/.env              (<REF_UPPER>_API_KEY=...)\n",
       );
     }
     return 0;

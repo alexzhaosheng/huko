@@ -30,8 +30,8 @@
 
 import type { TaskRunSummary } from "../../task/task-loop.js";
 import { bootstrap } from "../bootstrap.js";
-import { attachAskHandler } from "./run-ask.js";
-import { attachDecisionHandler } from "./run-decision.js";
+import { installAskHandler } from "./run-ask.js";
+import { installDecisionHandler } from "./run-decision.js";
 import { makeFormatter, type FormatName, type Formatter } from "../formatters/index.js";
 import {
   acquireProjectLock,
@@ -42,7 +42,7 @@ import {
   getActiveSessionId,
   setActiveSessionId,
 } from "../state.js";
-import { getConfig, loadConfig } from "../../config/index.js";
+import { getConfig } from "../../config/index.js";
 import { openPrompter, PromptCancelled, type Prompter } from "./prompts.js";
 import { bold, cyan, dim, green, red, yellow } from "../colors.js";
 import { formatTokenBreakdown } from "./run.js";
@@ -78,9 +78,7 @@ export async function chatCommand(args: RunArgs): Promise<number> {
     lock = result.lock;
   }
 
-  // Formatter (same plumbing as run.ts). Load config eagerly so verbose
-  // picks up on-disk preference.
-  loadConfig({ cwd });
+  // Formatter (same plumbing as run.ts). getConfig() self-loads.
   const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
   const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
 
@@ -117,25 +115,23 @@ export async function chatCommand(args: RunArgs): Promise<number> {
 
   let ctx: Awaited<ReturnType<typeof bootstrap>> | null = null;
   let prompter: Prompter | null = null;
-  let askHandle: ReturnType<typeof attachAskHandler> | null = null;
-  let decisionHandle: ReturnType<typeof attachDecisionHandler> | null = null;
+  let askHandle: { close(): void } | null = null;
+  let decisionHandle: { close(): void } | null = null;
   let exitCode = 0;
-
-  // Attach handlers BEFORE bootstrap (same reasoning as run.ts).
-  askHandle = attachAskHandler({
-    formatter,
-    format: args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl",
-    getOrchestrator: () => ctx?.orchestrator ?? null,
-  });
-  decisionHandle = attachDecisionHandler({
-    formatter,
-    format: args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl",
-    getOrchestrator: () => ctx?.orchestrator ?? null,
-  });
 
   try {
     ctx = await bootstrap(formatter, {
       ...(args.ephemeral ? { ephemeral: true } : {}),
+    });
+
+    // Subscribe to ask/decision events on the orchestrator (no
+    // monkey-patching, no ordering rule — orchestrator already exists).
+    const handlerFormat: "text" | "json" | "jsonl" =
+      args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl";
+    askHandle = installAskHandler({ orchestrator: ctx.orchestrator, format: handlerFormat });
+    decisionHandle = installDecisionHandler({
+      orchestrator: ctx.orchestrator,
+      format: handlerFormat,
     });
 
     const model = ctx.infra.currentModel;

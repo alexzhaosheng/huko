@@ -114,7 +114,7 @@ huko --jsonl -- "..."   # streaming events line-delimited
 huko provider list
 huko model list
 huko keys list                               # shows source layer per ref
-huko keys set deepseek sk-...                # writes <cwd>/.huko/keys.json (chmod 600)
+huko keys set deepseek                       # hidden prompt → writes <cwd>/.huko/keys.json (chmod 600)
 huko model current anthropic/claude-sonnet-4-6
 huko --lean -- "single-shot, minimal overhead"
 ```

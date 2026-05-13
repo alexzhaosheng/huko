@@ -33,8 +33,8 @@
 
 import type { TaskRunSummary } from "../../task/task-loop.js";
 import { bootstrap } from "../bootstrap.js";
-import { attachAskHandler } from "./run-ask.js";
-import { attachDecisionHandler } from "./run-decision.js";
+import { installAskHandler } from "./run-ask.js";
+import { installDecisionHandler } from "./run-decision.js";
 import { makeFormatter, type FormatName } from "../formatters/index.js";
 import {
   acquireProjectLock,
@@ -45,7 +45,7 @@ import {
   getActiveSessionId,
   setActiveSessionId,
 } from "../state.js";
-import { getConfig, loadConfig } from "../../config/index.js";
+import { getConfig } from "../../config/index.js";
 
 export type RunArgs = {
   prompt: string;
@@ -270,9 +270,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
 
   // Effective verbosity: CLI flag wins, otherwise inherit HukoConfig.cli.verbose
   // (default false). Only affects the `text` formatter; json/jsonl ignore it.
-  // Bootstrap also calls loadConfig later — idempotent, so calling here first
-  // is safe and lets the formatter see the on-disk verbose setting.
-  loadConfig({ cwd });
+  // getConfig() self-loads on first access.
   const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
   const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
 
@@ -309,29 +307,26 @@ export async function runCommand(args: RunArgs): Promise<number> {
 
   process.on("SIGINT", onSigint);
 
-  // Attach ask-user handler BEFORE bootstrap. The handler wraps
-  // formatter.emitter (which is what bootstrap will hand to the
-  // orchestrator), so every ask_user event is observed even if it
-  // races against bootstrap returning. `getOrchestrator` is a
-  // late-bound closure — `ctx` is set right after the bootstrap
-  // line below, before any tool call could run.
-  const askHandle = attachAskHandler({
-    formatter,
-    format: args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl",
-    getOrchestrator: () => ctx?.orchestrator ?? null,
-  });
-  // Safety-policy decision events (parallel to ask_user). Only meaningful
-  // in interactive runs — `--no-interaction` runs don't get the port
-  // installed at the orchestrator either, so this handler stays silent.
-  const decisionHandle = attachDecisionHandler({
-    formatter,
-    format: args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl",
-    getOrchestrator: () => ctx?.orchestrator ?? null,
-  });
+  // Ask-user / decision_required handlers are installed AFTER bootstrap
+  // — the orchestrator now exposes first-class subscriptions, so no
+  // late-bound closure and no monkey-patching of `formatter.emitter`.
+  let askHandle: { close(): void } | null = null;
+  let decisionHandle: { close(): void } | null = null;
 
   try {
     ctx = await bootstrap(formatter, {
       ...(args.ephemeral ? { ephemeral: true } : {}),
+    });
+
+    const handlerFormat: "text" | "json" | "jsonl" =
+      args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl";
+    askHandle = installAskHandler({ orchestrator: ctx.orchestrator, format: handlerFormat });
+    // Safety-policy decisions are parallel to ask_user. Only meaningful
+    // in interactive runs — `--no-interaction` runs don't install the
+    // port at the orchestrator either, so this handler stays silent.
+    decisionHandle = installDecisionHandler({
+      orchestrator: ctx.orchestrator,
+      format: handlerFormat,
     });
 
     // Current provider + model check. Both come from the merged
@@ -409,7 +404,6 @@ export async function runCommand(args: RunArgs): Promise<number> {
     // ── Run the LLM call ──────────────────────────────────────────────────
     // Resolve effective mode: CLI flag wins, otherwise inherit from
     // HukoConfig (layered default → global → project → env → explicit).
-    // Bootstrap above already called loadConfig(), so getConfig() is hot.
     const effectiveMode: "lean" | "full" = args.mode ?? getConfig().mode;
     const lean = effectiveMode === "lean";
 
@@ -435,8 +429,8 @@ export async function runCommand(args: RunArgs): Promise<number> {
     exitCode = 1;
   } finally {
     process.off("SIGINT", onSigint);
-    askHandle.close();
-    decisionHandle.close();
+    askHandle?.close();
+    decisionHandle?.close();
     if (ctx) ctx.shutdown();
     if (lock) lock.release();
   }

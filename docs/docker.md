@@ -52,7 +52,7 @@ The `huko docker run` wrapper only removes the need to type the volume and workd
 
 ### 1. `keys.json` - recommended
 
-If the host has already run `huko keys set <ref> <value>` or `huko setup`, keys exist in `~/.huko/keys.json` or `<cwd>/.huko/keys.json`. Both directories are mounted, so the container reads them automatically.
+If the host has already run `huko keys set <ref>` or `huko setup`, keys exist in `~/.huko/keys.json` or `<cwd>/.huko/keys.json`. Both directories are mounted, so the container reads them automatically.
 
 ### 2. Environment variables - automatic forwarding
 

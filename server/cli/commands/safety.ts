@@ -27,7 +27,7 @@ import {
   setToolDisabled,
   type InstallResult,
 } from "../../safety/persist.js";
-import { getConfig, loadConfig } from "../../config/index.js";
+import { getConfig } from "../../config/index.js";
 import {
   type ConfigScope,
   type HukoConfig,
@@ -82,7 +82,6 @@ export async function safetyInitCommand(args: { scope: ConfigScope }): Promise<n
 
 export async function safetyListCommand(): Promise<number> {
   try {
-    loadConfig({ cwd: process.cwd() });
     const safety = getConfig().safety;
 
     process.stdout.write(bold("=== Default by dangerLevel ===") + "\n");
@@ -153,7 +152,6 @@ export async function safetyCheckCommand(args: {
   fields: Record<string, string>;
 }): Promise<number> {
   try {
-    loadConfig({ cwd: process.cwd() });
     const safety = getConfig().safety;
 
     const tool = getTool(args.toolName);
@@ -161,7 +159,7 @@ export async function safetyCheckCommand(args: {
       process.stderr.write(
         red(`huko safety check: unknown tool: ${args.toolName}\n`),
       );
-      return 3;
+      return 4;
     }
     const dangerLevel: ToolDangerLevel = tool.definition.dangerLevel ?? "safe";
 
@@ -201,7 +199,6 @@ export async function safetyCheckCommand(args: {
  */
 export async function safetyToolCommand(): Promise<number> {
   try {
-    loadConfig({ cwd: process.cwd() });
     const safety = getConfig().safety;
 
     const names = listToolNames().sort();

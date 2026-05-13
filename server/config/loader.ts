@@ -39,17 +39,30 @@ let resolvedLayers: ConfigSourceLayer[] = [
 let loaded = false;
 
 /**
- * Get the current resolved config. Returns DEFAULT_CONFIG until
- * `loadConfig()` has been called at least once, so kernel modules can
- * safely import-and-use without ordering hassle (they'll just see
- * defaults if loadConfig hasn't fired yet).
+ * Get the current resolved config. Auto-loads from `process.cwd()` on
+ * first access — callers do NOT have to call `loadConfig()` first.
+ *
+ * Why the auto-load: every CLI command + every kernel module that
+ * reads config used to start with `loadConfig({ cwd: process.cwd() })`,
+ * with apologetic comments like "bootstrap usually does this, but X
+ * can run before bootstrap." That's exactly the "remember to call A
+ * before B" smell — lifting it into `getConfig()` makes the prep
+ * structural rather than convention-bound.
+ *
+ * If a caller needs to override (tests with `explicit`, or daemon
+ * paths that boot from a non-cwd directory), they still call
+ * `loadConfig({...})` explicitly — that wins over the lazy load.
  */
 export function getConfig(): HukoConfig {
+  if (!loaded) {
+    loadConfig({});
+  }
   return resolvedConfig;
 }
 
 /** Diagnostic: which layers contributed, in priority order (low → high). */
 export function getConfigLayers(): ConfigSourceLayer[] {
+  if (!loaded) loadConfig({});
   return resolvedLayers;
 }
 
