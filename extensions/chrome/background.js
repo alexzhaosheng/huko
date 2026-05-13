@@ -8,8 +8,8 @@ const WS_PORT = 19222;
 const WS_URL = `ws://127.0.0.1:${WS_PORT}`;
 
 let ws = null;
-let reconnectDelay = 500; // ms, exponential backoff
-const RECONNECT_MAX = 30_000;
+let reconnectDelay = 100; // ms, fast reconnect — huko only waits 15s
+const RECONNECT_MAX = 5_000;
 let reconnectTimer = null;
 
 // ─── Connection ────────────────────────────────────────────────────────────
@@ -132,14 +132,62 @@ async function getActiveTab() {
   return tab;
 }
 
-async function executeInTab(tabId, funcBody, args) {
+// ─── Injected operation dispatcher (ISOLATED world, no CSP issues) ────────
+
+function pageDispatcher(params) {
+  try {
+    switch (params.op) {
+      case "getText":
+        return document.body ? document.body.innerText : document.documentElement.innerText;
+      case "getHtml":
+        return document.documentElement.outerHTML;
+      case "click": {
+        const el = document.querySelector(params.sel);
+        if (!el) throw new Error("Element not found: " + params.sel);
+        el.click();
+        return 'Clicked "' + params.sel + '".';
+      }
+      case "type": {
+        const el2 = document.querySelector(params.sel);
+        if (!el2) throw new Error("Element not found: " + params.sel);
+        el2.focus();
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+        if (el2.tagName === "INPUT" && nativeInputValueSetter) {
+          nativeInputValueSetter.call(el2, params.text);
+        } else if (el2.tagName === "TEXTAREA" && nativeTextareaValueSetter) {
+          nativeTextareaValueSetter.call(el2, params.text);
+        } else {
+          el2.value = params.text;
+        }
+        el2.dispatchEvent(new Event("input", { bubbles: true }));
+        el2.dispatchEvent(new Event("change", { bubbles: true }));
+        return 'Typed "' + params.text + '" into "' + params.sel + '".';
+      }
+      case "scroll":
+        switch (params.dir) {
+          case "down": window.scrollBy(0, 300); break;
+          case "up": window.scrollBy(0, -300); break;
+          case "top": window.scrollTo(0, 0); break;
+          case "bottom": window.scrollTo(0, document.body.scrollHeight); break;
+          default: return "Unknown direction: " + params.dir;
+        }
+        return "Scrolled " + params.dir + ".";
+      default:
+        return "Unknown op: " + params.op;
+    }
+  } catch (e) {
+    return "!!ERR:" + e.message;
+  }
+}
+
+async function executeOpInTab(tabId, params) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    func: new Function("args", funcBody),
-    args: [args || {}],
-    world: "MAIN",
+    func: pageDispatcher,
+    args: [params],
+    world: "ISOLATED",
   });
-  // executeScript returns [{ result }] for each frame
   return results[0]?.result;
 }
 
@@ -147,12 +195,8 @@ async function executeInTab(tabId, funcBody, args) {
 
 async function cmdNavigate(url) {
   const tab = await chrome.tabs.create({ url, active: true });
-  // Wait for the tab to load
   await waitForTabLoad(tab.id);
-  // Read the visible text
-  const text = await executeInTab(tab.id, `
-    return document.body ? document.body.innerText : document.documentElement.innerText;
-  `);
+  const text = await executeOpInTab(tab.id, { op: "getText" });
   return { text: text || "(page has no visible text)" };
 }
 
@@ -175,12 +219,7 @@ async function waitForTabLoad(tabId) {
 
 async function cmdClick(selector) {
   const tab = await getActiveTab();
-  const result = await executeInTab(tab.id, `
-    const el = document.querySelector(args.sel);
-    if (!el) throw new Error('Element not found: ' + args.sel);
-    el.click();
-    return 'Clicked "' + args.sel + '".';
-  `, { sel: selector });
+  const result = await executeOpInTab(tab.id, { op: "click", sel: selector });
   return { text: result };
 }
 
@@ -188,23 +227,7 @@ async function cmdClick(selector) {
 
 async function cmdType(selector, text) {
   const tab = await getActiveTab();
-  const result = await executeInTab(tab.id, `
-    const el = document.querySelector(args.sel);
-    if (!el) throw new Error('Element not found: ' + args.sel);
-    el.focus();
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    if (el.tagName === 'INPUT' && nativeInputValueSetter) {
-      nativeInputValueSetter.call(el, args.text);
-    } else if (el.tagName === 'TEXTAREA' && nativeTextareaValueSetter) {
-      nativeTextareaValueSetter.call(el, args.text);
-    } else {
-      el.value = args.text;
-    }
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return 'Typed "' + args.text + '" into "' + args.sel + '".';
-  `, { sel: selector, text });
+  const result = await executeOpInTab(tab.id, { op: "type", sel: selector, text });
   return { text: result };
 }
 
@@ -212,16 +235,7 @@ async function cmdType(selector, text) {
 
 async function cmdScroll(direction) {
   const tab = await getActiveTab();
-  const result = await executeInTab(tab.id, `
-    switch (args.dir) {
-      case 'down': window.scrollBy(0, 300); break;
-      case 'up': window.scrollBy(0, -300); break;
-      case 'top': window.scrollTo(0, 0); break;
-      case 'bottom': window.scrollTo(0, document.body.scrollHeight); break;
-      default: return 'Unknown direction: ' + args.dir;
-    }
-    return 'Scrolled ' + args.dir + '.';
-  `, { dir: direction });
+  const result = await executeOpInTab(tab.id, { op: "scroll", dir: direction });
   return { text: result };
 }
 
@@ -229,9 +243,7 @@ async function cmdScroll(direction) {
 
 async function cmdGetText() {
   const tab = await getActiveTab();
-  const text = await executeInTab(tab.id, `
-    return document.body ? document.body.innerText : document.documentElement.innerText;
-  `);
+  const text = await executeOpInTab(tab.id, { op: "getText" });
   return { text: text || "(page has no visible text)" };
 }
 
@@ -239,9 +251,7 @@ async function cmdGetText() {
 
 async function cmdGetHtml() {
   const tab = await getActiveTab();
-  const html = await executeInTab(tab.id, `
-    return document.documentElement.outerHTML;
-  `);
+  const html = await executeOpInTab(tab.id, { op: "getHtml" });
   return { text: html };
 }
 
@@ -275,7 +285,7 @@ async function cmdWait(selector, ms) {
           target: { tabId: tab.id },
           func: (sel) => !!document.querySelector(sel),
           args: [selector],
-          world: "MAIN",
+          world: "ISOLATED",
         }).then(([res]) => {
           if (res?.result) {
             resolve({ text: `Element "${selector}" appeared.` });

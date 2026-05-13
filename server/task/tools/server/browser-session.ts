@@ -20,7 +20,7 @@ import { getConfig } from "../../../config/index.js";
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
 const CMD_TIMEOUT_MS = 30_000;
-const WAIT_FOR_CLIENT_MS = 10_000; // wait up to 10s for extension to connect
+const WAIT_FOR_CLIENT_MS = 15_000; // wait up to 15s — extension reconnects in <5s
 const IDLE_CLOSE_MS = 5 * 60_000; // 5 min idle → close server
 
 // ─── Protocol types ──────────────────────────────────────────────────────────
