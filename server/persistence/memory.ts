@@ -19,6 +19,7 @@
 import { isLLMVisible } from "../../shared/types.js";
 import type { LLMMessage, ToolCall } from "../core/llm/types.js";
 import type { EntryKind, SessionType } from "../../shared/types.js";
+import { collectElidedEntryIdsFromRows } from "../db/adapter.js";
 import type {
   ChatSessionRow,
   CreateChatSessionInput,
@@ -87,7 +88,7 @@ export class MemorySessionPersistence implements SessionPersistence {
       },
       loadLLMContext: async (sessionId, type) => {
         const rows = this.entriesForSession(sessionId, type);
-        const dropped = collectElidedEntryIds(rows);
+        const dropped = collectElidedEntryIdsFromRows(rows);
         const out: LLMMessage[] = [];
         for (const r of rows) {
           if (dropped.has(r.id)) continue;
@@ -292,26 +293,3 @@ function projectToLLMMessage(r: EntryRow): LLMMessage | null {
   };
 }
 
-/**
- * Walk all SystemReminder entries with reason=compaction_done, gather
- * their `metadata.elidedEntryIds` arrays. Returns the union — IDs to
- * drop on context replay.
- *
- * Used by Memory and Sqlite session backends in their loadLLMContext
- * path. Lifted into shared util so both backends reach the same conclusion.
- */
-export function collectElidedEntryIds(rows: EntryRow[]): Set<number> {
-  const out = new Set<number>();
-  for (const r of rows) {
-    if (r.kind !== "system_reminder") continue;
-    const meta = r.metadata as Record<string, unknown> | null;
-    if (!meta || meta["reminderReason"] !== "compaction_done") continue;
-    const ids = meta["elidedEntryIds"];
-    if (Array.isArray(ids)) {
-      for (const id of ids) {
-        if (typeof id === "number") out.add(id);
-      }
-    }
-  }
-  return out;
-}

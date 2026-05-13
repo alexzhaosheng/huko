@@ -35,5 +35,4 @@ export {
 
 export {
   MemorySessionPersistence,
-  collectElidedEntryIds,
 } from "./memory.js";

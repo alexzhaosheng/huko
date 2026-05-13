@@ -69,7 +69,7 @@ These are cross-module contracts. Read them before designing a new module.
   - `InfraPersistence` stores providers, models, and user-global defaults in `~/.huko/infra.db`.
   - `SessionPersistence` stores sessions, tasks, and entries in `<cwd>/.huko/huko.db`.
   - The kernel must not directly import drizzle or better-sqlite3.
-- **API keys never enter the database.** `providers.api_key_ref` is a logical name. At runtime, `server/security/keys.ts` resolves it through three layers: `<cwd>/.huko/keys.json`, environment variables, then `<cwd>/.env`.
+- **API keys never enter the database.** `providers.api_key_ref` is a logical name. At runtime, `server/security/keys.ts` resolves it through four layers (highest first): `<cwd>/.huko/keys.json`, `~/.huko/keys.json`, `process.env.<REF_UPPER>_API_KEY`, then `<cwd>/.env`.
 
 ### Context Writes
 
@@ -202,7 +202,7 @@ The current iteration is complete: Promise.race audit, SystemReminder collector,
 - ~~Added the "solve from the root" principle to CLAUDE.md.~~
 - ~~WeavesAI design research document: [agent-design-notes.md](./agent-design-notes.md).~~
 - ~~Split persistence into `InfraPersistence` and `SessionPersistence`.~~
-- ~~Decoupled API keys through `providers.api_key_ref` and the three-layer lookup in `server/security/keys.ts`.~~
+- ~~Decoupled API keys through `providers.api_key_ref` and the layered lookup in `server/security/keys.ts` (now four layers including `~/.huko/keys.json`).~~
 - ~~Added active session per cwd through `<cwd>/.huko/state.json`, default continuation, and `sessions current/switch/new`.~~
 - ~~Completed provider/model/keys CLI CRUD.~~
 - ~~Auto-generated `<cwd>/.huko/.gitignore` for `huko.db`, `keys.json`, and `state.json`.~~

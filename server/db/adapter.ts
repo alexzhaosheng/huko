@@ -91,9 +91,16 @@ export function makeUpdateEntry(db: SessionDb): UpdateFn {
 
 /**
  * Replay a session's persisted history into an `LLMMessage[]` ready to
- * hand to a SessionContext as `initialContext`. Filters out non-LLM-visible
- * entries (StatusNotice). Order is by row id, which is monotonic and
- * matches insertion order.
+ * hand to a SessionContext as `initialContext`. Filters out:
+ *   - non-LLM-visible entries (StatusNotice)
+ *   - entries marked elided by a previous `compaction_done` reminder
+ *
+ * Order is by row id, which is monotonic and matches insertion order.
+ *
+ * Performance note: one SELECT, one pass. Earlier shape used a second
+ * query in `SqliteSessionPersistence.loadLLMContext` to compute the
+ * elided set; folding it in here halves the I/O on every session
+ * resume against a long conversation.
  */
 export async function loadSessionLLMContext(
   db: SessionDb,
@@ -112,12 +119,50 @@ export async function loadSessionLLMContext(
     .orderBy(asc(taskContext.id))
     .all();
 
+  const elided = collectElidedEntryIdsFromRows(rows);
   const messages: LLMMessage[] = [];
   for (const row of rows) {
+    if (elided.has(row.id)) continue;
     const m = dbEntryToLLMMessage(row);
     if (m) messages.push(m);
   }
   return messages;
+}
+
+// ─── Elision (compaction-done bookkeeping) ───────────────────────────────────
+
+/**
+ * Walk SystemReminder entries with `reminderReason: "compaction_done"`,
+ * gather their `metadata.elidedEntryIds` arrays. Returns the union —
+ * IDs to drop on context replay.
+ *
+ * Generic over row shape so both the SQLite backend (raw Drizzle rows)
+ * and the Memory backend (`EntryRow`s) can share this single decision
+ * point. The two backends previously both implemented this logic; the
+ * Sqlite call additionally re-queried task_context to feed it. Both
+ * issues collapse to "share one function over rows the caller already
+ * has".
+ */
+export function collectElidedEntryIdsFromRows(
+  rows: ReadonlyArray<{
+    id: number;
+    kind: string;
+    metadata: Record<string, unknown> | null;
+  }>,
+): Set<number> {
+  const out = new Set<number>();
+  for (const r of rows) {
+    if (r.kind !== "system_reminder") continue;
+    const meta = r.metadata;
+    if (!meta || meta["reminderReason"] !== "compaction_done") continue;
+    const ids = meta["elidedEntryIds"];
+    if (Array.isArray(ids)) {
+      for (const id of ids) {
+        if (typeof id === "number") out.add(id);
+      }
+    }
+  }
+  return out;
 }
 
 // ─── Projection: DB row → LLMMessage ─────────────────────────────────────────
