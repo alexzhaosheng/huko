@@ -1,35 +1,27 @@
 /**
  * server/cli/commands/run-ask.ts
  *
- * Bridge between `ask_user` HukoEvents (emitted by the orchestrator
- * when the LLM calls `message(type=ask)`) and the user's terminal.
+ * Bridge between `ask_user` events (emitted by the orchestrator when
+ * the LLM calls `message(type=ask)`) and the user's terminal.
  *
- * What happens here:
- *   1. We monkey-patch the formatter's emit so we get to see every
- *      event AFTER it's rendered. (Render first, then prompt — the
- *      user sees the question in the formatter's coloured form before
- *      we open the prompt.)
- *   2. On `ask_user` we open a `Prompter` lazily (the wizard's
- *      readline shim from prompts.ts), prompt the user, submit the
- *      reply via `orchestrator.respondToAsk`.
- *   3. On task termination / error / shutdown, close the prompter so
- *      stdin returns to a clean state.
+ * Wires in via `orchestrator.onAskUser(handler)` — a first-class
+ * subscription on the orchestrator, NOT by monkey-patching the
+ * formatter's emitter. Ordering is therefore structural: the
+ * orchestrator pushes the event through the SessionContext emitter
+ * first (so the formatter renders the question), then notifies all
+ * subscribers, which is when this handler opens its prompt.
  *
- * `getOrchestrator` is late-bound: bootstrap constructs the
- * orchestrator AFTER this attach point in run.ts, but the closure only
- * needs it when an event arrives — by which time bootstrap is done.
+ * No "must attach before bootstrap" rule, no late-bound
+ * `getOrchestrator` closure — the orchestrator already exists at
+ * subscription time.
  *
  * Format-aware: in text mode the user sees a coloured menu (built via
- * `prompts.select`) or a free-form prompt. In jsonl/json modes we DO
- * NOT prompt at all — those modes are for tooling, and any controlling
- * process is expected to consume `ask_user` events from stdout and
- * call `respondToAsk` itself (future daemon-style entry; today we
- * surface the pending ask via stderr and bail).
+ * `prompts.select`) or a free-form prompt. In jsonl / json modes we
+ * do NOT prompt — controllers (daemon / future tooling) consume the
+ * ask_user event from stdout and call `respondToAsk` themselves.
  */
 
-import type { Emitter } from "../../engine/SessionContext.js";
 import type { TaskOrchestrator } from "../../services/index.js";
-import type { Formatter } from "../formatters/index.js";
 import type { AskUserEvent } from "../../../shared/events.js";
 import { dim, red, yellow } from "../colors.js";
 import {
@@ -38,20 +30,19 @@ import {
   type Prompter,
 } from "./prompts.js";
 
-export type AttachAskHandlerOptions = {
-  formatter: Formatter;
+export type InstallAskHandlerOptions = {
+  orchestrator: TaskOrchestrator;
   format: "text" | "jsonl" | "json";
-  /** Late-bound — orchestrator isn't constructed yet at attach time. */
-  getOrchestrator: () => TaskOrchestrator | null;
 };
 
 export type AskHandlerHandle = {
-  /** Close any open prompter (e.g. on shutdown / SIGINT). Idempotent. */
+  /** Unsubscribe + close any open prompter. Idempotent. */
   close(): void;
 };
 
-export function attachAskHandler(opts: AttachAskHandlerOptions): AskHandlerHandle {
-  const inner: Emitter = opts.formatter.emitter;
+export function installAskHandler(
+  opts: InstallAskHandlerOptions,
+): AskHandlerHandle {
   let prompter: Prompter | null = null;
   let closed = false;
 
@@ -60,21 +51,14 @@ export function attachAskHandler(opts: AttachAskHandlerOptions): AskHandlerHandl
     return prompter;
   }
 
-  /**
-   * Run the prompt → respond flow asynchronously. We DON'T await this
-   * inside emit() — the formatter's emit must stay synchronous so the
-   * orchestrator's other events keep flowing while we're collecting
-   * the reply. Errors are reported to stderr; the orchestrator will
-   * eventually time out / be cancelled by SIGINT.
-   */
   async function handle(event: AskUserEvent): Promise<void> {
     if (closed) return;
 
     if (opts.format !== "text") {
       // Tooling mode: don't prompt. Surface that we saw an ask but
-      // can't satisfy it from the CLI in this format. Future: a
-      // daemon-style controller would consume the jsonl event and
-      // call back via respondToAsk, but that path isn't wired yet.
+      // can't satisfy it from the CLI in this format. A daemon-style
+      // controller would consume the jsonl event and call back via
+      // respondToAsk itself.
       process.stderr.write(
         yellow(
           `\nhuko: pending ask in ${opts.format} format — controllers should call ` +
@@ -117,8 +101,7 @@ export function attachAskHandler(opts: AttachAskHandlerOptions): AskHandlerHandl
     } catch (err) {
       if (err instanceof PromptCancelled) {
         process.stderr.write(red("\nhuko: ask cancelled by user\n", "stderr"));
-        // Submit a synthetic cancellation so the LLM doesn't hang.
-        opts.getOrchestrator()?.respondToAsk(event.toolCallId, {
+        opts.orchestrator.respondToAsk(event.toolCallId, {
           content: "(user cancelled the prompt)",
         });
         return;
@@ -126,18 +109,13 @@ export function attachAskHandler(opts: AttachAskHandlerOptions): AskHandlerHandl
       process.stderr.write(
         red(`\nhuko: ask failed: ${err instanceof Error ? err.message : String(err)}\n`, "stderr"),
       );
-      opts.getOrchestrator()?.respondToAsk(event.toolCallId, {
+      opts.orchestrator.respondToAsk(event.toolCallId, {
         content: `(prompt error: ${err instanceof Error ? err.message : String(err)})`,
       });
       return;
     }
 
-    const orch = opts.getOrchestrator();
-    if (!orch) {
-      process.stderr.write(red("\nhuko: orchestrator unavailable; reply discarded\n", "stderr"));
-      return;
-    }
-    const ok = orch.respondToAsk(event.toolCallId, { content: replyText });
+    const ok = opts.orchestrator.respondToAsk(event.toolCallId, { content: replyText });
     if (!ok) {
       process.stderr.write(
         yellow(
@@ -148,23 +126,20 @@ export function attachAskHandler(opts: AttachAskHandlerOptions): AskHandlerHandl
     }
   }
 
-  // Wrap emit. Render through the formatter first, then schedule the
-  // prompt asynchronously so the formatter's other event flow isn't
-  // blocked by the user typing.
-  const originalEmit = inner.emit.bind(inner);
-  inner.emit = (event) => {
-    originalEmit(event);
-    if (event.type === "ask_user") {
-      // Detach: don't await; let the orchestrator keep flowing other
-      // events through. Errors caught inside handle().
-      void handle(event);
-    }
-  };
+  // Subscribe. The orchestrator notifies us AFTER the formatter has
+  // rendered the question, so the prompt appears below the question
+  // in the user's terminal.
+  const unsubscribe = opts.orchestrator.onAskUser((event) => {
+    // Detach: don't await; the orchestrator keeps flowing other events
+    // through while we wait for input. Errors caught inside handle().
+    void handle(event);
+  });
 
   return {
     close() {
       if (closed) return;
       closed = true;
+      unsubscribe();
       if (prompter) {
         prompter.close();
         prompter = null;
