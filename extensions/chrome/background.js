@@ -344,4 +344,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 
-connect();
+try {
+  connect();
+} catch (err) {
+  console.error("[huko] startup error:", err);
+}
