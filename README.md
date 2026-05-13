@@ -235,4 +235,4 @@ CI runs the same `tsc + test + build` matrix on Linux/macOS/Windows × Node 24 f
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE) — actually, that file isn't here yet. Add when the project is ready for outside contributions.
+MIT. See [`LICENSE`](LICENSE).
