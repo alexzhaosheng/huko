@@ -39,6 +39,7 @@ huko docker run -- "audit dependencies for known CVEs"   # sandboxed
 
 ```bash
 npm install -g @alexzhaosheng/huko
+huko --version   # confirm install — output includes commit + build date
 huko --help
 ```
 
@@ -114,7 +115,7 @@ huko provider list
 huko model list
 huko keys list                               # shows source layer per ref
 huko keys set deepseek sk-...                # writes <cwd>/.huko/keys.json (chmod 600)
-huko model current openrouter/anthropic/claude-sonnet-4-6
+huko model current anthropic/claude-sonnet-4-6
 huko --lean -- "single-shot, minimal overhead"
 ```
 
@@ -211,9 +212,9 @@ Or just edit the JSON files directly — huko reads them on every run, no cachin
 git clone https://github.com/alexzhaosheng/huko.git
 cd huko
 npm install
-npm test                  # 549+ tests, cross-platform
+npm test                  # full suite, cross-platform (Linux / macOS / Windows × Node 24)
 npx tsc --noEmit          # strict type check
-npm run build:cli         # esbuild bundle → dist/cli.js
+npm run build:cli         # esbuild bundle → dist/cli.js (embeds commit + date)
 
 npm link                  # install your local checkout as `huko`
 ```
@@ -227,9 +228,17 @@ CI runs the same `tsc + test + build` matrix on Linux/macOS/Windows × Node 24 f
 
 ---
 
-## Status
+## To be implemented
 
-`v0.1.0` — first public release. The kernel + CLI are stable enough for daily use; we're still iterating on the management surface (menus, multi-agent flows, daemon mode). Breaking changes will follow SemVer; no `v1.0` until the surface settles.
+Sketches of the next surface, in rough priority order. None of these are committed scope or timeline — the list exists to signal direction, and so the kernel design stays compatible with them.
+
+- **Skills.** Pre-defined, slash-invoked specialised agents — `/code-review`, `/release-notes`, `/triage`. Each ships with its own system-prompt fragment + tool subset + capability hints; the user can layer them onto any conversation without retyping setup.
+- **Daemon mode.** A long-lived background process owns one or more sessions; multiple CLI invocations / IDE plugins / web UI consumers all talk to it. Solves "warm tool state across calls", multi-client coordination, and idle compaction.
+- **Remote CLI UI.** `huko --host=user@remote-box -- "..."` — your local terminal driving a daemon running on a remote machine, so the work happens close to the project (file system, network, secrets) and you don't ship gigabytes of repo over your laptop tether.
+- **Web UI.** Browser front-end for the daemon — for cases where a long context, side-by-side diff, image attachments, or non-terminal users need more than what a CLI gives. Same kernel underneath.
+- **More tools.** Expanding the tool surface — language-server integrations (rename, type-aware refactor), git-operation safety (branch / stash / cherry-pick gated), structured browsing (sitemap-aware crawl, login-required pages), database query introspection.
+
+Want any of these sooner? Open an issue / discussion — priority follows demand.
 
 ---
 
