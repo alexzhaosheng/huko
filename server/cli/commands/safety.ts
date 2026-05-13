@@ -93,7 +93,17 @@ export async function safetyListCommand(): Promise<number> {
     process.stdout.write("\n" + bold("=== Per-tool rules ===") + "\n");
     const toolNames = Object.keys(safety.toolRules).sort();
     if (toolNames.length === 0) {
-      process.stdout.write(dim("  (none — add via `huko safety init` + edit the JSON)\n"));
+      process.stdout.write(
+        dim(
+          "  (none — add rules via:\n" +
+          "     huko safety deny    <tool> <pattern>     refuse matching calls\n" +
+          "     huko safety allow   <tool> <pattern>     auto-approve matching calls\n" +
+          "     huko safety require <tool> <pattern>     prompt the operator\n" +
+          "     huko safety disable <tool>               remove tool from LLM surface entirely\n" +
+          "   editing verbs default to project; --global writes to ~/.huko/config.json.\n" +
+          "   `huko safety init` scaffolds a commented JSON template with sensible defaults.)\n",
+        ),
+      );
     } else {
       for (const name of toolNames) {
         printToolRules(name, safety.toolRules[name]!);

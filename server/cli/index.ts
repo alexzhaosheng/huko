@@ -42,6 +42,7 @@ import { dispatchSafety } from "./dispatch/safety.js";
 import { dispatchVault } from "./dispatch/vault.js";
 import { CliExitError, usage } from "./dispatch/shared.js";
 import { isLikelyPowerShell, formatPowerShellSentinelHint } from "./env-hints.js";
+import { getHukoVersion } from "../version.js";
 
 type Dispatcher = (rest: string[]) => Promise<number>;
 
@@ -75,6 +76,10 @@ async function main(): Promise<number> {
 
     const head = argv[0]!;
     if (head === "-h" || head === "--help") usage(0);
+    if (head === "-V" || head === "--version") {
+      process.stdout.write(`huko ${getHukoVersion()}\n`);
+      return 0;
+    }
 
     // Known subcommand verb? Route there.
     const handler = DISPATCH[head];

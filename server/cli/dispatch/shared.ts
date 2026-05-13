@@ -5,6 +5,7 @@
  */
 
 import { bold, type ColorStream, cyan, dim } from "../colors.js";
+import { getHukoVersion } from "../../version.js";
 
 export class CliExitError extends Error {
   readonly code: number;
@@ -36,8 +37,11 @@ export function usage(exitCode: number = 3): never {
 
   out.write(
     [
+      `${h("huko")} ${d("v" + getHukoVersion())}`,
+      "",
       `${h("Usage:")} huko ${c("[flags]")} ${c("--")} ${c("<prompt>")}   — talk to the agent (the default)`,
       `       huko ${c("<subcommand>")} ...        — run a noun-verb command (setup, sessions, ...)`,
+      `       huko ${c("--version")} (${c("-V")})         — print version and exit`,
       "",
       h("Commands:"),
       row("setup", "Interactive wizard: provider + key + model"),

@@ -49,6 +49,7 @@ import {
   type ResolvedProvider,
 } from "../../config/index.js";
 import { estimateContextWindow } from "../../core/llm/model-context-window.js";
+import { getHukoVersion } from "../../version.js";
 import {
   describeKeySource,
   globalKeysPath,
@@ -362,7 +363,8 @@ function printText(eff: Effective, cwd: string, scope: InfoScope): void {
       : `${scope} layer only`;
 
   out.write(header(`huko info — ${scopeNote}`) + "\n");
-  out.write(`cwd: ${emphasis(cwd)}\n`);
+  out.write(`version: ${emphasis("v" + getHukoVersion())}\n`);
+  out.write(`cwd:     ${emphasis(cwd)}\n`);
   if (scope !== "all") {
     out.write(
       dim("(use `huko provider list` / `huko model list` to see all definitions)") + "\n",
@@ -561,7 +563,7 @@ function pad(s: string, width: number): string {
 // ─── JSON payload ───────────────────────────────────────────────────────────
 
 type Payload = {
-  header: { cwd: string; scope: InfoScope };
+  header: { cwd: string; scope: InfoScope; version: string };
   currentMode: {
     value: "lean" | "full";
     /** Layer that set the value (display label: "global" not "user"). */
@@ -642,7 +644,7 @@ function buildPayload(eff: Effective, cwd: string, scope: InfoScope): Payload {
       : [];
 
   return {
-    header: { cwd, scope },
+    header: { cwd, scope, version: getHukoVersion() },
     currentMode: {
       value: eff.mode.value,
       source: eff.mode.source !== null ? displaySource(eff.mode.source) : null,
