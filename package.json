@@ -50,6 +50,7 @@
     "express": "^4.21.0",
     "iconv-lite": "^0.6.3",
     "nanoid": "^5.0.0",
+    "puppeteer-core": "^24.43.1",
     "socket.io": "^4.8.0",
     "socket.io-client": "^4.8.0",
     "zod": "^4.0.0"

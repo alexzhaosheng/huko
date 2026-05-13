@@ -81,6 +81,16 @@ export type HukoConfig = {
       timeoutMs: number;
       maxResults: number;
     };
+    browser: {
+      /** Chrome DevTools Protocol debugging port. */
+      cdpPort: number;
+      /** Host running Chrome with --remote-debugging-port. */
+      cdpHost: string;
+      /** Per-action timeout in milliseconds. */
+      defaultTimeoutMs: number;
+      /** Maximum screenshot image size in bytes (5 MiB default). */
+      maxScreenshotBytes: number;
+    };
   };
 
   /**
@@ -184,6 +194,12 @@ export const DEFAULT_CONFIG: HukoConfig = {
       provider: "duckduckgo",
       timeoutMs: 15_000,
       maxResults: 10,
+    },
+    browser: {
+      cdpPort: 9222,
+      cdpHost: "127.0.0.1",
+      defaultTimeoutMs: 30_000,
+      maxScreenshotBytes: 5 * 1024 * 1024,
     },
   },
   cli: {
