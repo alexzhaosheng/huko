@@ -66,10 +66,6 @@ export function getConfigLayers(): ConfigSourceLayer[] {
   return resolvedLayers;
 }
 
-/** Has loadConfig() been called? */
-export function isConfigLoaded(): boolean {
-  return loaded;
-}
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 

@@ -11,7 +11,7 @@
 
 import type { Tool, ToolParameterSchema } from "../../core/llm/types.js";
 import type { TaskContext } from "../../engine/TaskContext.js";
-import { getConfig, isConfigLoaded } from "../../config/index.js";
+import { getConfig } from "../../config/index.js";
 
 // ─── ToolHandlerResult ────────────────────────────────────────────────────────
 
@@ -211,13 +211,11 @@ export function getToolsForLLM(filter?: ToolFilter | ToolFilterContext): Tool[] 
 
 /**
  * Pull the set of tool names whose merged safety config has
- * `disabled: true`. Best-effort: if the config hasn't been loaded yet
- * (some test paths skip bootstrap), returns an empty set rather than
- * forcing a load — calling `getConfig()` before `loadConfig()` would
- * surface a misleading "config not loaded" error in surprising places.
+ * `disabled: true`. `getConfig()` self-loads on first access so this
+ * works whether or not bootstrap has run — no fail-open guard, no
+ * "config not loaded" surprise.
  */
 function collectSafetyDisabledTools(): Set<string> {
-  if (!isConfigLoaded()) return new Set();
   const out = new Set<string>();
   const rules = getConfig().safety.toolRules;
   for (const [name, rule] of Object.entries(rules)) {

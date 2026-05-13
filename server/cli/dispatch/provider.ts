@@ -134,6 +134,15 @@ export async function dispatchProvider(rest: string[]): Promise<number> {
       positional.push(arg);
     }
     if (positional.length === 0) {
+      // Read mode — `--project` is meaningless (current is always the
+      // merged view). Reject so users don't think it scopes the lookup.
+      if (project) {
+        process.stderr.write(
+          "huko provider current: --project applies only when setting a provider " +
+            "(huko provider current <name> --project). Omit it for the read view.\n",
+        );
+        usage();
+      }
       return await providerCurrentCommand({});
     }
     if (positional.length === 1) {

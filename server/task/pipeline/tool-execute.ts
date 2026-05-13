@@ -74,6 +74,12 @@ export async function executeAndPersist(
   if (!tool) {
     const error = `Tool "${call.name}" is not registered.`;
     const entryId = await persistResult(ctx, call, "", error, { unknownTool: true });
+    // Count the attempt against budget. Otherwise an LLM spamming
+    // unknown tool names burns iterations (which eventually trips
+    // MAX_ITERATIONS) but never consumes MAX_TOOL_CALLS — the limit
+    // closest to "actual tool work attempted" stays at zero. Match
+    // the policy-denied branch below.
+    ctx.toolCallCount += 1;
     return { kind: "error", entryId, error };
   }
 

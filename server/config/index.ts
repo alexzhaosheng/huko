@@ -23,7 +23,6 @@
 export {
   getConfig,
   getConfigLayers,
-  isConfigLoaded,
   loadConfig,
   setConfigForTests,
   resetConfigForTests,
