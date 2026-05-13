@@ -203,17 +203,40 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
       // Could write a tiny "thinking..." indicator; skip for v1.
     },
     onSummary(summary) {
-      // The default summary intentionally omits a token count. A naked
-      // "total" misleads — input vs output vs cache-read vs cache-write
-      // tokens have wildly different per-token cost on every provider,
-      // so adding them up obscures more than it reveals. Operators who
-      // want the actual breakdown pass `--show-tokens` (rendered by
-      // formatTokenBreakdown in commands/run.ts).
-      process.stderr.write(
-        dimErr(
-          `\n[${summary.status}] ${summary.iterationCount} iter · ${summary.toolCallCount} tools · ${summary.elapsedMs}ms`,
-        ) + "\n",
-      );
+      // Tail counters (always shown).
+      const counters = `${summary.iterationCount} iter · ${summary.toolCallCount} tools · ${summary.elapsedMs}ms`;
+
+      // Did the agent actually deliver a result via message(type=result)?
+      // If not, the user is looking at a half-finished run — they need a
+      // clear "no result delivered, you can continue from here" line so
+      // they don't squint at empty stdout wondering "is that the answer?".
+      //
+      // Token-count omission is deliberate: a naked total misleads when
+      // input / output / cache-read / cache-write all have different
+      // per-token cost. `--show-tokens` shows the breakdown when wanted.
+      if (summary.status === "stopped" && !summary.hasExplicitResult) {
+        process.stderr.write(
+          yellowErr(
+            `\n[stopped] Task interrupted before the agent finished — no result delivered.`,
+          ) + "\n" +
+          dimErr(`          ${counters}`) + "\n" +
+          dimErr(`          Send a follow-up prompt to continue from here: huko -- ...`) + "\n",
+        );
+      } else if (summary.status === "failed" && !summary.hasExplicitResult) {
+        process.stderr.write(
+          redErr(
+            `\n[failed]  Task ended in error without delivering a result.`,
+          ) + "\n" +
+          dimErr(`          ${counters}`) + "\n",
+        );
+      } else {
+        // Clean completion (status=done with a delivered result) — quiet
+        // dim summary. Also covers the rarer stopped/failed-after-deliver
+        // case, where the user already saw the answer on stdout.
+        process.stderr.write(
+          dimErr(`\n[${summary.status}] ${counters}`) + "\n",
+        );
+      }
     },
     onError(err) {
       const msg = err instanceof Error ? err.message : String(err);
