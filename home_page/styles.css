@@ -232,20 +232,102 @@ span::selection {
   background: rgba(154, 255, 188, 0.22);
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .shell {
-    width: min(100vw - 12px, 100%);
-    margin: 6px auto;
-    padding: 14px 12px 10px;
+    width: 100%;
+    margin: 0;
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    padding: 14px 14px 10px;
+  }
+
+  .hero {
+    padding: 0 0 12px;
+  }
+
+  .prompt-line {
+    font-size: 0.78rem;
+    margin-bottom: 14px;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  h1 {
+    font-size: clamp(1.4rem, 6vw, 2.2rem);
+  }
+
+  .tagline {
+    font-size: 0.88rem;
+    line-height: 1.55;
+  }
+
+  .install-line {
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .install-line code {
+    font-size: 0.8rem;
+    padding: 4px 8px;
+  }
+
+  .install-line a {
+    font-size: 0.8rem;
+  }
+
+  .icon {
+    width: 16px;
+    height: 16px;
+  }
+
+  .feature-list {
+    padding-top: 10px;
   }
 
   .feature {
-    padding: 14px 0 16px;
+    padding: 12px 0 14px;
   }
 
-  .tagline,
+  .feature h2 {
+    font-size: 0.85rem;
+  }
+
+  .feature .tagline {
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+
+  .terminal {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-radius: 4px;
+  }
+
   code {
-    font-size: 0.9rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .comment {
+    font-size: 0.72rem;
+  }
+
+  .command {
+    font-size: 0.78rem;
+  }
+
+  .section-mark {
+    margin-right: 6px;
+  }
+
+  .site-footer {
+    width: 100%;
+    padding: 18px 0 24px;
+  }
+
+  .site-footer p {
+    font-size: 0.72rem;
   }
 }
 
