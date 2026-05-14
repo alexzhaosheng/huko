@@ -44,8 +44,12 @@ import {
 } from "../state.js";
 import { getConfig } from "../../config/index.js";
 import { openPrompter, PromptCancelled, type Prompter } from "./prompts.js";
+import {
+  startEnabledSidecars,
+  stopAllSidecars,
+} from "../../services/features/index.js";
 import { bold, cyan, dim, green, red, yellow } from "../colors.js";
-import { formatTokenBreakdown } from "./run.js";
+import { buildFeatureOverrides, formatTokenBreakdown } from "./run.js";
 import type { RunArgs } from "./run.js";
 
 // ─── Public entry ────────────────────────────────────────────────────────────
@@ -119,9 +123,11 @@ export async function chatCommand(args: RunArgs): Promise<number> {
   let decisionHandle: { close(): void } | null = null;
   let exitCode = 0;
 
+  const featureOverrides = buildFeatureOverrides(args);
   try {
     ctx = await bootstrap(formatter, {
       mode: args.ephemeral ? "memory" : "persistent",
+      ...(featureOverrides ? { featureOverrides } : {}),
     });
 
     // Subscribe to ask/decision events on the orchestrator (no
@@ -148,6 +154,24 @@ export async function chatCommand(args: RunArgs): Promise<number> {
         process.stderr.write(`huko: no usable current model.  Run \`huko setup\`.\n`);
       }
       return 3;
+    }
+
+    // ── Start sidecars for enabled features ───────────────────────────────
+    // Chat-only seam: one-shot `runCommand` never reaches here, so a
+    // feature's sidecar runs only when there's a long-lived process
+    // to host it. Per-sidecar `start()` failures are reported but
+    // never block chat — a sidecar fighting EADDRINUSE with another
+    // huko process is a non-fatal degradation, not a chat-blocker.
+    const sidecarResult = await startEnabledSidecars(ctx.enabledFeatures, {
+      projectRoot: cwd,
+    });
+    for (const f of sidecarResult.failed) {
+      process.stderr.write(
+        yellow(
+          `huko: feature "${f.name}" sidecar failed to start: ${describe(f.error)}`,
+          "stderr",
+        ) + "\n",
+      );
     }
 
     // ── Resolve initial session ──────────────────────────────────────────
@@ -216,6 +240,9 @@ export async function chatCommand(args: RunArgs): Promise<number> {
     formatter.onError(err);
     exitCode = 1;
   } finally {
+    // Stop sidecars FIRST — they may emit final events through the
+    // session/emitter, and we don't want session.close() to race them.
+    await stopAllSidecars();
     process.off("SIGINT", onSigint);
     if (prompter) prompter.close();
     askHandle?.close();

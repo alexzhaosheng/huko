@@ -88,6 +88,8 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let chat = false;
   let format: FormatName = "text";
   let stdinPrompt = false;
+  const enableFeatures: string[] = [];
+  const disableFeatures: string[] = [];
 
   // Phase 1: parse flags until first bare positional, `--` sentinel,
   // or `-` (stdin marker).
@@ -206,6 +208,24 @@ export function parseRunArgs(rest: string[]): ParseResult {
       i++;
       continue;
     }
+    if (arg.startsWith("--enable=")) {
+      const name = arg.slice("--enable=".length).trim();
+      if (name.length === 0) {
+        return { kind: "error", message: `huko: --enable= requires a feature name\n` };
+      }
+      enableFeatures.push(name);
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--disable=")) {
+      const name = arg.slice("--disable=".length).trim();
+      if (name.length === 0) {
+        return { kind: "error", message: `huko: --disable= requires a feature name\n` };
+      }
+      disableFeatures.push(name);
+      i++;
+      continue;
+    }
 
     // Unknown flag. Note that things like `-3` (numbers) end up here
     // because they start with `-` and don't match any known flag.
@@ -228,6 +248,17 @@ export function parseRunArgs(rest: string[]): ParseResult {
   // Mutual exclusion checks.
   if (newSession && sessionId !== undefined) {
     return { kind: "error", message: "huko: --new and --session=<id> are mutually exclusive\n" };
+  }
+  // Same feature name in both --enable and --disable is a typo / mistake
+  // rather than a sane request. Fail loud rather than picking a winner.
+  if (enableFeatures.length > 0 && disableFeatures.length > 0) {
+    const conflict = enableFeatures.find((n) => disableFeatures.includes(n));
+    if (conflict !== undefined) {
+      return {
+        kind: "error",
+        message: `huko: feature "${conflict}" is both --enabled and --disabled — pick one\n`,
+      };
+    }
   }
   if (stdinPrompt && promptTokens.length > 0) {
     // Defensive — `-` handler already errors on this, but if a future
@@ -260,6 +291,8 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(verbose !== undefined ? { verbose } : {}),
       ...(chat ? { chat: true } : {}),
       ...(stdinPrompt ? { stdinPrompt: true } : {}),
+      ...(enableFeatures.length > 0 ? { enableFeatures } : {}),
+      ...(disableFeatures.length > 0 ? { disableFeatures } : {}),
     },
   };
 }

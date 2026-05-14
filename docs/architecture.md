@@ -130,6 +130,7 @@ These are cross-module contracts. Read them before designing a new module.
 | DB schema | `server/db/` | [db](./modules/db.md) | Two SQLite schemas: `schema/infra.ts` and `schema/session.ts`, each with migrations | OK |
 | Security | `server/security/` | [security](./modules/security.md) | API key resolution from `<cwd>/.huko/keys.json`, env, then `<cwd>/.env`; DB never stores keys | OK |
 | Orchestrator | `server/services/` | [orchestrator](./modules/orchestrator.md) | Kernel assembly point, now wired through persistence | OK |
+| Features | `server/services/features/` | [features](./modules/features.md) | Opt-in feature bundles: tool-group gating + chat-mode sidecar lifecycle | OK |
 | Daemon Gateway | `server/gateway.ts` | [gateway](./modules/gateway.md) | Socket.IO gateway plus a single `huko` wire event | OK |
 | Daemon Routers | `server/routers/` | [routers](./modules/routers.md) | tRPC control API for daemon use only | OK |
 | Daemon Bootstrap | `server/core/app.ts` | [app](./modules/app.md) | Express + WS + tRPC assembly | OK |
