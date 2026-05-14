@@ -115,6 +115,22 @@ export class TaskLoop {
             ctx.taskStopped = true;
             break;
           }
+          if (llmOutcome.reason === "timeout") {
+            // No stream chunk arrived within config.task.llmIdleTimeoutMs.
+            // Provider held the socket and never sent data — give up
+            // and surface the cause so the operator knows why their
+            // task didn't produce output.
+            const ms = getConfig().task.llmIdleTimeoutMs;
+            await this.appendFailureNotice(
+              `LLM call timed out: no response from the provider within ${Math.round(
+                ms / 1000,
+              )}s. The task ended without a result. Try again, or use a smaller prompt / a different model.`,
+            );
+            ctx.taskFailed = true;
+            break;
+          }
+          // reason === "interjected" — user injected a new message
+          // mid-call; loop back and rebuild context with the fresh input.
           continue;
         }
 
