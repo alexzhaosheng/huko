@@ -223,7 +223,7 @@ export async function chatCommand(args: RunArgs): Promise<number> {
         // Render our own `> ` cursor — bypass Prompter's wizard-style
         // "Question: " suffix by passing an empty question.
         process.stderr.write(bold("> ", "stderr"));
-        line = await prompter.prompt("");
+        line = await prompter.collectMultiLine("");
       } catch (err) {
         // Ctrl+D / Ctrl+C close the readline interface → PromptCancelled.
         if (err instanceof PromptCancelled) {
