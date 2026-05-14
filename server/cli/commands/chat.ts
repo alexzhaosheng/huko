@@ -49,7 +49,7 @@ import {
   stopAllSidecars,
 } from "../../services/features/index.js";
 import { bold, cyan, dim, green, red, yellow } from "../colors.js";
-import { formatTokenBreakdown } from "./run.js";
+import { buildFeatureOverrides, formatTokenBreakdown } from "./run.js";
 import type { RunArgs } from "./run.js";
 
 // ─── Public entry ────────────────────────────────────────────────────────────
@@ -123,9 +123,11 @@ export async function chatCommand(args: RunArgs): Promise<number> {
   let decisionHandle: { close(): void } | null = null;
   let exitCode = 0;
 
+  const featureOverrides = buildFeatureOverrides(args);
   try {
     ctx = await bootstrap(formatter, {
       mode: args.ephemeral ? "memory" : "persistent",
+      ...(featureOverrides ? { featureOverrides } : {}),
     });
 
     // Subscribe to ask/decision events on the orchestrator (no

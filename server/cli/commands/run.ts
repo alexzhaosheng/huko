@@ -33,6 +33,7 @@
 
 import type { TaskRunSummary } from "../../task/task-loop.js";
 import { bootstrap } from "../bootstrap.js";
+import type { FeaturesConfig } from "../../services/features/index.js";
 import { installAskHandler } from "./run-ask.js";
 import { installDecisionHandler } from "./run-decision.js";
 import { makeFormatter, type FormatName } from "../formatters/index.js";
@@ -108,6 +109,14 @@ export type RunArgs = {
    * idle pipe and reads the next queued command" failure mode.
    */
   stdinPrompt?: boolean;
+  /**
+   * Feature names from `--enable=X` (repeatable). Force-enable for this
+   * invocation; flows into bootstrap as the config's explicit layer so
+   * file-based config still loses to CLI intent.
+   */
+  enableFeatures?: string[];
+  /** Feature names from `--disable=X` (repeatable). Mirror of `enableFeatures`. */
+  disableFeatures?: string[];
 };
 
 /**
@@ -160,6 +169,26 @@ async function readAllStdin(): Promise<string> {
  */
 function combineDataAndInstruction(data: string, instruction: string): string {
   return `${data}\n\n---\n\n${instruction}`;
+}
+
+/**
+ * Convert CLI `--enable=X` / `--disable=X` args into a FeaturesConfig
+ * suitable for bootstrap's explicit-layer override. Returns undefined
+ * when neither flag was given, so callers can conditionally omit the
+ * field and keep exactOptionalPropertyTypes happy.
+ *
+ * Parse-level validation (in dispatch/run.ts) already rejects same
+ * name in both lists, so disable-then-enable order here only matters
+ * for the case where it can't happen.
+ */
+export function buildFeatureOverrides(args: RunArgs): FeaturesConfig | undefined {
+  const en = args.enableFeatures ?? [];
+  const dis = args.disableFeatures ?? [];
+  if (en.length === 0 && dis.length === 0) return undefined;
+  const out: FeaturesConfig = {};
+  for (const n of dis) out[n] = { enabled: false };
+  for (const n of en) out[n] = { enabled: true };
+  return out;
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
@@ -313,9 +342,11 @@ export async function runCommand(args: RunArgs): Promise<number> {
   let askHandle: { close(): void } | null = null;
   let decisionHandle: { close(): void } | null = null;
 
+  const featureOverrides = buildFeatureOverrides(args);
   try {
     ctx = await bootstrap(formatter, {
       mode: args.ephemeral ? "memory" : "persistent",
+      ...(featureOverrides ? { featureOverrides } : {}),
     });
 
     const handlerFormat: "text" | "json" | "jsonl" =

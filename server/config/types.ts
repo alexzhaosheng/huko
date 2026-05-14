@@ -159,6 +159,23 @@ export type HukoConfig = {
     port: number;
     host: string;
   };
+
+  /**
+   * Feature bundles — opt-in groups of tools (and optionally a chat-mode
+   * sidecar service). Each key is a registered feature's name; setting
+   * `enabled: true` / `false` overrides the feature's `enabledByDefault`
+   * declaration in code.
+   *
+   * Layered like every other field: ~/.huko/config.json → <cwd>/.huko/
+   * config.json → CLI `--enable=X` / `--disable=X` (highest, plumbed via
+   * loadConfig's explicit layer). Features not mentioned anywhere fall
+   * back to `enabledByDefault`.
+   *
+   * Tool visibility (feature-tagged tools in/out of the LLM surface)
+   * follows the resolved set in both chat and one-shot runs. Sidecar
+   * lifecycle is chat-only — see server/cli/commands/chat.ts.
+   */
+  features: Record<string, { enabled?: boolean }>;
 };
 
 // ─── Built-in defaults ───────────────────────────────────────────────────────
@@ -194,6 +211,7 @@ export const DEFAULT_CONFIG: HukoConfig = {
     port: 3000,
     host: "127.0.0.1",
   },
+  features: {},
   safety: {
     // Safety is OPT-IN. Zero-config huko behaves identically to pre-
     // safety-layer huko: every tool just runs. Users who want safety
