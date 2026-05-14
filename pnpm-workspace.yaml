@@ -1,0 +1,22 @@
+# Allow native install scripts for these dependencies. Required by
+# pnpm 10+, which refuses to run preinstall/install/postinstall by
+# default and aborts with [ERR_PNPM_IGNORED_BUILDS] when matching
+# scripts are present but not whitelisted.
+#
+# Why HERE and not `package.json` `pnpm.onlyBuiltDependencies`:
+# pnpm 11 no longer reads that field — the whitelist moved to this
+# file. Putting it in `package.json` (the old style) compiles in
+# local dev that has manually run `pnpm approve-builds` once, but
+# CI's fresh checkout fails. The shape is also different: an OBJECT
+# (`<name>: true`), not an array of names.
+#
+# What needs to be on the list:
+#   - better-sqlite3 — compiles its native module via prebuild-install
+#     or node-gyp at install time.
+#   - esbuild        — its postinstall fetches the platform-specific
+#     native binary into `bin/esbuild`. Without the script, the
+#     binary is absent and any bundle step throws "esbuild was not
+#     found in this package" / similar.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
