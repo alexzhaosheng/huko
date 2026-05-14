@@ -56,13 +56,13 @@
         <article class="feature">
           <h2><span class="section-mark">[03]</span> CLI-Native, Pipe-Friendly</h2>
           <p class="tagline">stdin in, stdout out. Pipe logs, scripts, data; pipe results to files, jq, the next command. Output as text, <code>--json</code>, or <code>--jsonl</code>. Works anywhere the terminal does. <code>--chat</code> for REPL mode.</p>
-          <pre class="terminal"><code><span class="pair"><span class="comment"># plain text — drop-in replacement for grep, awk, or a manual scan</span>
-<span class="command">huko -- "find every TODO in src/ and sort by file"</span></span>
-<span class="pair"><span class="comment"># stdin in, stdout out — pipe like any other CLI tool</span>
-<span class="command">cat errors.log | huko -- "extract the root cause in one sentence" &gt; summary.txt</span></span>
+          <pre class="terminal"><code><span class="pair"><span class="comment"># pipe data IN — agent treats stdin as input, argv as the instruction</span>
+<span class="command">cat logs/recent.log | huko -- "are these errors caused by my recent commits? check git history"</span></span>
+<span class="pair"><span class="comment"># review a diff with file context — agent reads what it needs</span>
+<span class="command">git diff | huko -- "review for risky changes, read affected files for context"</span></span>
 <span class="pair"><span class="comment"># structured output — feed the result into jq, Python, or CI</span>
-<span class="command">huko --json -- "list open ports and their owning processes" &gt; ports.json</span></span>
-<span class="pair"><span class="comment"># interactive REPL — keep the conversation going</span>
+<span class="command">huko --json -- "audit deps for unmaintained packages and known CVEs" &gt; audit.json</span></span>
+<span class="pair"><span class="comment"># interactive REPL — keep the conversation going across turns</span>
 <span class="command">huko --chat</span></span></code></pre>
         </article>
 
