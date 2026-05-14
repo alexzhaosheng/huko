@@ -11,6 +11,8 @@ let ws = null;
 let reconnectDelay = 100; // ms, fast reconnect — huko only waits 15s
 const RECONNECT_MAX = 5_000;
 let reconnectTimer = null;
+const KEEPALIVE_ALARM = "keepalive";
+const KEEPALIVE_MINUTES = 0.5; // 30s — Chrome 120+ minimum
 
 // ─── Connection ────────────────────────────────────────────────────────────
 
@@ -349,13 +351,40 @@ function updateStatus(status) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "getStatus") {
     sendResponse({ status: currentStatus, port: WS_PORT });
+  } else if (msg.type === "reconnect") {
+    clearReconnect();
+    reconnectDelay = 100;
+    connect();
+    sendResponse({ status: currentStatus });
+  }
+});
+
+// ─── Alarm keepalive ───────────────────────────────────────────────────────
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      clearReconnect();
+      reconnectDelay = 100;
+      connect();
+    }
   }
 });
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 
+async function ensureAlarm() {
+  const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
+  if (!existing) {
+    await chrome.alarms.create(KEEPALIVE_ALARM, {
+      periodInMinutes: KEEPALIVE_MINUTES,
+    });
+  }
+}
+
 try {
   connect();
+  ensureAlarm().catch((err) => console.error("[huko] alarm error:", err));
 } catch (err) {
   console.error("[huko] startup error:", err);
 }
