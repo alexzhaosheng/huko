@@ -44,6 +44,11 @@ import {
 } from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
 import { loadConfig, loadInfraConfig, type InfraConfig } from "../config/index.js";
+import { listToolNames, setEnabledFeatures } from "../task/tools/registry.js";
+import {
+  assertNoNameCollisionsWithTools,
+  computeEnabledFeatures,
+} from "../services/features/index.js";
 import type { Formatter } from "./formatters/index.js";
 
 export type SessionMode = "persistent" | "memory";
@@ -63,6 +68,8 @@ export type CliBootstrap = {
   infra: InfraConfig;
   session: SessionPersistence;
   orchestrator: TaskOrchestrator;
+  /** Features whose sidecars chat-mode should spawn; empty in step-3. */
+  enabledFeatures: Set<string>;
   shutdown(): void;
 };
 
@@ -75,6 +82,15 @@ export async function bootstrap(
   // and this lets us surface any malformed-config warnings up front
   // rather than at the first kernel read.
   loadConfig({ cwd: process.cwd() });
+
+  // Feature gating: cross-check tool/feature name collision, resolve
+  // the enabled set, pipe it into the tool registry so feature-tagged
+  // tools materialise (or stay hidden) consistently. Sidecar lifecycle
+  // is owned by chat-mode (see chat.ts) — bootstrap only handles the
+  // tool-visibility side, which both chat and one-shot runs share.
+  assertNoNameCollisionsWithTools(listToolNames());
+  const enabledFeatures = computeEnabledFeatures();
+  setEnabledFeatures(enabledFeatures);
 
   // Infra config is sync, file-based. Same in both persistent and
   // memory modes — providers / models are user configuration, not
@@ -119,6 +135,7 @@ export async function bootstrap(
     infra,
     session,
     orchestrator,
+    enabledFeatures,
     shutdown() {
       try {
         void session.close();
