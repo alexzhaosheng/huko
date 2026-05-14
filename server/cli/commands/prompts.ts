@@ -92,10 +92,16 @@ export function openPrompter(): Prompter {
   // back-to-back can lose lines that were already buffered. The queue
   // pattern is rock solid: every line readline emits goes into the
   // queue, every prompt takes one from the queue (waiting if empty).
+  // terminal: false — never use readline's raw mode.
+  // On Windows, raw mode breaks IME composition (Chinese input characters
+  // get split and inserted at wrong positions). In cooked mode, the OS
+  // console host / terminal driver handles IME and basic line editing
+  // (backspace, Ctrl+W, Ctrl+U). Our queue-based approach doesn't need
+  // readline's keypress-level line editing — we just consume complete lines.
   let rl: ReadlineInterface | null = createInterface({
     input: process.stdin,
     output: process.stderr,
-    terminal: process.stdin.isTTY ? true : false,
+    terminal: false,
   });
 
   const lineQueue: string[] = [];
