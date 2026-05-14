@@ -36,15 +36,17 @@ RUN apk add --no-cache python3 make g++ git
 
 WORKDIR /src
 
-# Copy package files first so `npm ci` can be cached when only source
-# changes. Native module compile happens here.
-COPY package.json package-lock.json ./
-RUN npm ci
+# Install pnpm via corepack (bundled with Node 24). Copy package files
+# first so install can be cached when only source changes. Native
+# module compile (better-sqlite3) happens here.
+RUN corepack enable && corepack prepare pnpm@latest --activate
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 # Now the source. Build the esbuild bundle, then prune devDeps so the
 # node_modules we ship to runtime is the minimal prod set.
 COPY . .
-RUN npm run build:cli && npm prune --omit=dev
+RUN pnpm run build:cli && pnpm prune --prod
 
 # ─── Runtime stage ──────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine
