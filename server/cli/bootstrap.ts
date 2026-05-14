@@ -50,6 +50,10 @@ import {
   computeEnabledFeatures,
   type FeaturesConfig,
 } from "../services/features/index.js";
+
+// Side-effect import: triggers registration of all built-in features
+// (analogous to tools/index.ts for tool registration).
+import "../services/features/features.js";
 import type { Formatter } from "./formatters/index.js";
 
 export type SessionMode = "persistent" | "memory";

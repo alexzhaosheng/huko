@@ -2,15 +2,19 @@
  * server/task/tools/server/browser-session.ts
  *
  * WebSocket server that a Chrome extension connects to.
- * huko acts as the server — it starts a WS listener on demand, the
- * extension (installed in the user's browser) connects and executes
- * commands in the user's real Chrome environment.
+ * huko acts as the server — the "browser" feature sidecar starts a WS
+ * listener, the extension (installed in the user's browser) connects and
+ * executes commands in the user's real Chrome environment.
  *
  * Lifecycle:
- *   - WS server starts lazily on the first `sendCommand()` call.
- *   - Extension connects and stays connected while huko is running.
- *   - Server shuts down on `disconnect()` (called at session end) or
- *     after 5 min of idle with no connected client.
+ *   - WS server is started by the browser feature's sidecar (chat-mode only).
+ *   - Extension connects and stays connected while the sidecar runs.
+ *   - Server shuts down when the sidecar's stop() is called (chat exit).
+ *   - Tool handlers call sendCommand() which requires the server to already
+ *     be running — no lazy start.
+ *
+ * One-shot `huko -- prompt` never starts sidecars, so browser commands
+ * fail with a clear "server not running" message there.
  */
 
 import { WebSocketServer } from "ws";
@@ -22,7 +26,6 @@ import { getConfig } from "../../../config/index.js";
 const CMD_TIMEOUT_MS = 30_000;
 const WAIT_FOR_CLIENT_MS = 15_000; // wait up to 15s — extension reconnects in <5s
 const PING_TIMEOUT_MS = 3_000; // wait up to 3s for pong from client
-const IDLE_CLOSE_MS = 5 * 60_000; // 5 min idle → close server
 
 // ─── Protocol types ──────────────────────────────────────────────────────────
 
@@ -62,23 +65,14 @@ const pending = new Map<
   }
 >();
 
-let idleTimer: NodeJS.Timeout | null = null;
-
-function resetIdleTimer(): void {
-  if (idleTimer) clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => {
-    void stopServer();
-  }, IDLE_CLOSE_MS);
-  if (typeof idleTimer.unref === "function") idleTimer.unref();
-}
-
 // ─── Server lifecycle ───────────────────────────────────────────────────────
 
-async function ensureServer(): Promise<void> {
-  if (wss) {
-    resetIdleTimer();
-    return;
-  }
+/**
+ * Start the WebSocket server. Called by the browser sidecar in chat mode.
+ * Idempotent: does nothing if already running.
+ */
+export async function startServer(): Promise<void> {
+  if (wss) return;
 
   const cfg = getConfig().tools.browser;
   const port = cfg.wsPort;
@@ -88,7 +82,6 @@ async function ensureServer(): Promise<void> {
 
     server.on("listening", () => {
       wss = server;
-      resetIdleTimer();
       resolve();
     });
 
@@ -108,7 +101,6 @@ async function ensureServer(): Promise<void> {
         try { client.close(); } catch { /* best-effort */ }
       }
       client = ws;
-      resetIdleTimer();
 
       ws.on("message", (raw) => {
         let msg: Incoming;
@@ -141,7 +133,12 @@ async function ensureServer(): Promise<void> {
   });
 }
 
-async function stopServer(): Promise<void> {
+/**
+ * Stop the WebSocket server and reject all pending commands.
+ * Called by the browser sidecar's stop() on chat exit.
+ * Idempotent: safe to call multiple times.
+ */
+export async function stopServer(): Promise<void> {
   // Reject all pending commands
   for (const [id, entry] of pending) {
     clearTimeout(entry.timer);
@@ -161,10 +158,6 @@ async function stopServer(): Promise<void> {
       /* ignore */
     }
     wss = null;
-  }
-  if (idleTimer) {
-    clearTimeout(idleTimer);
-    idleTimer = null;
   }
 }
 
@@ -193,10 +186,11 @@ async function waitForClient(): Promise<void> {
     await new Promise((r) => setTimeout(r, 200));
   }
 
+  const cfg = getConfig().tools.browser;
   throw new Error(
     "Chrome extension did not connect in time.\n" +
     "Make sure the huko browser extension is installed and Chrome is running.\n" +
-    `The extension will auto-connect to ws://127.0.0.1:${getConfig().tools.browser.wsPort}`,
+    `The extension will auto-connect to ws://127.0.0.1:${cfg.wsPort}`,
   );
 }
 
@@ -239,7 +233,17 @@ async function sendCommand(cmd: BrowserCommand): Promise<{
   text: string;
   attachment?: { filename: string; data: string };
 }> {
-  await ensureServer();
+  // Server is expected to be running (started by the sidecar). Fail
+  // with a clear message rather than lazy-starting — in one-shot mode
+  // there is no sidecar, and the user should be told why.
+  if (!wss) {
+    throw new Error(
+      "Browser WebSocket server is not running. " +
+      "The \"browser\" feature must be enabled in chat mode " +
+      "(`huko --chat --enable=browser`).",
+    );
+  }
+
   await waitForClient();
 
   const id = nextId++;
@@ -273,10 +277,6 @@ async function sendCommand(cmd: BrowserCommand): Promise<{
 }
 
 // ─── Exported helpers ────────────────────────────────────────────────────────
-
-export async function disconnect(): Promise<void> {
-  await stopServer();
-}
 
 export async function browserNavigate(url: string): Promise<string> {
   const { text } = await sendCommand({ cmd: "navigate", url });
