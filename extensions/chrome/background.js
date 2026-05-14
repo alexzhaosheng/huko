@@ -342,6 +342,9 @@ let currentStatus = "disconnected";
 
 function updateStatus(status) {
   currentStatus = status;
+  // Set toolbar icon based on connection state
+  const icon = status === "connected" ? "huko.png" : "huko_red.png";
+  chrome.action.setIcon({ path: { 16: icon, 48: icon, 128: icon } }).catch(() => {});
   // Notify popup if open
   chrome.runtime.sendMessage({ type: "status", status }).catch(() => {
     // popup is not open — ignore
