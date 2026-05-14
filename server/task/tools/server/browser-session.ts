@@ -239,8 +239,8 @@ async function sendCommand(cmd: BrowserCommand): Promise<{
   if (!wss) {
     throw new Error(
       "Browser WebSocket server is not running. " +
-      "The \"browser\" feature must be enabled in chat mode " +
-      "(`huko --chat --enable=browser`).",
+      "The \"browser-control\" feature must be enabled in chat mode " +
+      "(`huko --chat --enable=browser-control`).",
     );
   }
 
