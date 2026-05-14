@@ -46,25 +46,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Set up Node ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+          cache: pnpm
 
       - name: Install deps
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Type check
-        run: npx tsc --noEmit
+        run: pnpm tsc --noEmit
 
       - name: Test
-        run: npm test
+        run: pnpm test
 
       - name: Build (esbuild bundle)
         # Verifies dist/cli.js builds without import / type errors that
         # only surface at bundle time.
-        run: npm run build:cli
+        run: pnpm run build:cli
 
   docker-build:
     name: docker-build (sanity)

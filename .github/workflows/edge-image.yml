@@ -16,7 +16,7 @@ on:
     paths:
       # Don't rebuild for doc-only changes — docker layout is unaffected.
       - "package.json"
-      - "package-lock.json"
+      - "pnpm-lock.yaml"
       - "server/**"
       - "shared/**"
       - "bin/**"
