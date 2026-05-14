@@ -26,8 +26,13 @@ ARG NODE_VERSION=24
 FROM node:${NODE_VERSION}-alpine AS builder
 
 # Native build tools for better-sqlite3 (the only dep that compiles
-# native code). These get dropped from the runtime image entirely.
-RUN apk add --no-cache python3 make g++
+# native code) + `git`, which `scripts/build-cli.mjs` invokes via
+# `git rev-parse --short HEAD` to embed the commit SHA into the
+# bundle. The COPY below brings `.git/` in (no .dockerignore excludes
+# it); without the `git` binary the script silently returns
+# "unknown" and the build-check at the end of build-cli.mjs aborts.
+# All of these get dropped from the runtime image entirely.
+RUN apk add --no-cache python3 make g++ git
 
 WORKDIR /src
 
