@@ -40,7 +40,10 @@ WORKDIR /src
 # first so install can be cached when only source changes. Native
 # module compile (better-sqlite3) happens here.
 RUN corepack enable && corepack prepare pnpm@latest --activate
-COPY package.json pnpm-lock.yaml ./
+# `pnpm-workspace.yaml` must be present at install time — pnpm 11 reads
+# `allowBuilds` from it. Without it, `pnpm install --frozen-lockfile`
+# aborts with [ERR_PNPM_IGNORED_BUILDS] on better-sqlite3 / esbuild.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # Now the source. Build the esbuild bundle, then prune devDeps so the
