@@ -59,6 +59,13 @@ export type HukoConfig = {
     maxIterations: number;
     maxToolCalls: number;
     maxEmptyRetries: number;
+    /**
+     * Abort an LLM call if no stream chunk (or final response, for
+     * non-streaming) arrives in this many milliseconds. Prevents the
+     * "provider holds the socket but never sends data" hang documented
+     * in `llm-call.ts` heartbeat block. Set to 0 to disable.
+     */
+    llmIdleTimeoutMs: number;
   };
 
   compaction: {
@@ -177,6 +184,11 @@ export const DEFAULT_CONFIG: HukoConfig = {
     maxIterations: 200,
     maxToolCalls: 200,
     maxEmptyRetries: 3,
+    // 2 minutes — comfortably long for slow time-to-first-token on
+    // thinking models, short enough that a hung provider doesn't leave
+    // the task spinning forever. Bug: hukoDev session 4 task 28 hung
+    // indefinitely with this set to (effectively) Infinity.
+    llmIdleTimeoutMs: 120_000,
   },
   compaction: {
     thresholdRatio: 0.7,
