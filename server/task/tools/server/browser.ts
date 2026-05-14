@@ -7,9 +7,9 @@
  * environment. All cookies, logins, and sessions are live — the agent
  * sees and interacts with exactly what the user sees.
  *
- * This tool is gated by the "browser" feature (disabled by default).
+ * This tool is gated by the "browser-control" feature (disabled by default).
  * Enable in chat mode:
- *   huko --chat --enable=browser
+ *   huko --chat --enable=browser-control
  *
  * Actions:
  *   - navigate    — open a URL in a new tab, return visible page text
@@ -148,7 +148,7 @@ const PARAMETERS = {
 registerServerTool(
   {
     name: "browser",
-    feature: "browser",
+    feature: "browser-control",
     description: DESCRIPTION,
     leanDescription: LEAN_DESCRIPTION,
     parameters: PARAMETERS,
