@@ -39,7 +39,7 @@
     "db:migrate": "tsx scripts/db-migrate.ts",
     "huko": "tsx server/cli/index.ts",
     "test": "node --import tsx --test \"tests/*.test.ts\"",
-    "prepublishOnly": "npm run check && npm run build:cli"
+    "prepublishOnly": "pnpm run check && pnpm run build:cli"
   },
   "dependencies": {
     "@trpc/client": "^11.0.0",
@@ -53,6 +53,9 @@
     "socket.io": "^4.8.0",
     "socket.io-client": "^4.8.0",
     "zod": "^4.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild"]
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
