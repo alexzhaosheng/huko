@@ -161,7 +161,7 @@ export function openPrompter(): Prompter {
 
   async function doPrompt(
     question: string,
-    opts: PromptOptions,
+    opts: PromptOptions = {},
   ): Promise<string> {
     while (true) {
       const suffix =
@@ -186,8 +186,11 @@ export function openPrompter(): Prompter {
   return {
     prompt: doPrompt,
 
-    async collectMultiLine(question, opts = {}) {
-      const first = await doPrompt(question, opts);
+    async collectMultiLine(question, _opts = {}) {
+      // Render the prompt, then take the first line raw (no trim,
+      // no validation — this is REPL mode, exact content matters).
+      writePrompt(question.length === 0 ? "" : `${question}: `);
+      const first = await takeLine();
       if (first === "") return "";
       const lines: string[] = [first];
 
