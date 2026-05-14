@@ -16,9 +16,26 @@ const KEEPALIVE_MINUTES = 0.5; // 30s — Chrome 120+ minimum
 
 // ─── Connection ────────────────────────────────────────────────────────────
 
+// MV3: track in-flight async work so the service worker stays alive
+// until handleCommand completes. Without this, Chrome may terminate the
+// worker between receiving a WS message and sending the response.
+let pendingWork = Promise.resolve();
+
+function closeWs() {
+  if (ws) {
+    try { ws.close(); } catch { /* best-effort */ }
+    ws = null;
+  }
+}
+
 function connect() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
+  // Always create a fresh connection.  In MV3, when the service worker
+  // restarts after being terminated, a stale WebSocket reference from a
+  // previous incarnation may still report readyState === OPEN even though
+  // the JS handler is gone — the TCP connection can linger.  Checking
+  // readyState is NOT reliable across worker restarts.
   clearReconnect();
+  closeWs();
 
   ws = new WebSocket(WS_URL);
 
@@ -35,7 +52,11 @@ function connect() {
     } catch (e) {
       return;
     }
-    handleCommand(msg);
+    // Chain onto pendingWork so the service worker stays alive until
+    // all in-flight commands have been processed.
+    pendingWork = handleCommand(msg).catch((err) => {
+      console.error("[huko] handleCommand error:", err);
+    });
   };
 
   ws.onclose = () => {
@@ -45,8 +66,8 @@ function connect() {
   };
 
   ws.onerror = () => {
-    // onclose will fire after this
-    ws = null;
+    // onclose will fire after this; closeWs to be safe
+    closeWs();
   };
 }
 
@@ -74,6 +95,9 @@ async function handleCommand(msg) {
   try {
     let result;
     switch (cmd) {
+      case "ping":
+        result = { text: "pong" };
+        break;
       case "navigate":
         result = await cmdNavigate(msg.url);
         break;
@@ -340,11 +364,28 @@ async function cmdSwitchPage(index) {
 
 let currentStatus = "disconnected";
 
-function updateStatus(status) {
+async function updateStatus(status) {
   currentStatus = status;
   // Set toolbar icon based on connection state
-  const icon = status === "connected" ? "huko.png" : "huko_red.png";
-  chrome.action.setIcon({ path: { 16: icon, 48: icon, 128: icon } }).catch(() => {});
+  const prefix = status === "connected" ? "huko" : "huko_red";
+  try {
+    await chrome.action.setIcon({
+      path: {
+        16: `${prefix}-16.png`,
+        48: `${prefix}-48.png`,
+        128: `${prefix}-128.png`,
+      },
+    });
+    // Check runtime.lastError — setIcon may resolve the promise but still
+    // set lastError (e.g. when Chrome rejects the icon file).
+    if (chrome.runtime.lastError) {
+      console.error("[huko] setIcon runtime.lastError:", chrome.runtime.lastError.message);
+    } else {
+      console.log("[huko] icon updated:", status);
+    }
+  } catch (err) {
+    console.error("[huko] setIcon failed:", err);
+  }
   // Notify popup if open
   chrome.runtime.sendMessage({ type: "status", status }).catch(() => {
     // popup is not open — ignore
@@ -366,6 +407,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
+    // Reconnect only if we don't have a live connection.  Across MV3
+    // worker restarts, `ws` will be null (new worker), so this always
+    // reconnects after a restart.  Within the same worker lifetime,
+    // `readyState === OPEN` is reliable — no need to tear down a
+    // healthy connection.
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       clearReconnect();
       reconnectDelay = 100;
