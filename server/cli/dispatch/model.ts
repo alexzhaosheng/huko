@@ -148,6 +148,16 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       positional.push(arg);
     }
     if (positional.length === 0) {
+      // Read mode — `--project` doesn't make sense here (current is
+      // always the merged view). Reject it explicitly so users don't
+      // think they're scoping the lookup.
+      if (project) {
+        process.stderr.write(
+          "huko model current: --project applies only when setting a model " +
+            "(huko model current <modelId> --project). Omit it for the read view.\n",
+        );
+        usage();
+      }
       return await modelCurrentCommand({});
     }
     if (positional.length === 1) {

@@ -43,7 +43,16 @@ export const tasks = sqliteTable(
       onDelete: "cascade",
     }),
     agentSessionId: integer("agent_session_id"),
-    status: text("status").$type<TaskStatus>().notNull().default("pending"),
+    // No Drizzle default — callers always supply `status` (the
+    // `tasks.create*` methods coerce `input.status ?? "running"`).
+    // The legacy DDL default in migration 0001 is `'pending'`, which
+    // is dead but harmless metadata: no code path triggers it, and
+    // `recoverOrphans` treats `pending` the same as `running` (force-
+    // fail with dangling-tool-result synthesis). Keeping the Drizzle
+    // descriptor required-but-undefaulted means a future caller that
+    // forgets to pass `status` fails at compile time, not silently
+    // landing on `'pending'`.
+    status: text("status").$type<TaskStatus>().notNull(),
     modelId: text("model_id").notNull(),
     toolCallMode: text("tool_call_mode").$type<ToolCallMode>().notNull(),
     thinkLevel: text("think_level").$type<ThinkLevel>().notNull().default("off"),

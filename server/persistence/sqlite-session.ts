@@ -30,7 +30,6 @@ import {
   loadSessionLLMContext,
   type SessionDb,
 } from "../db/adapter.js";
-import { collectElidedEntryIds } from "./memory.js";
 import type {
   ChatSessionRow,
   CreateChatSessionInput,
@@ -105,20 +104,10 @@ export class SqliteSessionPersistence implements SessionPersistence {
     this.entries = {
       persist: makePersistEntry(db),
       update: makeUpdateEntry(db),
-      loadLLMContext: async (sessionId: number, type: SessionType): Promise<LLMMessage[]> => {
-        const messages = await loadSessionLLMContext(db, sessionId, type);
-        // Drop entries elided by previous compactions. See
-        // pipeline/context-manage.ts.
-        const allRows = await db
-          .select()
-          .from(taskContext)
-          .where(and(eq(taskContext.sessionId, sessionId), eq(taskContext.sessionType, type)))
-          .orderBy(asc(taskContext.id))
-          .all();
-        const elided = collectElidedEntryIds(allRows.map(toEntryRow));
-        if (elided.size === 0) return messages;
-        return messages.filter((m) => m._entryId === undefined || !elided.has(m._entryId));
-      },
+      // `loadSessionLLMContext` already applies the compaction-done
+      // elision filter in a single SELECT, so we don't second-pass.
+      loadLLMContext: (sessionId: number, type: SessionType): Promise<LLMMessage[]> =>
+        loadSessionLLMContext(db, sessionId, type),
       listForSession: async (sessionId, type): Promise<EntryRow[]> => {
         const rows = await db
           .select()
@@ -190,42 +179,41 @@ export class SqliteSessionPersistence implements SessionPersistence {
       createWithInitialEntry: async (
         input: CreateTaskWithInitialEntryInput,
       ): Promise<{ taskId: number; entryId: number }> => {
-        // better-sqlite3's transaction API takes a sync callback —
-        // we can't `await` inside it. That's fine: drizzle's better-sqlite3
-        // adapter is also sync under the hood, so .returning(...).get()
-        // resolves synchronously. We assert the shape with `unknown` to
-        // keep the type system honest about the sync-vs-async boundary.
         const result = this.sqlite.transaction(() => {
-          const taskRow = db
-            .insert(tasks)
-            .values({
-              chatSessionId: input.task.chatSessionId,
-              agentSessionId: input.task.agentSessionId,
-              status: input.task.status ?? "running",
-              modelId: input.task.modelId,
-              toolCallMode: input.task.toolCallMode,
-              thinkLevel: input.task.thinkLevel,
-            })
-            .returning({ id: tasks.id })
-            .get() as unknown as { id: number };
+          const taskId = syncReturningId(
+            db
+              .insert(tasks)
+              .values({
+                chatSessionId: input.task.chatSessionId,
+                agentSessionId: input.task.agentSessionId,
+                status: input.task.status ?? "running",
+                modelId: input.task.modelId,
+                toolCallMode: input.task.toolCallMode,
+                thinkLevel: input.task.thinkLevel,
+              })
+              .returning({ id: tasks.id })
+              .get(),
+          );
 
-          const entryRow = db
-            .insert(taskContext)
-            .values({
-              taskId: taskRow.id,
-              sessionId: input.entry.sessionId,
-              sessionType: input.entry.sessionType,
-              kind: input.entry.kind,
-              role: input.entry.role,
-              content: input.entry.content,
-              toolCallId: input.entry.toolCallId ?? null,
-              thinking: input.entry.thinking ?? null,
-              metadata: input.entry.metadata ?? null,
-            })
-            .returning({ id: taskContext.id })
-            .get() as unknown as { id: number };
+          const entryId = syncReturningId(
+            db
+              .insert(taskContext)
+              .values({
+                taskId,
+                sessionId: input.entry.sessionId,
+                sessionType: input.entry.sessionType,
+                kind: input.entry.kind,
+                role: input.entry.role,
+                content: input.entry.content,
+                toolCallId: input.entry.toolCallId ?? null,
+                thinking: input.entry.thinking ?? null,
+                metadata: input.entry.metadata ?? null,
+              })
+              .returning({ id: taskContext.id })
+              .get(),
+          );
 
-          return { taskId: taskRow.id, entryId: entryRow.id };
+          return { taskId, entryId };
         })();
         return result;
       },
@@ -381,6 +369,25 @@ function chmodIfExists(p: string, mode: number): void {
   } catch {
     /* Windows / non-POSIX FS — best effort. The DB is auto-gitignored. */
   }
+}
+
+/**
+ * Drizzle's `better-sqlite3` adapter is synchronous under the hood,
+ * but `.returning(...).get()` is typed as `Promise<...>` because the
+ * Drizzle API surface is shared with the async drivers. Inside
+ * `this.sqlite.transaction(() => ...)` we cannot `await` (the txn
+ * callback is sync), so we lie to the type system about that single
+ * boundary.
+ *
+ * Centralised in one named helper so the duck-typing lives in exactly
+ * one place — the `as unknown` cast is a smell, but it's a smell with
+ * a well-defined cause and scope. If Drizzle ever ships proper sync
+ * types for the better-sqlite3 driver, this helper is the only thing
+ * to remove.
+ */
+function syncReturningId(maybePromise: unknown): number {
+  const row = maybePromise as { id: number };
+  return row.id;
 }
 
 // ─── Path helpers ────────────────────────────────────────────────────────────

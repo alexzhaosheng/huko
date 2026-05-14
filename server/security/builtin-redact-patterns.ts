@@ -36,17 +36,21 @@ export type RedactPattern = {
 };
 
 export const BUILTIN_REDACT_PATTERNS: ReadonlyArray<RedactPattern> = [
-  // OpenAI: `sk-` then ~48 chars of base62. The 2024-2025 longer
-  // user/project keys (`sk-proj-...`, `sk-svcacct-...`) match too.
-  { name: "openai-key", pattern: "sk-[A-Za-z0-9_\\-]{20,}" },
+  // Anthropic: `sk-ant-...` followed by ~95+ chars of base62/`_-`.
+  // Listed BEFORE `openai-key` so the substitution row records the
+  // correct `source` (the scrubber iterates patterns in declaration
+  // order). Bounded at 200 chars so a runaway pattern can't absorb
+  // adjacent prose.
+  { name: "anthropic-key", pattern: "sk-ant-[A-Za-z0-9_\\-]{20,200}" },
 
-  // Anthropic: `sk-ant-...` followed by ~80 chars. The `sk-ant-`
-  // prefix is unique enough that the openai-key pattern above won't
-  // catch it without the dedicated entry first (alternation order
-  // doesn't matter much because compiled-regex engines pick the first
-  // that matches at a position, but the longest-match-on-vault rule
-  // is enforced separately).
-  { name: "anthropic-key", pattern: "sk-ant-[A-Za-z0-9_\\-]{20,}" },
+  // OpenAI: `sk-` (NOT `sk-ant-`) then ~48–80 chars of base62/`_-`.
+  // The negative lookahead `(?!ant-)` is the actual safety net —
+  // even if pattern order ever drifted, `sk-ant-…` strings won't be
+  // labelled `openai-key`. The 2024-2025 longer user/project keys
+  // (`sk-proj-...`, `sk-svcacct-...`) still match. Upper bound 128
+  // chars: comfortably covers all known variants without swallowing
+  // surrounding word characters in pasted JSON.
+  { name: "openai-key", pattern: "sk-(?!ant-)[A-Za-z0-9_\\-]{20,128}" },
 
   // GitHub personal-access tokens: `ghp_`, `gho_`, `ghu_`, `ghs_`,
   // `ghr_` followed by exactly 36 base62 chars.

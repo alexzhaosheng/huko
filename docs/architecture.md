@@ -69,7 +69,7 @@ These are cross-module contracts. Read them before designing a new module.
   - `InfraPersistence` stores providers, models, and user-global defaults in `~/.huko/infra.db`.
   - `SessionPersistence` stores sessions, tasks, and entries in `<cwd>/.huko/huko.db`.
   - The kernel must not directly import drizzle or better-sqlite3.
-- **API keys never enter the database.** `providers.api_key_ref` is a logical name. At runtime, `server/security/keys.ts` resolves it through three layers: `<cwd>/.huko/keys.json`, environment variables, then `<cwd>/.env`.
+- **API keys never enter the database.** `providers.api_key_ref` is a logical name. At runtime, `server/security/keys.ts` resolves it through four layers (highest first): `<cwd>/.huko/keys.json`, `~/.huko/keys.json`, `process.env.<REF_UPPER>_API_KEY`, then `<cwd>/.env`.
 
 ### Context Writes
 
@@ -130,6 +130,7 @@ These are cross-module contracts. Read them before designing a new module.
 | DB schema | `server/db/` | [db](./modules/db.md) | Two SQLite schemas: `schema/infra.ts` and `schema/session.ts`, each with migrations | OK |
 | Security | `server/security/` | [security](./modules/security.md) | API key resolution from `<cwd>/.huko/keys.json`, env, then `<cwd>/.env`; DB never stores keys | OK |
 | Orchestrator | `server/services/` | [orchestrator](./modules/orchestrator.md) | Kernel assembly point, now wired through persistence | OK |
+| Features | `server/services/features/` | [features](./modules/features.md) | Opt-in feature bundles: tool-group gating + chat-mode sidecar lifecycle | OK |
 | Daemon Gateway | `server/gateway.ts` | [gateway](./modules/gateway.md) | Socket.IO gateway plus a single `huko` wire event | OK |
 | Daemon Routers | `server/routers/` | [routers](./modules/routers.md) | tRPC control API for daemon use only | OK |
 | Daemon Bootstrap | `server/core/app.ts` | [app](./modules/app.md) | Express + WS + tRPC assembly | OK |
@@ -202,7 +203,7 @@ The current iteration is complete: Promise.race audit, SystemReminder collector,
 - ~~Added the "solve from the root" principle to CLAUDE.md.~~
 - ~~WeavesAI design research document: [agent-design-notes.md](./agent-design-notes.md).~~
 - ~~Split persistence into `InfraPersistence` and `SessionPersistence`.~~
-- ~~Decoupled API keys through `providers.api_key_ref` and the three-layer lookup in `server/security/keys.ts`.~~
+- ~~Decoupled API keys through `providers.api_key_ref` and the layered lookup in `server/security/keys.ts` (now four layers including `~/.huko/keys.json`).~~
 - ~~Added active session per cwd through `<cwd>/.huko/state.json`, default continuation, and `sessions current/switch/new`.~~
 - ~~Completed provider/model/keys CLI CRUD.~~
 - ~~Auto-generated `<cwd>/.huko/.gitignore` for `huko.db`, `keys.json`, and `state.json`.~~

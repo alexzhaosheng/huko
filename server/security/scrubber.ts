@@ -39,7 +39,7 @@
 
 import type { SessionPersistence, SubstitutionRecord } from "../persistence/types.js";
 import type { SessionType } from "../../shared/types.js";
-import { getConfig, isConfigLoaded } from "../config/index.js";
+import { getConfig } from "../config/index.js";
 import { loadVault } from "./vault.js";
 import { BUILTIN_REDACT_PATTERNS, type RedactPattern } from "./builtin-redact-patterns.js";
 
@@ -236,7 +236,7 @@ async function allocateScrubLabel(ctx: ScrubContext): Promise<string> {
 
 function collectAllPatterns(): RedactPattern[] {
   const out: RedactPattern[] = [...BUILTIN_REDACT_PATTERNS];
-  if (!isConfigLoaded()) return out;
+  // getConfig() self-loads; user-supplied patterns merge with built-ins.
   const userPatterns = getConfig().safety.redactPatterns;
   if (Array.isArray(userPatterns)) {
     for (const p of userPatterns) {

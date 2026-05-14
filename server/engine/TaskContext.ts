@@ -243,9 +243,15 @@ export class TaskContext {
     return "done";
   }
 
-  consumeInterjectionFlag(): boolean {
-    const v = this.interjected;
+  /**
+   * Reset the interjection flag. The task loop calls this once per
+   * iteration before invoking the LLM so a previously-set interjection
+   * doesn't linger. The flag is set externally by
+   * `TaskLoop.interject()` and observed by other parts of the loop
+   * (e.g. compaction); there is currently no consumer that needs the
+   * previous value at this point.
+   */
+  clearInterjectionFlag(): void {
     this.interjected = false;
-    return v;
   }
 }

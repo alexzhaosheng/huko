@@ -13,12 +13,12 @@
  *   - `TaskOrchestrator` — built around the SessionPersistence; receives
  *     a pre-resolved ResolvedModel per call from the caller (run.ts).
  *
- * Two modes:
+ * Two modes (`{ mode }`, required):
  *
- *   1. Default (persistent):
+ *   1. `"persistent"`:
  *        - SqliteSessionPersistence at <cwd>/.huko/huko.db
  *
- *   2. Ephemeral (`{ ephemeral: true }`, surfaced as `--memory` on the CLI):
+ *   2. `"memory"` (surfaced as `--memory` on the CLI):
  *        - MemorySessionPersistence (sessions/tasks/entries vanish on exit)
  *
  * Note: `--memory` only swaps the SESSION layer. InfraConfig is read
@@ -43,37 +43,75 @@ import {
   type SessionPersistence,
 } from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
-import { loadConfig, loadInfraConfig, type InfraConfig } from "../config/index.js";
+import { getConfig, loadConfig, loadInfraConfig, type InfraConfig } from "../config/index.js";
+import { listToolNames, setEnabledFeatures } from "../task/tools/registry.js";
+import {
+  assertNoNameCollisionsWithTools,
+  computeEnabledFeatures,
+  type FeaturesConfig,
+} from "../services/features/index.js";
 import type { Formatter } from "./formatters/index.js";
 
+export type SessionMode = "persistent" | "memory";
+
 export type BootstrapOptions = {
-  /** When true, the session DB is in-memory; .huko/state.json untouched. */
-  ephemeral?: boolean;
+  /**
+   * Session-layer mode. `"persistent"` opens the SQLite DB under
+   * `<cwd>/.huko/`; `"memory"` runs entirely in-memory. Required so
+   * every callsite makes the choice explicit — there is no sensible
+   * default that's both safe (don't write to disk by surprise) and
+   * useful (you usually DO want persistence).
+   */
+  mode: SessionMode;
+  /**
+   * Per-call feature overrides (`--enable=X` / `--disable=X`). Merged
+   * as the `explicit` layer on top of file-based config, so CLI flags
+   * win over project, project wins over user, user wins over default.
+   */
+  featureOverrides?: FeaturesConfig;
 };
 
 export type CliBootstrap = {
   infra: InfraConfig;
   session: SessionPersistence;
   orchestrator: TaskOrchestrator;
+  /** Features whose sidecars chat-mode should spawn; empty in step-3. */
+  enabledFeatures: Set<string>;
   shutdown(): void;
 };
 
 export async function bootstrap(
   formatter: Formatter,
-  options: BootstrapOptions = {},
+  options: BootstrapOptions,
 ): Promise<CliBootstrap> {
   // Load runtime config eagerly. Not strictly required — getConfig()
   // self-loads on first access — but bootstrap is the canonical entry
   // and this lets us surface any malformed-config warnings up front
   // rather than at the first kernel read.
-  loadConfig({ cwd: process.cwd() });
+  loadConfig({
+    cwd: process.cwd(),
+    ...(options.featureOverrides
+      ? { explicit: { features: options.featureOverrides } }
+      : {}),
+  });
+
+  // Feature gating: cross-check tool/feature name collision, resolve
+  // the enabled set from the merged config (file layers + CLI overrides),
+  // pipe it into the tool registry so feature-tagged tools materialise
+  // (or stay hidden) consistently. Sidecar lifecycle is owned by chat-
+  // mode (see chat.ts) — bootstrap only handles the tool-visibility
+  // side, which both chat and one-shot runs share.
+  assertNoNameCollisionsWithTools(listToolNames());
+  const enabledFeatures = computeEnabledFeatures(getConfig().features);
+  setEnabledFeatures(enabledFeatures);
 
   // Infra config is sync, file-based. Same in both persistent and
-  // ephemeral modes — providers / models are user configuration, not
+  // memory modes — providers / models are user configuration, not
   // session state.
   const infra = loadInfraConfig({ cwd: process.cwd() });
 
-  const session: SessionPersistence = options.ephemeral
+  const memory = options.mode === "memory";
+  const session: SessionPersistence = memory
     ? new MemorySessionPersistence()
     : new SqliteSessionPersistence({ cwd: process.cwd() });
 
@@ -86,9 +124,9 @@ export async function bootstrap(
 
   // Heal any orphan tasks left over from a crashed previous process —
   // mark them failed, inject synthetic tool_results to keep history valid
-  // for any future continue-conversation. Skipped in ephemeral mode (the
+  // for any future continue-conversation. Skipped in memory mode (the
   // memory backend has nothing to find).
-  if (!options.ephemeral) {
+  if (!memory) {
     const report = await orchestrator.recoverOrphans();
     if (report.healed > 0) {
       const now = Date.now();
@@ -110,6 +148,7 @@ export async function bootstrap(
     infra,
     session,
     orchestrator,
+    enabledFeatures,
     shutdown() {
       try {
         void session.close();

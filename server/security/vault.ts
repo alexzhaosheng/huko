@@ -125,6 +125,7 @@ export type AddVaultResult =
  * Insert or update an entry. Throws on:
  *   - empty / non-conforming name
  *   - value shorter than MIN_VAULT_VALUE_LENGTH
+ *   - existing vault.json present but unparseable (refuse to clobber)
  */
 export function addVaultEntry(name: string, value: string): AddVaultResult {
   if (!VAULT_NAME_RE.test(name)) {
@@ -140,7 +141,9 @@ export function addVaultEntry(name: string, value: string): AddVaultResult {
     );
   }
 
-  const entries = loadVault();
+  // Use the strict reader so a corrupt vault.json blocks the write
+  // rather than silently overwriting it with a one-entry list.
+  const entries = readVaultStrictForWrite();
   const idx = entries.findIndex((e) => e.name === name);
   let result: AddVaultResult;
   if (idx >= 0) {
@@ -158,7 +161,9 @@ export function addVaultEntry(name: string, value: string): AddVaultResult {
 
 /** Remove by name. Returns true if anything was actually removed. */
 export function removeVaultEntry(name: string): boolean {
-  const entries = loadVault();
+  // Same strict-read protection as addVaultEntry — never overwrite a
+  // corrupt vault.json with a smaller list.
+  const entries = readVaultStrictForWrite();
   const next = entries.filter((e) => e.name !== name);
   if (next.length === entries.length) return false;
   writeVault(next);
@@ -174,4 +179,65 @@ function writeVault(entries: VaultEntry[]): void {
   // Atomic + 0o600 in a single open() — no permission race, no
   // truncated file if we crash mid-write. See atomic-write.ts.
   atomicWriteFile(p, JSON.stringify({ entries: sorted }, null, 2) + "\n", 0o600);
+}
+
+/**
+ * Read vault.json for a WRITE path — throw rather than swallow errors.
+ *
+ * `loadVault()` is intentionally permissive: the scrubber is on the hot
+ * path of every outbound message, so a corrupted vault should never
+ * crash a task. But that permissiveness is dangerous in the write
+ * path: addVaultEntry / removeVaultEntry would silently load `[]` from
+ * a broken file, mutate the empty list, and overwrite the original —
+ * data loss with no warning.
+ *
+ * This variant differs from loadVault in exactly one way: if vault.json
+ * exists with non-empty contents and isn't parseable as
+ * `{ entries: [...] }`, it throws with a message pointing the operator
+ * at the file. Individual malformed entry objects are still skipped
+ * silently (they don't tell us anything about the file's integrity
+ * overall).
+ */
+function readVaultStrictForWrite(): VaultEntry[] {
+  const p = vaultPath();
+  if (!existsSync(p)) return [];
+  const raw = readFileSync(p, "utf8");
+  if (raw.trim().length === 0) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `vault: existing ${p} is not valid JSON (${msg}). Refusing to ` +
+        `overwrite — inspect or remove the file manually before adding ` +
+        `new entries. (If the file is recoverable, fix the JSON and rerun.)`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `vault: ${p} is not an object with the expected { entries: [...] } shape. ` +
+        `Refusing to overwrite.`,
+    );
+  }
+  const entries = (parsed as { entries?: unknown }).entries;
+  if (!Array.isArray(entries)) {
+    throw new Error(
+      `vault: ${p}.entries is not an array. Refusing to overwrite.`,
+    );
+  }
+  const out: VaultEntry[] = [];
+  for (const e of entries) {
+    if (
+      e !== null &&
+      typeof e === "object" &&
+      typeof (e as VaultEntry).name === "string" &&
+      typeof (e as VaultEntry).value === "string" &&
+      typeof (e as VaultEntry).addedAt === "number"
+    ) {
+      out.push(e as VaultEntry);
+    }
+  }
+  return out;
 }

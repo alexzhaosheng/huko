@@ -150,13 +150,22 @@ export async function sessionsCurrentCommand(): Promise<number> {
     return 0;
   }
 
-  // Active pointer exists but DB went missing — recoverable, surface
-  // as a stale-pointer notice (same as before).
-  if (!hasSessionDb(cwd)) {
-    process.stdout.write(
-      `${id} (no longer in DB; next run will create a fresh session)\n`,
+  // Active pointer exists but DB went missing — recoverable, but the
+  // pointer is stale. stdout stays a clean machine-readable id (or
+  // `(none)`); the human diagnostic goes to stderr and we return 4
+  // so `id=$(huko sessions current)` doesn't capture garbage when
+  // the active session has been deleted out from under us.
+  const reportStale = (): void => {
+    process.stdout.write("(none)\n");
+    process.stderr.write(
+      `huko: active pointer references session ${id} but it is not in this project's DB ` +
+        `(next run will create a fresh session)\n`,
     );
-    return 0;
+  };
+
+  if (!hasSessionDb(cwd)) {
+    reportStale();
+    return 4;
   }
 
   let persistence: SessionPersistence | null = null;
@@ -164,21 +173,17 @@ export async function sessionsCurrentCommand(): Promise<number> {
     persistence = new SqliteSessionPersistence({ cwd });
     const row = await persistence.sessions.get(id);
     if (!row) {
-      process.stdout.write(
-        `${id} (no longer in DB; next run will create a fresh session)\n`,
-      );
-    } else {
-      process.stdout.write(
-        `${row.id}  ${row.title || "(untitled)"}\n`,
-      );
+      reportStale();
+      return 4;
     }
+    process.stdout.write(
+      `${row.id}  ${row.title || "(untitled)"}\n`,
+    );
     return 0;
   } catch (err) {
     if (isMissingTableError(err)) {
-      process.stdout.write(
-        `${id} (no longer in DB; next run will create a fresh session)\n`,
-      );
-      return 0;
+      reportStale();
+      return 4;
     }
     process.stderr.write(`huko: sessions current failed: ${describe(err)}\n`);
     return 1;

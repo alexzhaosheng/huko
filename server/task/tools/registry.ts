@@ -11,7 +11,7 @@
 
 import type { Tool, ToolParameterSchema } from "../../core/llm/types.js";
 import type { TaskContext } from "../../engine/TaskContext.js";
-import { getConfig, isConfigLoaded } from "../../config/index.js";
+import { getConfig } from "../../config/index.js";
 
 // ─── ToolHandlerResult ────────────────────────────────────────────────────────
 
@@ -92,6 +92,8 @@ export type ServerToolDefinition = Tool & {
    * degrading default-mode reliability.
    */
   leanDescription?: string;
+  /** Tool belongs to a feature bundle; hidden when that feature is disabled. */
+  feature?: string;
 };
 
 export type WorkstationToolDefinition = ServerToolDefinition;
@@ -123,6 +125,21 @@ export type RegisteredTool =
 
 const registry = new Map<string, RegisteredTool>();
 
+// ─── Feature gating ──────────────────────────────────────────────────────────
+//
+// Tools tagged with `feature: "X"` are filtered out of `getToolsForLLM` and
+// `getToolPromptHints` whenever "X" is not in `enabledFeatures`. Populated by
+// `setEnabledFeatures()`, which chat-mode bootstrap will call once feature
+// config is resolved. Empty by default → any tool with a feature tag is
+// hidden until something opts it in.
+
+const enabledFeatures = new Set<string>();
+
+export function setEnabledFeatures(names: Iterable<string>): void {
+  enabledFeatures.clear();
+  for (const n of names) enabledFeatures.add(n);
+}
+
 // ─── Registration ─────────────────────────────────────────────────────────────
 
 export function registerServerTool(
@@ -152,6 +169,7 @@ export function registerWorkstationTool(definition: WorkstationToolDefinition): 
 export function _resetRegistryForTests(): void {
   registry.clear();
   policyRegistry.clear();
+  enabledFeatures.clear();
 }
 
 // ─── Lookup ──────────────────────────────────────────────────────────────────
@@ -204,6 +222,7 @@ export function getToolsForLLM(filter?: ToolFilter | ToolFilterContext): Tool[] 
     // both server and workstation tools. Stronger than `deny` patterns
     // (which still expose the tool to the LLM and refuse at execution).
     if (safetyDisabled.has(name)) continue;
+    if (t.definition.feature !== undefined && !enabledFeatures.has(t.definition.feature)) continue;
     out.push(materialise(t.definition, matCtx));
   }
   return out;
@@ -211,13 +230,11 @@ export function getToolsForLLM(filter?: ToolFilter | ToolFilterContext): Tool[] 
 
 /**
  * Pull the set of tool names whose merged safety config has
- * `disabled: true`. Best-effort: if the config hasn't been loaded yet
- * (some test paths skip bootstrap), returns an empty set rather than
- * forcing a load — calling `getConfig()` before `loadConfig()` would
- * surface a misleading "config not loaded" error in surprising places.
+ * `disabled: true`. `getConfig()` self-loads on first access so this
+ * works whether or not bootstrap has run — no fail-open guard, no
+ * "config not loaded" surprise.
  */
 function collectSafetyDisabledTools(): Set<string> {
-  if (!isConfigLoaded()) return new Set();
   const out = new Set<string>();
   const rules = getConfig().safety.toolRules;
   for (const [name, rule] of Object.entries(rules)) {
@@ -301,6 +318,7 @@ export function getToolPromptHints(
     if (ctx.allowedTools !== undefined && !ctx.allowedTools.includes(name)) continue;
     if (ctx.deniedTools?.includes(name)) continue;
     if (ctx.predicate && !ctx.predicate(name, t.kind)) continue;
+    if (t.definition.feature !== undefined && !enabledFeatures.has(t.definition.feature)) continue;
     const hint = t.definition.promptHint;
     if (hint && hint.trim().length > 0) {
       out.push(hint.trim());

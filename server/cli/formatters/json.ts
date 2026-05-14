@@ -74,6 +74,11 @@ export function makeJsonFormatter(): Formatter {
           promptTokens: summary.promptTokens,
           completionTokens: summary.completionTokens,
           totalTokens: summary.totalTokens,
+          // Anthropic / OpenAI report prompt-cache hits separately. JSON
+          // consumers budgeting spend need this breakdown — 0 is a real
+          // value (no cache today), not "missing".
+          cachedTokens: summary.cachedTokens,
+          cacheCreationTokens: summary.cacheCreationTokens,
         },
         iterationCount: summary.iterationCount,
         toolCallCount: summary.toolCallCount,

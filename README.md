@@ -1,8 +1,10 @@
 # huko
 
-> An explicit, scriptable AI agent for the command line.
+> A project-scoped AI agent for the command line — end-to-end task planning, tool use, and code-reading built in.
 
-`huko` is a CLI that turns any LLM into a unix-friendly tool: pipe data in, get the answer out, exit code matches the result. State lives in your project directory (`.huko/`), agent capabilities are layered and inspectable, and the whole thing runs in a Docker sandbox when you want it to.
+`huko` is not a prompt utility. Give it a *goal* — *"find why the /api/users endpoint started returning 500"*, *"add Google OAuth following the existing auth patterns"*, *"audit deps for known CVEs"* — and the agent drives the loop: planning next steps, reading your project's code, running shell, calling tools, deciding when the work is actually done. Multiple turns happen inside one invocation, automatically.
+
+State (`sessions`, agent history, `keys`) lives in your project's `.huko/` like `.git`; optional Docker sandbox; per-tool safety policy; multi-provider.
 
 ```bash
 # Install
@@ -12,24 +14,25 @@ npm install -g @alexzhaosheng/huko
 huko setup
 
 # Use
-huko -- "fix the failing test in tests/auth.test.ts"
-cat errors.log | huko -- "extract the root cause" > summary.txt
-huko --json -- "list open ports as JSON" > ports.json
-huko docker run -- "audit dependencies for known CVEs"   # sandboxed
+huko -- "the /api/users endpoint is returning 500 — read the handler, follow the imports, find the root cause"
+huko -- "add Google OAuth to the login flow, follow the existing auth patterns in src/auth/"
+cat logs/recent.log | huko -- "are these errors caused by my recent commits? check git history and tell me which commit"
+huko docker run -- "audit dependencies for unmaintained packages and known CVEs"   # sandboxed
 ```
 
 ---
 
 ## Why huko
 
-- **Pipe-friendly.** `cat data | huko -- "instruction"` works the way `grep` and `jq` do — stdin is data, argv is the operation. stdout is the answer; stderr is diagnostics. Pipe-friendly all the way through.
-- **Project as context.** State (`sessions`, `keys`, `config`) lives in `<cwd>/.huko/` like `.git`. CD into a repo and huko has its memory; CD out and you're in a different world.
+- **Agent loop, not prompt+reply.** Give huko a goal and the model drives — reads your code, runs shell, plans next steps, calls tools, decides when it's done. "Fix this bug" instead of "tell me about this bug". Multi-turn happens inside one invocation, automatically; the framework manages context-window compaction, orphan recovery, and the task lifecycle so you don't have to wire any of it.
+- **Project as context.** State (`sessions`, `keys`, `config`) lives in `<cwd>/.huko/` like `.git`. CD into a repo and huko has its memory; CD out and you're in a different world. The agent reads files relative to that cwd, edits within it, and never reaches into a sibling project unless you point it there.
 - **Provider-agnostic.** Anthropic / OpenAI / DeepSeek / Zhipu / MiniMax / OpenRouter / Moonshot / your own gateway. Switch with `huko provider current <name>` or `huko model current <id>`.
 - **Sandboxable.** `huko docker run -- "..."` runs the agent in a container with your project mounted at `/work`. Filesystem isolation by default; pipes still work.
 - **Tool-level safety.** Per-tool `disable` / `deny` / `allow` / `requireConfirm` rules. Disabled tools disappear from the LLM's surface entirely — it can't call what it can't see. Per-project by default; layered with global.
 - **Three-layer redaction.** Built-in regex scrubs OpenAI / Anthropic / GitHub / AWS / PEM / JWT shapes from every outbound message; a global vault registers exact strings (`huko vault add github-token`) that never leave the machine; auto-allocated placeholders work BOTH ways — the LLM uses `[REDACTED:foo]` symbolically in tool calls and we expand to the real value before execution.
 - **Explicit configuration.** Layered: built-in → `~/.huko/` → `<cwd>/.huko/`. Every value `huko config show` reports its layer of origin.
-- **Two modes.** `full` for production-grade agent work (planning, ~13 tools, project context). `lean` for one-shot questions (~85% smaller per-call overhead).
+- **Two modes.** `full` for production-grade agent work (planning, ~13 tools, project context). `lean` for one-shot questions (~85% smaller per-call overhead — the loop still runs, just with one tool and a minimal system prompt).
+- **Pipes work, when you want them.** `cat data | huko -- "..."` combines: stdin is data, argv is the instruction. Good for ad-hoc workflows where the agent should ingest pipe content as its starting input — but pipe-friendliness is a convenience here, not the product.
 
 ---
 
@@ -78,11 +81,11 @@ That's the full happy path. Everything else is variations on the same shape.
 ### Pipe data in, get the answer out
 
 ```bash
-cat errors.log     | huko -- "extract the root cause in one sentence"
-git diff           | huko -- "review for risky changes"
-ss -tulpn          | huko --json -- "list open ports as JSON" > ports.json
-echo "say hi"      | huko                    # stdin alone is the prompt
-huko < prompt.txt                            # file redirect works the same
+cat logs/recent.log | huko -- "are these errors caused by my recent commits? check git and find culprits"
+git diff            | huko -- "review for risky changes — read the affected files for context if needed"
+ss -tulpn           | huko --json -- "list open ports as JSON" > ports.json
+echo "say hi"       | huko                    # stdin alone is the prompt (lean-style usage)
+huko < prompt.txt                             # file redirect works the same
 ```
 
 When stdin is piped AND argv has a prompt, they combine: stdin is treated as input data, argv as the instruction. Mirrors how `grep`/`jq`/`awk` feel.
@@ -189,6 +192,50 @@ huko safety disable web_fetch                # see Safety section above
 ```
 
 Or just edit the JSON files directly — huko reads them on every run, no caching.
+
+---
+
+## Local LLMs
+
+huko speaks OpenAI-compatible HTTP, so any local server that does — **Ollama**, **LM Studio**, **vLLM**, **llama.cpp's `llama-server`**, **LocalAI**, **text-generation-webui** — registers the same way as a hosted provider. Below uses Ollama; the others differ only in `--base-url`.
+
+```bash
+# 1. Start the local server + pull a model.
+ollama serve &
+ollama pull qwen2.5-coder:7b
+
+# 2. Register a key reference. Most local servers ignore the value but
+#    expect SOME string in the Authorization header — pick any placeholder.
+huko keys set ollama          # interactive (hidden prompt) — type 'EMPTY' or anything
+
+# 3. Register the provider. Protocol is `openai` (= OpenAI-compatible API).
+huko provider add \
+  --name=ollama \
+  --protocol=openai \
+  --base-url=http://127.0.0.1:11434/v1 \
+  --api-key-ref=ollama
+
+# 4. Register the model under that provider; make it current.
+huko model add \
+  --provider=ollama \
+  --model-id=qwen2.5-coder:7b \
+  --context-window=32768 \
+  --tool-call-mode=native \
+  --current
+
+# 5. Use it.
+huko -- "read main.ts and explain the architecture"
+```
+
+**Notes:**
+
+- `--context-window=` is required for local models — huko sizes compaction thresholds against it. Grab the right number from the model card or `ollama show <model>` (look for `context length`).
+- `--tool-call-mode=native` works when the model + server both implement OpenAI function calling (Qwen 2.5, Llama 3.1, DeepSeek family, recent Ollama). If you see empty / ignored tool calls in responses, switch to `--tool-call-mode=xml` — huko will encode tool calls inside the prompt and parse them from the model's text reply. Slower and a bit less reliable, but works with any model that can follow instructions.
+- Other servers' default ports: **LM Studio** `http://127.0.0.1:1234/v1`, **vLLM** `http://127.0.0.1:8000/v1`, **llama.cpp `llama-server`** `http://127.0.0.1:8080/v1`. All keep `--protocol=openai`.
+- Custom headers (internal gateway, corporate proxy, etc.) — `--header=X-Foo=bar` on `provider add`, repeatable.
+- Project-scoped registration: pass `--project` on `provider add` / `model add` to write to `<cwd>/.huko/providers.json` instead of the global `~/.huko/providers.json`. Useful when a single project pins to a specific local model the rest of your machine doesn't use.
+
+Small models (7B-and-below) typically struggle to keep a multi-step agent loop coherent — they hallucinate file paths, forget which tool they just called, or repeat themselves. **Lean mode** (`huko --lean -- "..."`) is the right pairing: minimal system prompt, just `bash` as the tool, far less for the model to juggle. For the full agent surface, you'll generally want a 32B+ model or a hosted frontier model.
 
 ---
 

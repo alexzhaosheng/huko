@@ -73,3 +73,39 @@ await build({
 });
 
 console.log(`  build metadata: commit=${commit} built=${buildDate}`);
+
+// Sanity-check the produced bundle by running `node dist/cli.js --version`
+// and parsing the stdout. Without this, `npm publish` of a mis-built
+// tree would ship `(dev)` to the registry and lie to every user about
+// the version. The subprocess invocation is necessary because the
+// bundle's entry runs `main()` on import — we can't just `import()`
+// it for inspection. The check is one short spawn (~50ms) and catches
+// dropped `--define`, accidentally-published source trees, etc.
+const versionOut = execSync("node dist/cli.js --version", {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
+}).trim();
+
+// `formatVersion()` shape: "huko vX.Y.Z (commit shortsha, built YYYY-MM-DD)"
+// We don't pin the regex to the version; we just look for `commit <sha>`.
+const m = /commit ([0-9a-f]+).*built (\d{4}-\d{2}-\d{2})/.exec(versionOut);
+if (!m) {
+  console.error(
+    `  build check: dist/cli.js --version output did not include commit+date.\n` +
+      `    output: ${JSON.stringify(versionOut)}\n` +
+      `    expected: the esbuild --define for __HUKO_COMMIT__ / __HUKO_BUILD_DATE__\n` +
+      `              to land in the bundle. \`huko --version\` would say (dev).\n` +
+      `              Aborting build.`,
+  );
+  process.exit(1);
+}
+const [, bundleCommit, bundleDate] = m;
+if (bundleCommit !== commit || bundleDate !== buildDate) {
+  console.error(
+    `  build check: bundled metadata doesn't match what we tried to inject.\n` +
+      `    injected:  commit=${commit} built=${buildDate}\n` +
+      `    in bundle: commit=${bundleCommit} built=${bundleDate}`,
+  );
+  process.exit(1);
+}
+console.log(`  build check:    bundle reports commit=${bundleCommit} date=${bundleDate}`);
