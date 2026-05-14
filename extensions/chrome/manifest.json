@@ -11,14 +11,14 @@
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
-      "16": "icon-16.png",
-      "48": "icon-48.png",
-      "128": "icon-128.png"
+      "16": "huko_red.png",
+      "48": "huko_red.png",
+      "128": "huko_red.png"
     }
   },
   "icons": {
-    "16": "icon-16.png",
-    "48": "icon-48.png",
-    "128": "icon-128.png"
+    "16": "huko.png",
+    "48": "huko.png",
+    "128": "huko.png"
   }
 }
