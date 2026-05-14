@@ -33,6 +33,18 @@ import {
 export type InstallAskHandlerOptions = {
   orchestrator: TaskOrchestrator;
   format: "text" | "jsonl" | "json";
+  /**
+   * Caller-supplied Prompter to share. Required for chat mode, where
+   * the REPL already owns a Prompter on stdin and a second one would
+   * bind a competing readline interface — producing duplicate echo
+   * ("llm" → "llllmm") and stealing lines into the REPL's queue
+   * (apparent "agent self-starts a task on its own input").
+   *
+   * When omitted (one-shot `huko -- ...` calls), this handler lazily
+   * opens its own Prompter — that's fine because in one-shot mode no
+   * other component is reading stdin concurrently.
+   */
+  prompter?: Prompter;
 };
 
 export type AskHandlerHandle = {
@@ -43,12 +55,16 @@ export type AskHandlerHandle = {
 export function installAskHandler(
   opts: InstallAskHandlerOptions,
 ): AskHandlerHandle {
-  let prompter: Prompter | null = null;
+  // Distinguish "we own this Prompter, we close it" from "caller owns
+  // this Prompter, we don't touch its lifecycle". Closing a Prompter we
+  // don't own would yank stdin out from under the caller mid-session.
+  let ownedPrompter: Prompter | null = null;
   let closed = false;
 
   function ensurePrompter(): Prompter {
-    if (!prompter) prompter = openPrompter();
-    return prompter;
+    if (opts.prompter) return opts.prompter;
+    if (!ownedPrompter) ownedPrompter = openPrompter();
+    return ownedPrompter;
   }
 
   async function handle(event: AskUserEvent): Promise<void> {
@@ -140,9 +156,11 @@ export function installAskHandler(
       if (closed) return;
       closed = true;
       unsubscribe();
-      if (prompter) {
-        prompter.close();
-        prompter = null;
+      // Only close the Prompter if WE owned it. A caller-supplied one
+      // stays alive for the caller to close at its own teardown.
+      if (ownedPrompter) {
+        ownedPrompter.close();
+        ownedPrompter = null;
       }
     },
   };

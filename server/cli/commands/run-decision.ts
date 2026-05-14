@@ -32,6 +32,13 @@ import {
 export type InstallDecisionHandlerOptions = {
   orchestrator: TaskOrchestrator;
   format: "text" | "jsonl" | "json";
+  /**
+   * Caller-supplied Prompter to share. See the same option on
+   * installAskHandler for the rationale — chat mode MUST inject its
+   * REPL Prompter here, otherwise two readline interfaces bind to
+   * stdin and produce duplicate echo + line-queue collisions.
+   */
+  prompter?: Prompter;
 };
 
 export type DecisionHandlerHandle = {
@@ -42,12 +49,14 @@ export type DecisionHandlerHandle = {
 export function installDecisionHandler(
   opts: InstallDecisionHandlerOptions,
 ): DecisionHandlerHandle {
-  let prompter: Prompter | null = null;
+  // Same ownership rule as run-ask.ts: only close Prompters we created.
+  let ownedPrompter: Prompter | null = null;
   let closed = false;
 
   function ensurePrompter(): Prompter {
-    if (!prompter) prompter = openPrompter();
-    return prompter;
+    if (opts.prompter) return opts.prompter;
+    if (!ownedPrompter) ownedPrompter = openPrompter();
+    return ownedPrompter;
   }
 
   async function handle(event: DecisionRequiredEvent): Promise<void> {
@@ -138,9 +147,9 @@ export function installDecisionHandler(
       if (closed) return;
       closed = true;
       unsubscribe();
-      if (prompter) {
-        prompter.close();
-        prompter = null;
+      if (ownedPrompter) {
+        ownedPrompter.close();
+        ownedPrompter = null;
       }
     },
   };

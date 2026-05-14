@@ -21,6 +21,14 @@
  *     current task only (consistent with one-shot huko); a second
  *     consecutive Ctrl+C forces process exit (also consistent).
  *
+ * stdin ownership invariant:
+ *   The REPL, the ask handler, and the decision handler ALL need to
+ *   read user replies, but they MUST share ONE readline interface on
+ *   stdin. Two interfaces would each echo every keystroke and each
+ *   buffer every Enter — producing duplicate echo ("llm" → "llllmm")
+ *   and "lines I typed for an ask suddenly fire as REPL turns". So we
+ *   open one Prompter here and inject it into both handlers.
+ *
  * Slash commands (v1, minimal):
  *   /exit  /quit       leave the REPL cleanly
  *   /new                start a fresh session, switch active to it
@@ -130,14 +138,25 @@ export async function chatCommand(args: RunArgs): Promise<number> {
       ...(featureOverrides ? { featureOverrides } : {}),
     });
 
+    // Open the REPL's Prompter FIRST so we can share it with the ask
+    // and decision handlers. Three readline interfaces on stdin produce
+    // duplicate echo and queue-stealing — share one instead. See the
+    // `prompter` option docs on installAskHandler for the full story.
+    prompter = openPrompter();
+
     // Subscribe to ask/decision events on the orchestrator (no
     // monkey-patching, no ordering rule — orchestrator already exists).
     const handlerFormat: "text" | "json" | "jsonl" =
       args.format === "text" ? "text" : args.format === "json" ? "json" : "jsonl";
-    askHandle = installAskHandler({ orchestrator: ctx.orchestrator, format: handlerFormat });
+    askHandle = installAskHandler({
+      orchestrator: ctx.orchestrator,
+      format: handlerFormat,
+      prompter,
+    });
     decisionHandle = installDecisionHandler({
       orchestrator: ctx.orchestrator,
       format: handlerFormat,
+      prompter,
     });
 
     const model = ctx.infra.currentModel;
@@ -196,7 +215,8 @@ export async function chatCommand(args: RunArgs): Promise<number> {
     }
 
     // ── REPL loop ─────────────────────────────────────────────────────────
-    prompter = openPrompter();
+    // `prompter` was opened above (so the ask/decision handlers can
+    // share it). Reuse it here — DO NOT call openPrompter() again.
     while (true) {
       let line: string;
       try {
@@ -244,9 +264,12 @@ export async function chatCommand(args: RunArgs): Promise<number> {
     // session/emitter, and we don't want session.close() to race them.
     await stopAllSidecars();
     process.off("SIGINT", onSigint);
-    if (prompter) prompter.close();
+    // Order matters: close handlers FIRST (they hold a reference to the
+    // shared prompter but won't close it because we own it), THEN close
+    // the prompter itself.
     askHandle?.close();
     decisionHandle?.close();
+    if (prompter) prompter.close();
     if (ctx) ctx.shutdown();
     if (lock) lock.release();
   }
