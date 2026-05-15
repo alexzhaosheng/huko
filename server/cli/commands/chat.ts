@@ -92,7 +92,10 @@ export async function chatCommand(args: RunArgs): Promise<number> {
 
   // Formatter (same plumbing as run.ts). getConfig() self-loads.
   const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
-  const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
+  const formatter = makeFormatter(args.format, {
+    verbose: effectiveVerbose,
+    renderMarkdown: !args.noMarkdown,
+  });
 
   // SIGINT handling: first → stop current task; second consecutive →
   // force exit. Same semantics as one-shot huko.
