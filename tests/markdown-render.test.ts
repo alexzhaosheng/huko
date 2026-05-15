@@ -207,4 +207,12 @@ describe("renderMd — edge cases", () => {
       assert.ok(!result.endsWith("\n"), `unexpected trailing newline: ${JSON.stringify(result)}`);
     });
   });
+
+  it("badly formed markdown does NOT throw — falls back to raw text", () => {
+    // Malformed input that the parser might choke on (unclosed code fence,
+    // mismatched tags, deeply nested lists).  renderMd must never throw.
+    withTTY(true, false, () => {
+      assert.doesNotThrow(() => renderMd("```\nunclosed"));
+    });
+  });
 });
