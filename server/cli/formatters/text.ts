@@ -23,6 +23,7 @@
 import type { Emitter } from "../../engine/SessionContext.js";
 import type { Formatter } from "./types.js";
 import { dim, magenta, red, yellow } from "../colors.js";
+import { renderMd } from "./markdown.js";
 
 const dimErr = (s: string) => dim(s, "stderr");
 const yellowErr = (s: string) => yellow(s, "stderr");
@@ -295,11 +296,14 @@ function renderMessageCall(args: unknown): boolean {
   if (text === null) return false;
 
   if (type === "result") {
-    process.stdout.write(text + "\n");
+    // Render markdown to ANSI when stdout is a TTY (terminal).
+    // Piped stdout stays raw — pipe consumers get plain markdown.
+    process.stdout.write(renderMd(text) + "\n");
     return true;
   }
   if (type === "info") {
-    process.stderr.write(text + "\n");
+    // Info messages may also contain light markdown (e.g. lists).
+    process.stderr.write(renderMd(text, { target: "stderr" }) + "\n");
     return true;
   }
   return false;
