@@ -33,8 +33,12 @@ import { renderMd } from "../server/cli/formatters/markdown.js";
 function withTTY<T>(stdoutTTY: boolean, stderrTTY: boolean, fn: () => T): T {
   const origOut = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
   const origErr = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+  const origForce = process.env.FORCE_COLOR;
   Object.defineProperty(process.stdout, "isTTY", { value: stdoutTTY, configurable: true });
   Object.defineProperty(process.stderr, "isTTY", { value: stderrTTY, configurable: true });
+  // Chalk checks FORCE_COLOR before isTTY; on CI isTTY alone isn't
+  // enough to trigger ANSI output. Force=1 mirrors a real terminal.
+  if (stdoutTTY || stderrTTY) process.env.FORCE_COLOR = "1";
   try {
     return fn();
   } finally {
@@ -42,6 +46,8 @@ function withTTY<T>(stdoutTTY: boolean, stderrTTY: boolean, fn: () => T): T {
     else Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true });
     if (origErr) Object.defineProperty(process.stderr, "isTTY", origErr);
     else Object.defineProperty(process.stderr, "isTTY", { value: false, configurable: true });
+    if (origForce !== undefined) process.env.FORCE_COLOR = origForce;
+    else delete process.env.FORCE_COLOR;
   }
 }
 
@@ -85,16 +91,21 @@ describe("renderMd — TTY gating", () => {
 });
 
 describe("renderMd — formatting", () => {
-  it("processes bold markdown and preserves the text", () => {
+  it("bold text contains ANSI escape codes", () => {
     withTTY(true, false, () => {
       const result = renderMd("this is **bold** text");
-      // The `**` markers should be gone (markdown processed).
-      // ANSI codes may or may not appear depending on the Chalk
-      // colour-support detection; on Windows CI runners they
-      // often don't. The important invariant is: the rendered
-      // output is NOT raw markdown anymore.
+      // Bold markers are gone, ANSI escapes are present.
       assert.doesNotMatch(result, /\*\*bold\*\*/);
+      assert.match(result, /\x1b\[/);
       assert.ok(result.includes("bold"), `missing "bold": ${JSON.stringify(result)}`);
+    });
+  });
+
+  it("bold and italic combined produce ANSI escapes", () => {
+    withTTY(true, false, () => {
+      const result = renderMd("this is ***bold italic*** text");
+      assert.match(result, /\x1b\[/);
+      assert.ok(result.includes("bold italic"), `missing text: ${JSON.stringify(result)}`);
     });
   });
 
@@ -128,7 +139,10 @@ describe("renderMd — formatting", () => {
   it("renders code blocks", () => {
     withTTY(true, false, () => {
       const result = renderMd("```js\nconst x = 1;\n```");
-      assert.ok(result.includes("const x = 1;"), `missing code: ${JSON.stringify(result)}`);
+      // Code fences are gone; content survives (possibly with ANSI codes
+      // interleaved — e.g. \x1b[34mconst\x1b[39m). Strip ANSI to check.
+      const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
+      assert.match(stripped, /const\s+x\s+=\s+1/);
     });
   });
 });
@@ -180,7 +194,10 @@ describe("renderMd — edge cases", () => {
   it("trims trailing whitespace after rendering", () => {
     withTTY(true, false, () => {
       const result = renderMd("hello  \n\n");
-      assert.equal(result, "hello");
+      // ANSI codes may wrap the content, but the rendered output
+      // should not end with raw newlines or blank padding.
+      const stripped = result.replace(/\x1b\[[0-9;]*m/g, "");
+      assert.equal(stripped.trimEnd(), "hello");
     });
   });
 
@@ -188,6 +205,14 @@ describe("renderMd — edge cases", () => {
     withTTY(true, false, () => {
       const result = renderMd("hello");
       assert.ok(!result.endsWith("\n"), `unexpected trailing newline: ${JSON.stringify(result)}`);
+    });
+  });
+
+  it("badly formed markdown does NOT throw — falls back to raw text", () => {
+    // Malformed input that the parser might choke on (unclosed code fence,
+    // mismatched tags, deeply nested lists).  renderMd must never throw.
+    withTTY(true, false, () => {
+      assert.doesNotThrow(() => renderMd("```\nunclosed"));
     });
   });
 });

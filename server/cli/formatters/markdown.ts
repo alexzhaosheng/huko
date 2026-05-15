@@ -35,7 +35,11 @@ function installTerminalRenderer(): void {
   const opts = {
     reflowText: false,
     showSectionPrefix: false,
-    width: Math.min(process.stderr.columns ?? 80, 120),
+    // renderMd only runs when a TTY is attached. stdout and stderr
+    // share the same terminal dimensions when both are TTYs; when
+    // target="stderr", stderr.columns === stdout.columns in practice.
+    // Using stdout.columns keeps the primary rendering path consistent.
+    width: Math.min(process.stdout.columns ?? 80, 120),
     tab: 2,
   };
   const renderer: TerminalRenderer = markedTerminal(opts);
