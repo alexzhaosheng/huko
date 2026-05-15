@@ -32,13 +32,16 @@ const redErr = (s: string) => red(s, "stderr");
 
 export type TextFormatterOptions = {
   verbose: boolean;
+  /** Render markdown to ANSI when stdout is a TTY. Default true. */
+  renderMarkdown: boolean;
 };
 
 const TOOL_CALL_ARGS_MAX = 80; // chars before collapsing in non-verbose
 const TOOL_RESULT_PREVIEW_MAX = 200; // chars when verbose
 
-export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false }): Formatter {
+export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false, renderMarkdown: true }): Formatter {
   const verbose = opts.verbose;
+  const renderMarkdown = opts.renderMarkdown;
   let assistantStreaming = false;
   let thinkingActive = false;
   const printedToolCallsFor = new Set<number>();
@@ -111,7 +114,7 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
               // dump. result→stdout (the "answer"), info→stderr (mid-
               // task narration). The `← message: ok` ack is suppressed
               // in tool_result below since the user already saw the text.
-              if (c.name === "message" && renderMessageCall(c.arguments)) continue;
+              if (c.name === "message" && renderMessageCall(c.arguments, renderMarkdown)) continue;
 
               const argsStr = JSON.stringify(c.arguments);
               const collapsed =
@@ -288,7 +291,7 @@ function extractReminderReason(content: string): string | null {
  *   type=info   → stderr (mid-task narration)
  *   type=ask    → not handled here; ask_user event renders the prompt
  */
-function renderMessageCall(args: unknown): boolean {
+function renderMessageCall(args: unknown, renderMarkdown: boolean): boolean {
   if (args === null || typeof args !== "object") return false;
   const obj = args as { type?: unknown; text?: unknown };
   const text = typeof obj.text === "string" ? obj.text : null;
@@ -298,12 +301,12 @@ function renderMessageCall(args: unknown): boolean {
   if (type === "result") {
     // Render markdown to ANSI when stdout is a TTY (terminal).
     // Piped stdout stays raw — pipe consumers get plain markdown.
-    process.stdout.write(renderMd(text) + "\n");
+    process.stdout.write((renderMarkdown ? renderMd(text) : text) + "\n");
     return true;
   }
   if (type === "info") {
     // Info messages may also contain light markdown (e.g. lists).
-    process.stderr.write(renderMd(text, { target: "stderr" }) + "\n");
+    process.stderr.write((renderMarkdown ? renderMd(text, { target: "stderr" }) : text) + "\n");
     return true;
   }
   return false;

@@ -117,6 +117,9 @@ export type RunArgs = {
   enableFeatures?: string[];
   /** Feature names from `--disable=X` (repeatable). Mirror of `enableFeatures`. */
   disableFeatures?: string[];
+  /** Skip markdown→ANSI rendering even when stdout is a TTY.
+   *  CLI: `--no-markdown` / `--no-md`. Defaults to false. */
+  noMarkdown?: boolean;
 };
 
 /**
@@ -301,7 +304,10 @@ export async function runCommand(args: RunArgs): Promise<number> {
   // (default false). Only affects the `text` formatter; json/jsonl ignore it.
   // getConfig() self-loads on first access.
   const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
-  const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
+  const formatter = makeFormatter(args.format, {
+    verbose: effectiveVerbose,
+    renderMarkdown: !args.noMarkdown,
+  });
 
   // From here on, anything that can throw must run under try/finally so
   // the lock + persistence connections are cleaned up.

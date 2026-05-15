@@ -90,6 +90,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let stdinPrompt = false;
   const enableFeatures: string[] = [];
   const disableFeatures: string[] = [];
+  let noMarkdown = false;
 
   // Phase 1: parse flags until first bare positional, `--` sentinel,
   // or `-` (stdin marker).
@@ -176,6 +177,11 @@ export function parseRunArgs(rest: string[]): ParseResult {
     }
     if (arg === "--lean") {
       mode = "lean";
+      i++;
+      continue;
+    }
+    if (arg === "--no-markdown" || arg === "--no-md") {
+      noMarkdown = true;
       i++;
       continue;
     }
@@ -293,6 +299,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(stdinPrompt ? { stdinPrompt: true } : {}),
       ...(enableFeatures.length > 0 ? { enableFeatures } : {}),
       ...(disableFeatures.length > 0 ? { disableFeatures } : {}),
+      ...(noMarkdown ? { noMarkdown: true } : {}),
     },
   };
 }

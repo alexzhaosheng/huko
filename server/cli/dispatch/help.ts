@@ -97,6 +97,7 @@ export function renderHelpText(stream: ColorStream): string {
     row("--no-interaction, -y", "Disable mid-task user prompts (drops message(type=ask))"),
     row("--show-tokens", "Print input / cache / output token breakdown after run"),
     row("--lean", "One-call override: lean mode (minimal prompt + bash only)"),
+    row("--no-markdown, --no-md", "Skip markdown→ANSI rendering; pass LLM output verbatim"),
     row("--verbose, -v", "Show tool_result content + system_reminder bodies"),
     row("--quiet", "Force quiet output (overrides config.cli.verbose=true)"),
     row("--chat, -c", "Interactive REPL — keep talking until /exit or Ctrl+D"),
