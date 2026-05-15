@@ -2,10 +2,14 @@
  * Tool: browser
  *
  * Operate the user's real Chrome browser through a lightweight extension.
- * huko starts a WebSocket server on demand; the Chrome extension connects
- * and executes commands in the user's real browsing environment.
- * All cookies, logins, and sessions are live — the agent sees and
- * interacts with exactly what the user sees.
+ * huko's "browser" feature sidecar hosts a WebSocket server; the Chrome
+ * extension connects and executes commands in the user's real browsing
+ * environment. All cookies, logins, and sessions are live — the agent
+ * sees and interacts with exactly what the user sees.
+ *
+ * This tool is gated by the "browser" feature (disabled by default).
+ * Enable in chat mode:
+ *   huko --chat --enable=browser
  *
  * Actions:
  *   - navigate    — open a URL in a new tab, return visible page text
@@ -19,9 +23,12 @@
  *   - list_pages  — list all open tabs (URL + title)
  *   - switch_page — switch the active tab by index
  *
- * Browser lifecycle:
- *   - WS server starts lazily on first use, shuts down after 5 min idle.
+ * Lifecycle:
+ *   - The "browser" feature sidecar starts the WS server on chat boot
+ *     and stops it on chat exit.
  *   - Extension auto-connects when it detects the server.
+ *   - One-shot mode (`huko -- prompt`) never spawns sidecars, so browser
+ *     commands fail with a clear "server not running" error there.
  *
  * Setup (one-time):
  *   1. Load the extension in Chrome from extensions/chrome/
@@ -141,6 +148,7 @@ const PARAMETERS = {
 registerServerTool(
   {
     name: "browser",
+    feature: "browser",
     description: DESCRIPTION,
     leanDescription: LEAN_DESCRIPTION,
     parameters: PARAMETERS,
