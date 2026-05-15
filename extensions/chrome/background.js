@@ -185,17 +185,24 @@ function pageDispatcher(params) {
         const el2 = document.querySelector(params.sel);
         if (!el2) throw new Error("Element not found: " + params.sel);
         el2.focus();
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-        const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-        if (el2.tagName === "INPUT" && nativeInputValueSetter) {
-          nativeInputValueSetter.call(el2, params.text);
-        } else if (el2.tagName === "TEXTAREA" && nativeTextareaValueSetter) {
-          nativeTextareaValueSetter.call(el2, params.text);
+        if (el2.getAttribute("contenteditable") === "true" || el2.isContentEditable) {
+          // contenteditable div (e.g. Quill editor) — use textContent
+          el2.textContent = params.text;
+          el2.dispatchEvent(new Event("input", { bubbles: true }));
+          el2.dispatchEvent(new Event("change", { bubbles: true }));
         } else {
-          el2.value = params.text;
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+          if (el2.tagName === "INPUT" && nativeInputValueSetter) {
+            nativeInputValueSetter.call(el2, params.text);
+          } else if (el2.tagName === "TEXTAREA" && nativeTextareaValueSetter) {
+            nativeTextareaValueSetter.call(el2, params.text);
+          } else {
+            el2.value = params.text;
+          }
+          el2.dispatchEvent(new Event("input", { bubbles: true }));
+          el2.dispatchEvent(new Event("change", { bubbles: true }));
         }
-        el2.dispatchEvent(new Event("input", { bubbles: true }));
-        el2.dispatchEvent(new Event("change", { bubbles: true }));
         return 'Typed "' + params.text + '" into "' + params.sel + '".';
       }
       case "scroll":
@@ -226,17 +233,23 @@ function pageDispatcher(params) {
         const el3 = document.querySelector(`[data-huko-ref="${params.ref}"]`);
         if (!el3) throw new Error("Element @" + params.ref + " no longer in DOM.");
         el3.focus();
-        const iSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-        const tSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-        if (el3.tagName === "INPUT" && iSetter) {
-          iSetter.call(el3, params.text);
-        } else if (el3.tagName === "TEXTAREA" && tSetter) {
-          tSetter.call(el3, params.text);
+        if (el3.getAttribute("contenteditable") === "true" || el3.isContentEditable) {
+          el3.textContent = params.text;
+          el3.dispatchEvent(new Event("input", { bubbles: true }));
+          el3.dispatchEvent(new Event("change", { bubbles: true }));
         } else {
-          el3.value = params.text;
+          const iSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          const tSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+          if (el3.tagName === "INPUT" && iSetter) {
+            iSetter.call(el3, params.text);
+          } else if (el3.tagName === "TEXTAREA" && tSetter) {
+            tSetter.call(el3, params.text);
+          } else {
+            el3.value = params.text;
+          }
+          el3.dispatchEvent(new Event("input", { bubbles: true }));
+          el3.dispatchEvent(new Event("change", { bubbles: true }));
         }
-        el3.dispatchEvent(new Event("input", { bubbles: true }));
-        el3.dispatchEvent(new Event("change", { bubbles: true }));
         return 'Typed "' + params.text + '" into @' + params.ref + '.';
       }
       default:
@@ -261,7 +274,7 @@ function pageFindElements() {
     el.removeAttribute("data-huko-ref");
   });
 
-  const SELECTOR = "a, button, input, select, textarea, [role=button], [role=link], [role=menuitem], [role=option], [role=tab], [onclick], [tabindex]:not([tabindex='-1'])";
+  const SELECTOR = "a, button, input, select, textarea, [role=button], [role=link], [role=menuitem], [role=option], [role=tab], [onclick], [tabindex]:not([tabindex='-1']), [contenteditable='true']";
   const all = document.querySelectorAll(SELECTOR);
   const refs = {};
   const positions = [];
