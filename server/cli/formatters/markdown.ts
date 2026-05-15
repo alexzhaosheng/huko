@@ -40,6 +40,7 @@ function installTerminalRenderer(): void {
   };
   const renderer: TerminalRenderer = markedTerminal(opts);
   // @ts-expect-error — marked-terminal returns old-style Renderer; marked v15 accepts it at runtime (legacy compat, see marked/src/Instance.ts:use()).
+  // TODO(upstream): drop `@ts-expect-error` and use `marked.use( markedTerminal(opts) )` directly when marked-terminal ships MarkedExtension-compatible types.
   marked.use(renderer);
 }
 
