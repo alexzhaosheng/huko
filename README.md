@@ -171,6 +171,71 @@ Storage is global only; project-specific redactions belong in regex (Layer 2). F
 
 ---
 
+## Browser Control
+
+An opt-in feature that lets the agent operate your real Chrome browser through a lightweight extension. All cookies, logins, and sessions are live — the agent sees and interacts with exactly what you see.
+
+### Quick start
+
+```bash
+# 1. Load the extension (one-time setup)
+#    Open chrome://extensions, enable "Developer mode",
+#    click "Load unpacked" and select the extensions/chrome/ directory.
+
+# 2. Enable browser-control in chat mode
+huko --chat --enable=browser-control
+```
+
+The extension icon shows connection status: red = disconnected, green = connected.
+
+### How it works
+
+When browser-control is enabled in chat mode, huko starts a local WebSocket server (default port 19222). The Chrome extension connects to this server and executes commands in the user's real browsing environment. When chat mode exits, the server stops and the extension disconnects.
+
+### Configuration
+
+Browser-control parameters live under `tools.browser` in huko's layered config. Inspect or change them with `huko config`:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `tools.browser.wsPort` | `19222` | WebSocket port for the Chrome extension to connect to |
+| `tools.browser.defaultTimeoutMs` | `30000` | Per-action timeout in milliseconds |
+| `tools.browser.maxScreenshotBytes` | `5242880` | Maximum screenshot image size in bytes (5 MiB) |
+
+```bash
+# Change the port for this project (e.g. port conflict)
+huko config set tools.browser.wsPort 19224 --project
+
+# Increase screenshot size limit
+huko config set tools.browser.maxScreenshotBytes 10485760 --project
+
+# Inspect current values
+huko config show
+```
+
+### Limitations
+
+- **Chat mode only.** One-shot runs (`huko -- prompt`) never start sidecars — browser commands will fail with a clear "server not running" error.
+- **Single client.** Only one Chrome extension can connect at a time.
+- **Local only.** The WebSocket server binds to `127.0.0.1` — no remote browser control.
+
+### Actions
+
+The `browser` tool surfaces these actions to the LLM:
+
+- `navigate` — open a URL in a new tab, return visible page text
+- `click` — click the first element matching a CSS selector
+- `type` — type text into an input matching a CSS selector
+- `scroll` — scroll the active page (up / down / top / bottom)
+- `get_text` — return visible text content of the active page
+- `get_html` — return full HTML source of the active page
+- `screenshot` — capture a PNG screenshot
+- `wait` — wait for a selector to appear or a plain timeout
+- `list_pages` — list all open tabs (URL + title)
+- `switch_page` — switch the active tab by index
+
+---
+
 ## Configuration
 
 Layered, just like `git config`:
