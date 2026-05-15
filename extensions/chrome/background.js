@@ -1,24 +1,26 @@
-// huko browser control — background service worker
+// huko browser control — background service worker v2
 //
 // Connects to huko's WebSocket server and executes commands
 // in the user's real Chrome browser. All logins and cookies
 // are live — the agent interacts with what the user sees.
+//
+// v2 adds AI-powered element finding: the extension can collect
+// all visible interactive elements (@e1, @e2, ...) so the LLM can
+// pick targets by natural language description instead of brittle
+// CSS selectors.
 
 const WS_PORT = 19222;
 const WS_URL = `ws://127.0.0.1:${WS_PORT}`;
 
 let ws = null;
-let reconnectDelay = 100; // ms, fast reconnect — huko only waits 15s
+let reconnectDelay = 100;
 const RECONNECT_MAX = 5_000;
 let reconnectTimer = null;
 const KEEPALIVE_ALARM = "keepalive";
-const KEEPALIVE_MINUTES = 0.5; // 30s — Chrome 120+ minimum
+const KEEPALIVE_MINUTES = 0.5;
 
 // ─── Connection ────────────────────────────────────────────────────────────
 
-// MV3: track in-flight async work so the service worker stays alive
-// until handleCommand completes. Without this, Chrome may terminate the
-// worker between receiving a WS message and sending the response.
 let pendingWork = Promise.resolve();
 
 function closeWs() {
@@ -29,18 +31,13 @@ function closeWs() {
 }
 
 function connect() {
-  // Always create a fresh connection.  In MV3, when the service worker
-  // restarts after being terminated, a stale WebSocket reference from a
-  // previous incarnation may still report readyState === OPEN even though
-  // the JS handler is gone — the TCP connection can linger.  Checking
-  // readyState is NOT reliable across worker restarts.
   clearReconnect();
   closeWs();
 
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
-    reconnectDelay = 500; // reset backoff
+    reconnectDelay = 500;
     updateStatus("connected");
     console.log("[huko] connected to huko");
   };
@@ -52,8 +49,6 @@ function connect() {
     } catch (e) {
       return;
     }
-    // Chain onto pendingWork so the service worker stays alive until
-    // all in-flight commands have been processed.
     pendingWork = handleCommand(msg).catch((err) => {
       console.error("[huko] handleCommand error:", err);
     });
@@ -66,7 +61,6 @@ function connect() {
   };
 
   ws.onerror = () => {
-    // onclose will fire after this; closeWs to be safe
     closeWs();
   };
 }
@@ -128,6 +122,16 @@ async function handleCommand(msg) {
       case "switch_page":
         result = await cmdSwitchPage(msg.index);
         break;
+      // ── v2: element ref commands ──────────────────────────────
+      case "find":
+        result = await cmdFind();
+        break;
+      case "click_ref":
+        result = await cmdClickRef(msg.ref);
+        break;
+      case "type_ref":
+        result = await cmdTypeRef(msg.ref, msg.text);
+        break;
       default:
         throw new Error(`Unknown command: ${cmd}`);
     }
@@ -158,8 +162,12 @@ async function getActiveTab() {
   return tab;
 }
 
-// ─── Injected operation dispatcher (ISOLATED world, no CSP issues) ────────
+// ─── Injected functions (ISOLATED world) ───────────────────────────────────
 
+/**
+ * Standard page dispatcher — processes simple ops: getText, getHtml,
+ * click (by CSS selector), type, scroll.
+ */
 function pageDispatcher(params) {
   try {
     switch (params.op) {
@@ -199,12 +207,111 @@ function pageDispatcher(params) {
           default: return "Unknown direction: " + params.dir;
         }
         return "Scrolled " + params.dir + ".";
+      // ── v2: element-ref ops ──────────────────────────────────
+      case "clickRef": {
+        const idx = _hukoElementRefs[params.ref];
+        if (idx === undefined) throw new Error("Element ref not found: @" + params.ref);
+        const { x, y } = _hukoElementPositions[idx];
+        const clickEl = document.elementFromPoint(x, y);
+        if (clickEl) {
+          clickEl.click();
+        } else {
+          throw new Error("No element at position for ref @" + params.ref);
+        }
+        return 'Clicked @' + params.ref + '.';
+      }
+      case "typeRef": {
+        const idx2 = _hukoElementRefs[params.ref];
+        if (idx2 === undefined) throw new Error("Element ref not found: @" + params.ref);
+        const el3 = document.querySelector(`[data-huko-ref="${params.ref}"]`);
+        if (!el3) throw new Error("Element @" + params.ref + " no longer in DOM.");
+        el3.focus();
+        const iSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        const tSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+        if (el3.tagName === "INPUT" && iSetter) {
+          iSetter.call(el3, params.text);
+        } else if (el3.tagName === "TEXTAREA" && tSetter) {
+          tSetter.call(el3, params.text);
+        } else {
+          el3.value = params.text;
+        }
+        el3.dispatchEvent(new Event("input", { bubbles: true }));
+        el3.dispatchEvent(new Event("change", { bubbles: true }));
+        return 'Typed "' + params.text + '" into @' + params.ref + '.';
+      }
       default:
         return "Unknown op: " + params.op;
     }
   } catch (e) {
     return "!!ERR:" + e.message;
   }
+}
+
+/**
+ * Collect all visible interactive elements on the page, assign @eN refs,
+ * and return a compact text snapshot suitable for LLM element picking.
+ *
+ * Each element gets a unique `data-huko-ref` attribute so it can be
+ * targeted by `click_ref` / `type_ref` later.  The return value is a
+ * JSON string with `{ snapshot, refs, positions }`.
+ */
+function pageFindElements() {
+  // Clean up refs from a previous call.
+  document.querySelectorAll("[data-huko-ref]").forEach(function(el) {
+    el.removeAttribute("data-huko-ref");
+  });
+
+  const SELECTOR = "a, button, input, select, textarea, [role=button], [role=link], [role=menuitem], [role=option], [role=tab], [onclick], [tabindex]:not([tabindex='-1'])";
+  const all = document.querySelectorAll(SELECTOR);
+  const refs = {};
+  const positions = [];
+  const lines = [];
+  let n = 0;
+
+  for (const el of all) {
+    // Visibility check: skip hidden / zero-size elements.
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+    const style = getComputedStyle(el);
+    if (style.visibility === "hidden" || style.display === "none") continue;
+
+    n++;
+    const ref = String(n);
+    refs[ref] = n - 1;
+    positions.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+
+    // Mark element so clickRef/typeRef can find it via coordinate or DOM attribute.
+    el.setAttribute("data-huko-ref", ref);
+
+    // Build a concise description line.
+    const tag = el.tagName.toLowerCase();
+    const type = el.getAttribute("type") || "";
+    const text = (el.textContent || "").trim().slice(0, 80);
+    const aria = el.getAttribute("aria-label") || "";
+    const placeholder = el.getAttribute("placeholder") || "";
+    const role = el.getAttribute("role") || "";
+    const name = el.getAttribute("name") || "";
+    const idAttr = el.id ? "#" + el.id : "";
+
+    const desc = [tag];
+    if (type) desc.push("[" + type + "]");
+    if (role) desc.push("(role=" + role + ")");
+    if (aria && aria !== text) desc.push('"' + aria + '"');
+    if (text && text !== aria) desc.push('"' + text + '"');
+    if (placeholder) desc.push('placeholder="' + placeholder + '"');
+    if (name) desc.push('name="' + name + '"');
+    if (idAttr) desc.push(idAttr);
+
+    lines.push("  @" + ref + " " + desc.join(" "));
+  }
+
+  const snapshot = "Interactive elements on page (" + n + " total):\n" + lines.join("\n");
+
+  // Store refs + positions on window so clickRef/typeRef can access them.
+  window._hukoElementRefs = refs;
+  window._hukoElementPositions = positions;
+
+  return JSON.stringify({ snapshot, ref_count: n, refs: Object.keys(refs) });
 }
 
 async function executeOpInTab(tabId, params) {
@@ -217,13 +324,37 @@ async function executeOpInTab(tabId, params) {
   return results[0]?.result;
 }
 
+async function executeFindInTab(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: pageFindElements,
+    world: "ISOLATED",
+  });
+  return results[0]?.result;
+}
+
 // ─── navigate ──────────────────────────────────────────────────────────────
 
 async function cmdNavigate(url) {
   const tab = await chrome.tabs.create({ url, active: true });
   await waitForTabLoad(tab.id);
+
+  // Collect page text and interactive elements snapshot in parallel.
   const text = await executeOpInTab(tab.id, { op: "getText" });
-  return { text: text || "(page has no visible text)" };
+  let snapshot = "";
+  try {
+    const raw = await executeFindInTab(tab.id);
+    if (raw) {
+      const data = JSON.parse(raw);
+      snapshot = "\n\n" + data.snapshot;
+    }
+  } catch {
+    // Element finding is best-effort; page text alone is still useful.
+  }
+
+  return {
+    text: (text || "(page has no visible text)") + snapshot,
+  };
 }
 
 async function waitForTabLoad(tabId) {
@@ -241,7 +372,7 @@ async function waitForTabLoad(tabId) {
   });
 }
 
-// ─── click ─────────────────────────────────────────────────────────────────
+// ─── click (CSS selector) ──────────────────────────────────────────────────
 
 async function cmdClick(selector) {
   const tab = await getActiveTab();
@@ -249,7 +380,7 @@ async function cmdClick(selector) {
   return { text: result };
 }
 
-// ─── type ──────────────────────────────────────────────────────────────────
+// ─── type (CSS selector) ───────────────────────────────────────────────────
 
 async function cmdType(selector, text) {
   const tab = await getActiveTab();
@@ -284,9 +415,7 @@ async function cmdGetHtml() {
 // ─── screenshot ────────────────────────────────────────────────────────────
 
 async function cmdScreenshot(selector) {
-  // captureVisibleTab returns a data URL: data:image/png;base64,...
   const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: "png" });
-  // Extract base64
   const base64 = dataUrl.split(",")[1] || "";
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   return {
@@ -298,7 +427,7 @@ async function cmdScreenshot(selector) {
   };
 }
 
-// ─── wait ──────────────────────────────────────────────────────────────────
+// ─── wait ─────────────────────────────────────────────────────────────────
 
 async function cmdWait(selector, ms) {
   if (selector) {
@@ -345,7 +474,7 @@ async function cmdListPages() {
   return { text: JSON.stringify(pages) };
 }
 
-// ─── switch_page ───────────────────────────────────────────────────────────
+// ─── switch_page ──────────────────────────────────────────────────────────
 
 async function cmdSwitchPage(index) {
   const tabs = await chrome.tabs.query({ currentWindow: true });
@@ -360,13 +489,42 @@ async function cmdSwitchPage(index) {
   return { text: `Switched to page ${index}: ${tab.title}  ${tab.url}` };
 }
 
+// ─── v2: find — get interactive element list ──────────────────────────────
+
+async function cmdFind() {
+  const tab = await getActiveTab();
+  const raw = await executeFindInTab(tab.id);
+  if (!raw) return { text: "No interactive elements found." };
+  try {
+    const data = JSON.parse(raw);
+    return { text: data.snapshot };
+  } catch {
+    return { text: raw };
+  }
+}
+
+// ─── v2: click by element ref ─────────────────────────────────────────────
+
+async function cmdClickRef(ref) {
+  const tab = await getActiveTab();
+  const result = await executeOpInTab(tab.id, { op: "clickRef", ref });
+  return { text: result };
+}
+
+// ─── v2: type by element ref ──────────────────────────────────────────────
+
+async function cmdTypeRef(ref, text) {
+  const tab = await getActiveTab();
+  const result = await executeOpInTab(tab.id, { op: "typeRef", ref, text });
+  return { text: result };
+}
+
 // ─── Status reporting ──────────────────────────────────────────────────────
 
 let currentStatus = "disconnected";
 
 async function updateStatus(status) {
   currentStatus = status;
-  // Set toolbar icon based on connection state
   const prefix = status === "connected" ? "huko" : "huko_red";
   try {
     await chrome.action.setIcon({
@@ -376,8 +534,6 @@ async function updateStatus(status) {
         128: `${prefix}-128.png`,
       },
     });
-    // Check runtime.lastError — setIcon may resolve the promise but still
-    // set lastError (e.g. when Chrome rejects the icon file).
     if (chrome.runtime.lastError) {
       console.error("[huko] setIcon runtime.lastError:", chrome.runtime.lastError.message);
     } else {
@@ -386,7 +542,6 @@ async function updateStatus(status) {
   } catch (err) {
     console.error("[huko] setIcon failed:", err);
   }
-  // Notify popup if open
   chrome.runtime.sendMessage({ type: "status", status }).catch(() => {
     // popup is not open — ignore
   });
@@ -407,11 +562,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
-    // Reconnect only if we don't have a live connection.  Across MV3
-    // worker restarts, `ws` will be null (new worker), so this always
-    // reconnects after a restart.  Within the same worker lifetime,
-    // `readyState === OPEN` is reliable — no need to tear down a
-    // healthy connection.
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       clearReconnect();
       reconnectDelay = 100;

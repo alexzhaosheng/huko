@@ -2,19 +2,18 @@
  * server/task/tools/server/browser-session.ts
  *
  * WebSocket server that a Chrome extension connects to.
- * huko acts as the server — the "browser" feature sidecar starts a WS
- * listener, the extension (installed in the user's browser) connects and
- * executes commands in the user's real Chrome environment.
+ * huko acts as the server — the "browser-control" feature sidecar starts
+ * a WS listener, the extension (installed in the user's browser) connects
+ * and executes commands in the user's real Chrome environment.
+ *
+ * v2 adds AI-powered element finding: `find` returns a text snapshot of
+ * all interactive elements with @e1, @e2 refs; `click_ref` / `type_ref`
+ * target elements by ref instead of CSS selectors.
  *
  * Lifecycle:
  *   - WS server is started by the browser feature's sidecar (chat-mode only).
  *   - Extension connects and stays connected while the sidecar runs.
  *   - Server shuts down when the sidecar's stop() is called (chat exit).
- *   - Tool handlers call sendCommand() which requires the server to already
- *     be running — no lazy start.
- *
- * One-shot `huko -- prompt` never starts sidecars, so browser commands
- * fail with a clear "server not running" message there.
  */
 
 import { WebSocketServer } from "ws";
@@ -24,8 +23,8 @@ import { getConfig } from "../../../config/index.js";
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
 const CMD_TIMEOUT_MS = 30_000;
-const WAIT_FOR_CLIENT_MS = 15_000; // wait up to 15s — extension reconnects in <5s
-const PING_TIMEOUT_MS = 3_000; // wait up to 3s for pong from client
+const WAIT_FOR_CLIENT_MS = 15_000;
+const PING_TIMEOUT_MS = 3_000;
 
 // ─── Protocol types ──────────────────────────────────────────────────────────
 
@@ -40,12 +39,16 @@ type BrowserCommand =
   | { cmd: "screenshot"; selector?: string }
   | { cmd: "wait"; selector?: string; ms?: number }
   | { cmd: "list_pages" }
-  | { cmd: "switch_page"; index: number };
+  | { cmd: "switch_page"; index: number }
+  // v2: element-ref commands
+  | { cmd: "find" }
+  | { cmd: "click_ref"; ref: string }
+  | { cmd: "type_ref"; ref: string; text: string };
 
 type Outgoing = BrowserCommand & { id: number };
 
 type Incoming =
-  | { id: number; ok: true; result: string; attachment?: { filename: string; data: string /* base64 */ } }
+  | { id: number; ok: true; result: string; attachment?: { filename: string; data: string } }
   | { id: number; ok: false; error: string };
 
 // ─── Server state ────────────────────────────────────────────────────────────
@@ -54,7 +57,6 @@ let wss: WebSocketServer | null = null;
 let client: WebSocket | null = null;
 let nextId = 1;
 
-/** pending[id] = { resolve, reject, timer } */
 const pending = new Map<
   number,
   {
@@ -67,10 +69,6 @@ const pending = new Map<
 
 // ─── Server lifecycle ───────────────────────────────────────────────────────
 
-/**
- * Start the WebSocket server. Called by the browser sidecar in chat mode.
- * Idempotent: does nothing if already running.
- */
 export async function startServer(): Promise<void> {
   if (wss) return;
 
@@ -96,7 +94,6 @@ export async function startServer(): Promise<void> {
     });
 
     server.on("connection", (ws) => {
-      // Only one client at a time — drop previous if any
       if (client) {
         try { client.close(); } catch { /* best-effort */ }
       }
@@ -116,7 +113,6 @@ export async function startServer(): Promise<void> {
         pending.delete(msg.id);
 
         if (msg.ok) {
-          // Capture attachment if present (for screenshot)
           if (msg.attachment) {
             entry.attachment.value = msg.attachment;
           }
@@ -133,13 +129,7 @@ export async function startServer(): Promise<void> {
   });
 }
 
-/**
- * Stop the WebSocket server and reject all pending commands.
- * Called by the browser sidecar's stop() on chat exit.
- * Idempotent: safe to call multiple times.
- */
 export async function stopServer(): Promise<void> {
-  // Reject all pending commands
   for (const [id, entry] of pending) {
     clearTimeout(entry.timer);
     entry.reject(new Error("browser WebSocket server shut down"));
@@ -164,13 +154,9 @@ export async function stopServer(): Promise<void> {
 // ─── Command dispatch ────────────────────────────────────────────────────────
 
 async function waitForClient(): Promise<void> {
-  if (client && client.readyState === 1 /* WebSocket.OPEN */) {
-    // Client claims to be connected, but in MV3 the service worker may
-    // have been terminated, leaving a zombie TCP connection.  Verify
-    // liveness with a ping/pong exchange before trusting it.
+  if (client && client.readyState === 1) {
     const alive = await pingClient();
     if (alive) return;
-    // Zombie detected — close it and wait for a fresh connection.
     try { client!.close(); } catch { /* ignore */ }
     client = null;
   }
@@ -194,22 +180,14 @@ async function waitForClient(): Promise<void> {
   );
 }
 
-/** Send a ping; return true if the client responds with pong. */
 async function pingClient(): Promise<boolean> {
   if (!client || client.readyState !== 1) return false;
   const pingId = nextId++;
   const pongPromise = new Promise<boolean>((resolve) => {
     const timer = setTimeout(() => resolve(false), PING_TIMEOUT_MS);
-    // Use a short-term pending entry to catch the pong
     pending.set(pingId, {
-      resolve: () => {
-        clearTimeout(timer);
-        resolve(true);
-      },
-      reject: () => {
-        clearTimeout(timer);
-        resolve(false);
-      },
+      resolve: () => { clearTimeout(timer); resolve(true); },
+      reject: () => { clearTimeout(timer); resolve(false); },
       attachment: {},
       timer,
     });
@@ -233,9 +211,6 @@ async function sendCommand(cmd: BrowserCommand): Promise<{
   text: string;
   attachment?: { filename: string; data: string };
 }> {
-  // Server is expected to be running (started by the sidecar). Fail
-  // with a clear message rather than lazy-starting — in one-shot mode
-  // there is no sidecar, and the user should be told why.
   if (!wss) {
     throw new Error(
       "Browser WebSocket server is not running. " +
@@ -258,7 +233,6 @@ async function sendCommand(cmd: BrowserCommand): Promise<{
     pending.set(id, { resolve, reject, attachment, timer });
   });
 
-  // waitForClient() guarantees client is non-null and OPEN here
   client!.send(JSON.stringify(outgoing));
 
   try {
@@ -338,7 +312,6 @@ export async function browserWait(
 
 export async function browserListPages(): Promise<string> {
   const { text } = await sendCommand({ cmd: "list_pages" });
-  // Extension returns JSON array; parse and format nicely
   try {
     const pages = JSON.parse(text) as Array<{
       index: number;
@@ -360,4 +333,32 @@ export async function browserListPages(): Promise<string> {
 export async function browserSwitchPage(index: number): Promise<string> {
   const { text } = await sendCommand({ cmd: "switch_page", index });
   return text;
+}
+
+// ─── v2: element-ref commands ────────────────────────────────────────────────
+
+/**
+ * Return a snapshot of all visible interactive elements on the page,
+ * each tagged with an @eN ref. The LLM uses this to pick targets by
+ * natural language description rather than CSS selectors.
+ */
+export async function browserFind(): Promise<string> {
+  const { text } = await sendCommand({ cmd: "find" });
+  return text;
+}
+
+/**
+ * Click an element identified by its @eN ref from a `find` snapshot.
+ */
+export async function browserClickRef(ref: string): Promise<string> {
+  const { text } = await sendCommand({ cmd: "click_ref", ref });
+  return text;
+}
+
+/**
+ * Type text into an element identified by its @eN ref from a `find` snapshot.
+ */
+export async function browserTypeRef(ref: string, text: string): Promise<string> {
+  const { text: result } = await sendCommand({ cmd: "type_ref", ref, text });
+  return result;
 }
