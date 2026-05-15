@@ -103,6 +103,8 @@ huko --chat                                  # interactive REPL
 
 Short flags for the high-frequency ones: `-n` = `--new`, `-m` = `--memory`, `-c` = `--chat`. (No POSIX bundling — write them separately: `huko -n -m -- "..."`.)
 
+`--no-markdown` (`--no-md`) skips terminal markdown rendering — useful when the LLM output contains literal `*` or `|` that the renderer would misinterpret (shell globs, regex patterns).
+
 ### Output formats
 
 ```bash
