@@ -205,15 +205,51 @@ function pageDispatcher(params) {
         }
         return 'Typed "' + params.text + '" into "' + params.sel + '".';
       }
-      case "scroll":
+      case "scroll": {
+        // Try window-level scroll first.
+        const before = window.scrollY;
         switch (params.dir) {
-          case "down": window.scrollBy(0, 300); break;
-          case "up": window.scrollBy(0, -300); break;
-          case "top": window.scrollTo(0, 0); break;
-          case "bottom": window.scrollTo(0, document.body.scrollHeight); break;
+          case "down":  window.scrollBy(0, 300); break;
+          case "up":    window.scrollBy(0, -300); break;
+          case "top":   window.scrollTo(0, 0); break;
+          case "bottom":window.scrollTo(0, document.body.scrollHeight); break;
           default: return "Unknown direction: " + params.dir;
         }
-        return "Scrolled " + params.dir + ".";
+        if (window.scrollY !== before) return "Scrolled " + params.dir + ".";
+
+        // Window didn't scroll — find the best scrollable container.
+        // Strategy: scan ALL scrollable elements, pick the one with the
+        // largest visible area that overlaps the viewport.
+        const all = document.querySelectorAll("*");
+        let best = null;
+        let bestArea = 0;
+        for (const el of all) {
+          if (el.scrollHeight <= el.clientHeight) continue;
+          const s = getComputedStyle(el);
+          if (s.overflowY !== "auto" && s.overflowY !== "scroll" && s.overflow !== "auto" && s.overflow !== "scroll") continue;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          // Compute overlap area with viewport.
+          const overlapW = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
+          const overlapH = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
+          if (overlapW <= 0 || overlapH <= 0) continue;
+          const area = overlapW * overlapH;
+          if (area > bestArea) { bestArea = area; best = el; }
+        }
+        if (best) {
+          const topBefore = best.scrollTop;
+          switch (params.dir) {
+            case "down":   best.scrollTop += 300; break;
+            case "up":     best.scrollTop -= 300; break;
+            case "top":    best.scrollTop = 0; break;
+            case "bottom": best.scrollTop = best.scrollHeight; break;
+          }
+          return best.scrollTop !== topBefore
+            ? "Scrolled " + params.dir + "."
+            : "Scrolled " + params.dir + " (no effect — container at scroll limit).";
+        }
+        return "Scrolled " + params.dir + " (no effect — no scrollable container found).";
+      }
       // ── v2: element-ref ops ──────────────────────────────────
       case "clickRef": {
         const idx = _hukoElementRefs[params.ref];
