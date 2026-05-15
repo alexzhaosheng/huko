@@ -35,7 +35,7 @@ function installTerminalRenderer(): void {
   const opts = {
     reflowText: false,
     showSectionPrefix: false,
-    width: Math.min(process.stderr.columns ?? 80, 120),
+    width: Math.min(process.stdout.columns ?? 80, 120),
     tab: 2,
   };
   const renderer: TerminalRenderer = markedTerminal(opts);
