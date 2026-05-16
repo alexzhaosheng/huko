@@ -7,7 +7,12 @@
  */
 
 import { setupCommand } from "../commands/setup.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderSetupHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderSetupHelp);
+}
 
 export async function dispatchSetup(rest: string[]): Promise<number> {
   for (const arg of rest) {

@@ -14,7 +14,10 @@
  * neither concern should ever grow past one file.
  */
 
-import { renderHelpText } from "./help.js";
+import { renderTopHelp } from "./help.js";
+import type { ColorStream } from "../colors.js";
+
+export type HelpRenderer = (stream: ColorStream) => string;
 
 export class CliExitError extends Error {
   readonly code: number;
@@ -34,10 +37,13 @@ export class CliExitError extends Error {
  * Marked `never` so callers can use it as a control-flow sink without
  * TypeScript thinking subsequent code is reachable.
  */
-export function usage(exitCode: number = 3): never {
+export function usage(
+  exitCode: number = 3,
+  renderer: HelpRenderer = renderTopHelp,
+): never {
   const out = exitCode === 0 ? process.stdout : process.stderr;
   const stream = exitCode === 0 ? "stdout" : "stderr";
-  out.write(renderHelpText(stream));
+  out.write(renderer(stream));
   throw new CliExitError(exitCode);
 }
 
@@ -53,31 +59,32 @@ export function parseFormatFlags<F extends string>(
   argv: string[],
   validFormats: readonly F[],
   defaultFormat: F,
+  helpRenderer: HelpRenderer = renderTopHelp,
 ): { format: F; positional: string[] } {
   let format: F = defaultFormat;
   const positional: string[] = [];
 
   for (const arg of argv) {
-    if (arg === "-h" || arg === "--help") usage(0);
+    if (arg === "-h" || arg === "--help") usage(0, helpRenderer);
     if (arg === "--json") {
-      assertFormat("json", validFormats);
+      assertFormat("json", validFormats, helpRenderer);
       format = "json" as F;
       continue;
     }
     if (arg === "--jsonl") {
-      assertFormat("jsonl", validFormats);
+      assertFormat("jsonl", validFormats, helpRenderer);
       format = "jsonl" as F;
       continue;
     }
     if (arg.startsWith("--format=")) {
       const v = arg.slice("--format=".length);
-      assertFormat(v, validFormats);
+      assertFormat(v, validFormats, helpRenderer);
       format = v as F;
       continue;
     }
     if (arg.startsWith("--")) {
       process.stderr.write(`huko: unknown flag: ${arg}\n`);
-      usage();
+      usage(3, helpRenderer);
     }
     positional.push(arg);
   }
@@ -85,11 +92,15 @@ export function parseFormatFlags<F extends string>(
   return { format, positional };
 }
 
-function assertFormat<F extends string>(value: string, validFormats: readonly F[]): void {
+function assertFormat<F extends string>(
+  value: string,
+  validFormats: readonly F[],
+  helpRenderer: HelpRenderer,
+): void {
   if (!validFormats.includes(value as F)) {
     process.stderr.write(
       `huko: invalid format value: ${value} (allowed: ${validFormats.join(", ")})\n`,
     );
-    usage();
+    usage(3, helpRenderer);
   }
 }

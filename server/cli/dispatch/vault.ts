@@ -21,7 +21,12 @@ import {
   vaultRemoveCommand,
   vaultTestCommand,
 } from "../commands/vault.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderVaultHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderVaultHelp);
+}
 
 const VERBS_HELP = "add | remove | list | test";
 
