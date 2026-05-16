@@ -90,6 +90,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let stdinPrompt = false;
   const enableFeatures: string[] = [];
   const disableFeatures: string[] = [];
+  const skills: string[] = [];
   let noMarkdown = false;
   let compactThreshold: number | undefined;
 
@@ -233,6 +234,15 @@ export function parseRunArgs(rest: string[]): ParseResult {
       i++;
       continue;
     }
+    if (arg.startsWith("--skill=")) {
+      const name = arg.slice("--skill=".length).trim();
+      if (name.length === 0) {
+        return { kind: "error", message: `huko: --skill= requires a skill name\n` };
+      }
+      if (!skills.includes(name)) skills.push(name);
+      i++;
+      continue;
+    }
     if (arg.startsWith("--compact-threshold=")) {
       const raw = arg.slice("--compact-threshold=".length);
       const n = Number(raw);
@@ -317,6 +327,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(disableFeatures.length > 0 ? { disableFeatures } : {}),
       ...(noMarkdown ? { noMarkdown: true } : {}),
       ...(compactThreshold !== undefined ? { compactThreshold } : {}),
+      ...(skills.length > 0 ? { skills } : {}),
     },
   };
 }

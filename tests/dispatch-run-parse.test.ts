@@ -444,6 +444,27 @@ describe("parseRunArgs — flag-level error cases", () => {
     if (r.kind !== "error") return;
     assert.match(r.message, /invalid --compact-threshold value: high/);
   });
+
+  it("accepts a single --skill=NAME", () => {
+    const r = parseRunArgs(["--skill=deploy", "--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.deepEqual(r.args.skills, ["deploy"]);
+  });
+
+  it("accumulates repeated --skill= flags and dedupes", () => {
+    const r = parseRunArgs(["--skill=a", "--skill=b", "--skill=a", "--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.deepEqual(r.args.skills, ["a", "b"]);
+  });
+
+  it("rejects --skill= with an empty name", () => {
+    const r = parseRunArgs(["--skill=", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /--skill= requires a skill name/);
+  });
 });
 
 // ─── help short-circuit ─────────────────────────────────────────────────────
