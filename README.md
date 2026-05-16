@@ -103,6 +103,8 @@ huko --chat                                  # interactive REPL
 
 Short flags for the high-frequency ones: `-n` = `--new`, `-m` = `--memory`, `-c` = `--chat`. (No POSIX bundling — write them separately: `huko -n -m -- "..."`.)
 
+`--no-markdown` (`--no-md`) skips terminal markdown rendering — useful when the LLM output contains literal `*` or `|` that the renderer would misinterpret (shell globs, regex patterns).
+
 ### Output formats
 
 ```bash
@@ -116,6 +118,10 @@ huko --jsonl -- "..."   # streaming events line-delimited
 ```bash
 huko provider list
 huko model list
+huko model show deepseek/deepseek-v4-pro     # full record + effective context window + source
+huko model update deepseek/deepseek-v4-pro --context-window=128000
+                                             # pin the budget when your gateway's real limit
+                                             # differs from the heuristic
 huko keys list                               # shows source layer per ref
 huko keys set deepseek                       # hidden prompt → writes <cwd>/.huko/keys.json (chmod 600)
 huko model current anthropic/claude-sonnet-4-6
@@ -166,6 +172,132 @@ Three-layer redaction every outbound message goes through:
 3. **Vault** (`~/.huko/vault.json`, chmod 600) — exact strings you registered. **Round-trips**: when the LLM emits a tool call referencing a placeholder, huko expands it back to the real value before the tool runs — the LLM never sees raw, but can still USE the secret symbolically.
 
 Storage is global only; project-specific redactions belong in regex (Layer 2). For real isolation use `huko docker run` to sandbox the whole agent.
+
+---
+
+## Browser Control
+
+An opt-in feature that lets the agent operate your real Chrome browser through a lightweight extension. All cookies, logins, and sessions are live — the agent sees and interacts with exactly what you see.
+
+### Quick start
+
+```bash
+# 1. Load the extension (one-time setup)
+#    Open chrome://extensions, enable "Developer mode",
+#    click "Load unpacked" and select the extensions/chrome/ directory.
+
+# 2. Enable browser-control in chat mode
+huko --chat --enable=browser-control
+```
+
+The extension icon shows connection status: red = disconnected, green = connected.
+
+### How it works
+
+When browser-control is enabled in chat mode, huko starts a local WebSocket server (default port 19222). The Chrome extension connects to this server and executes commands in the user's real browsing environment. When chat mode exits, the server stops and the extension disconnects.
+
+### Configuration
+
+Browser-control parameters live under `tools.browser` in huko's layered config. Inspect or change them with `huko config`:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `tools.browser.wsPort` | `19222` | WebSocket port for the Chrome extension to connect to |
+| `tools.browser.defaultTimeoutMs` | `30000` | Per-action timeout in milliseconds |
+| `tools.browser.maxScreenshotBytes` | `5242880` | Maximum screenshot image size in bytes (5 MiB) |
+
+```bash
+# Change the port for this project (e.g. port conflict)
+huko config set tools.browser.wsPort 19224 --project
+
+# Increase screenshot size limit
+huko config set tools.browser.maxScreenshotBytes 10485760 --project
+
+# Inspect current values
+huko config show
+```
+
+### Limitations
+
+- **Chat mode only.** One-shot runs (`huko -- prompt`) never start sidecars — browser commands will fail with a clear "server not running" error.
+- **Single client.** Only one Chrome extension can connect at a time.
+- **Local only.** The WebSocket server binds to `127.0.0.1` — no remote browser control.
+
+### Actions
+
+The `browser` tool surfaces these actions to the LLM:
+
+- `navigate` — open a URL in a new tab, return visible page text
+- `click` — click the first element matching a CSS selector
+- `type` — type text into an input matching a CSS selector
+- `scroll` — scroll the active page (up / down / top / bottom)
+- `get_text` — return visible text content of the active page
+- `get_html` — return full HTML source of the active page
+- `screenshot` — capture a PNG screenshot
+- `wait` — wait for a selector to appear or a plain timeout
+- `list_pages` — list all open tabs (URL + title)
+- `switch_page` — switch the active tab by index
+
+---
+
+## Skills
+
+Skills are operator-authored markdown files that get spliced into the system prompt when activated — recipes, project conventions, deploy procedures, anything you'd otherwise re-type at the top of every chat. They are **off by default**: dropping a file in the skills directory has no effect until you explicitly turn it on.
+
+Distinct from the planner's per-phase capability tagging (`roles/`, model-driven): skills are operator-driven and stay active for the whole session.
+
+### Authoring
+
+Two layouts work, both recognised by file/folder name as the skill's identity:
+
+```
+~/.huko/skills/<name>.md             # global, single file
+~/.huko/skills/<name>/SKILL.md       # global, folder-style (supporting assets fine)
+<cwd>/.huko/skills/<name>.md         # project, same shapes — wins over global
+<cwd>/.huko/skills/<name>/SKILL.md
+```
+
+Front matter holds a one-line `description` (shown in `huko skills list` and rendered above the body in the system prompt). Any other YAML keys are silently ignored so files written for other agent tools drop in unchanged.
+
+```markdown
+---
+description: Pre-deploy checklist + rollback for this service
+---
+
+When the user asks to deploy:
+1. Run `pnpm test` and abort on any failure.
+2. Tag the release as `v<semver>`.
+3. ...
+```
+
+### Activating
+
+Two paths — both stack additively:
+
+```bash
+# Persistent (per project or globally)
+huko config set skills.deploy.enabled true --project
+huko config set skills.deploy.enabled true            # global
+
+# One-shot (this invocation only; repeatable)
+huko --skill=deploy --skill=git-workflow -- "ship 0.3.0"
+huko --chat --skill=deploy
+```
+
+A typo in `--skill=foo` aborts at bootstrap with the list of searched paths. A skill listed as `enabled: true` in config but missing on disk warns and is skipped — config drift can't brick startup.
+
+### Discovery
+
+```bash
+huko skills list
+# NAME    SOURCE   ACTIVE  DESCRIPTION
+# deploy  project  yes     Pre-deploy checklist + rollback for this service
+# triage  user     no      Bug-triage workflow with reproduction template
+```
+
+Project files shadow global files of the same name (matches the rest of the layered-config story).
+
+When any skill is active, the chat banner ends with `skills: deploy, triage`, and one-shot runs print `huko: skills active — deploy, triage` to stderr before the LLM call. No surprise activations.
 
 ---
 
@@ -279,7 +411,6 @@ CI runs the same `tsc + test + build` matrix on Linux/macOS/Windows × Node 24 f
 
 Sketches of the next surface, in rough priority order. None of these are committed scope or timeline — the list exists to signal direction, and so the kernel design stays compatible with them.
 
-- **Skills.** Pre-defined, slash-invoked specialised agents — `/code-review`, `/release-notes`, `/triage`. Each ships with its own system-prompt fragment + tool subset + capability hints; the user can layer them onto any conversation without retyping setup.
 - **Daemon mode.** A long-lived background process owns one or more sessions; multiple CLI invocations / IDE plugins / web UI consumers all talk to it. Solves "warm tool state across calls", multi-client coordination, and idle compaction.
 - **Remote CLI UI.** `huko --host=user@remote-box -- "..."` — your local terminal driving a daemon running on a remote machine, so the work happens close to the project (file system, network, secrets) and you don't ship gigabytes of repo over your laptop tether.
 - **Web UI.** Browser front-end for the daemon — for cases where a long context, side-by-side diff, image attachments, or non-terminal users need more than what a CLI gives. Same kernel underneath.

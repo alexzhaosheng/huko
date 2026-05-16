@@ -59,6 +59,13 @@ export type HukoConfig = {
     maxIterations: number;
     maxToolCalls: number;
     maxEmptyRetries: number;
+    /**
+     * Abort an LLM call if no stream chunk (or final response, for
+     * non-streaming) arrives in this many milliseconds. Prevents the
+     * "provider holds the socket but never sends data" hang documented
+     * in `llm-call.ts` heartbeat block. Set to 0 to disable.
+     */
+    llmIdleTimeoutMs: number;
   };
 
   compaction: {
@@ -80,6 +87,14 @@ export type HukoConfig = {
       provider: "duckduckgo";
       timeoutMs: number;
       maxResults: number;
+    };
+    browser: {
+      /** WebSocket port for the Chrome extension to connect to. */
+      wsPort: number;
+      /** Per-action timeout in milliseconds. */
+      defaultTimeoutMs: number;
+      /** Maximum screenshot image size in bytes (5 MiB default). */
+      maxScreenshotBytes: number;
     };
   };
 
@@ -176,6 +191,19 @@ export type HukoConfig = {
    * lifecycle is chat-only — see server/cli/commands/chat.ts.
    */
   features: Record<string, { enabled?: boolean }>;
+
+  /**
+   * Operator-authored skills (markdown files under ~/.huko/skills/ or
+   * <cwd>/.huko/skills/). Each key is a skill name (filename or
+   * folder name); `enabled: true` injects the skill body into the
+   * system prompt for the session. Defaults to OFF — skill files in
+   * the directory have no effect until explicitly toggled on here or
+   * via `--skill=NAME`.
+   *
+   * Distinct from `features` (tool bundles) and from `roles` (planner-
+   * dispatched expertise overlays). See `server/skills/index.ts`.
+   */
+  skills: Record<string, { enabled?: boolean }>;
 };
 
 // ─── Built-in defaults ───────────────────────────────────────────────────────
@@ -186,6 +214,11 @@ export const DEFAULT_CONFIG: HukoConfig = {
     maxIterations: 200,
     maxToolCalls: 200,
     maxEmptyRetries: 3,
+    // 2 minutes — comfortably long for slow time-to-first-token on
+    // thinking models, short enough that a hung provider doesn't leave
+    // the task spinning forever. Bug: hukoDev session 4 task 28 hung
+    // indefinitely with this set to (effectively) Infinity.
+    llmIdleTimeoutMs: 120_000,
   },
   compaction: {
     thresholdRatio: 0.7,
@@ -202,6 +235,11 @@ export const DEFAULT_CONFIG: HukoConfig = {
       timeoutMs: 15_000,
       maxResults: 10,
     },
+    browser: {
+      wsPort: 19222,
+      defaultTimeoutMs: 30_000,
+      maxScreenshotBytes: 5 * 1024 * 1024,
+    },
   },
   cli: {
     format: "text",
@@ -212,6 +250,7 @@ export const DEFAULT_CONFIG: HukoConfig = {
     host: "127.0.0.1",
   },
   features: {},
+  skills: {},
   safety: {
     // Safety is OPT-IN. Zero-config huko behaves identically to pre-
     // safety-layer huko: every tool just runs. Users who want safety

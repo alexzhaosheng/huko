@@ -16,7 +16,12 @@ import {
   sessionsNewCommand,
   type OutputFormat,
 } from "../commands/sessions.js";
-import { parseFormatFlags, usage } from "./shared.js";
+import { parseFormatFlags, usage as baseUsage } from "./shared.js";
+import { renderSessionsHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderSessionsHelp);
+}
 
 export async function dispatchSessions(rest: string[]): Promise<number> {
   const verb = rest[0];
@@ -34,6 +39,7 @@ export async function dispatchSessions(rest: string[]): Promise<number> {
       rest.slice(1),
       ["text", "jsonl", "json"],
       "text",
+      renderSessionsHelp,
     );
     if (positional.length > 0) {
       process.stderr.write(

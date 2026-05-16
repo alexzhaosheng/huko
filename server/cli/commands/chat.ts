@@ -57,8 +57,10 @@ import {
   stopAllSidecars,
 } from "../../services/features/index.js";
 import { bold, cyan, dim, green, red, yellow } from "../colors.js";
-import { buildFeatureOverrides, formatTokenBreakdown } from "./run.js";
+import { buildCompactionOverride, buildFeatureOverrides, formatTokenBreakdown } from "./run.js";
 import type { RunArgs } from "./run.js";
+import { extendExplicitOverride, type HukoConfig } from "../../config/index.js";
+import { activeSkillNames } from "../../skills/index.js";
 
 // ─── Public entry ────────────────────────────────────────────────────────────
 
@@ -92,7 +94,10 @@ export async function chatCommand(args: RunArgs): Promise<number> {
 
   // Formatter (same plumbing as run.ts). getConfig() self-loads.
   const effectiveVerbose: boolean = args.verbose ?? getConfig().cli.verbose;
-  const formatter = makeFormatter(args.format, { verbose: effectiveVerbose });
+  const formatter = makeFormatter(args.format, {
+    verbose: effectiveVerbose,
+    renderMarkdown: !args.noMarkdown,
+  });
 
   // SIGINT handling: first → stop current task; second consecutive →
   // force exit. Same semantics as one-shot huko.
@@ -132,10 +137,16 @@ export async function chatCommand(args: RunArgs): Promise<number> {
   let exitCode = 0;
 
   const featureOverrides = buildFeatureOverrides(args);
+  const compactionOverride =
+    args.compactThreshold !== undefined
+      ? buildCompactionOverride(args.compactThreshold)
+      : undefined;
   try {
     ctx = await bootstrap(formatter, {
       mode: args.ephemeral ? "memory" : "persistent",
       ...(featureOverrides ? { featureOverrides } : {}),
+      ...(compactionOverride ? { compactionOverride } : {}),
+      ...(args.skills && args.skills.length > 0 ? { skillsExplicit: args.skills } : {}),
     });
 
     // Open the REPL's Prompter FIRST so we can share it with the ask
@@ -223,7 +234,7 @@ export async function chatCommand(args: RunArgs): Promise<number> {
         // Render our own `> ` cursor — bypass Prompter's wizard-style
         // "Question: " suffix by passing an empty question.
         process.stderr.write(bold("> ", "stderr"));
-        line = await prompter.prompt("");
+        line = await prompter.collectMultiLine("");
       } catch (err) {
         // Ctrl+D / Ctrl+C close the readline interface → PromptCancelled.
         if (err instanceof PromptCancelled) {
@@ -371,6 +382,12 @@ async function handleSlashCommand(
   cwd: string,
 ): Promise<SlashAction> {
   const cmd = line.trim();
+
+  // Arg-bearing commands: match by prefix before the exact-match switch.
+  if (cmd === "/compact-threshold" || cmd.startsWith("/compact-threshold ")) {
+    return handleCompactThresholdCmd(cmd);
+  }
+
   switch (cmd) {
     case "/exit":
     case "/quit":
@@ -379,12 +396,32 @@ async function handleSlashCommand(
     case "/help":
       process.stderr.write(
         bold("Slash commands:", "stderr") + "\n" +
-          dim("  /exit, /quit    leave the REPL\n", "stderr") +
-          dim("  /new            start a new chat session (switches active)\n", "stderr") +
-          dim("  /session        show current session id + title\n", "stderr") +
-          dim("  /help           this list\n", "stderr"),
+          dim("  /exit, /quit               leave the REPL\n", "stderr") +
+          dim("  /new                       start a new chat session (switches active)\n", "stderr") +
+          dim("  /session                   show current session id + title\n", "stderr") +
+          dim("  /skills                    show skills active for this chat (read-only)\n", "stderr") +
+          dim("  /compact-threshold [N]     show or set context-compaction trigger (0.05..0.99)\n", "stderr") +
+          dim("  /help                      this list\n", "stderr"),
       );
       return { kind: "continue" };
+
+    case "/skills": {
+      const active = activeSkillNames(getConfig().skills);
+      if (active.length === 0) {
+        process.stderr.write(
+          dim(
+            "(no skills active — enable with `huko config set skills.<name>.enabled true` or restart with `--skill=<name>`)\n",
+            "stderr",
+          ),
+        );
+      } else {
+        process.stderr.write(`skills active: ${cyan(active.join(", "), "stderr")}\n`);
+      }
+      process.stderr.write(
+        dim("(see `huko skills list` for all discoverable skills)\n", "stderr"),
+      );
+      return { kind: "continue" };
+    }
 
     case "/session": {
       const row = await ctx.session.sessions.get(currentSessionId);
@@ -416,6 +453,41 @@ async function handleSlashCommand(
   }
 }
 
+/**
+ * `/compact-threshold` — show or update the compaction trigger ratio
+ * for the running chat process. Mutation is in-memory (via the loader's
+ * runtime override accumulator); persistence requires
+ * `huko config set compaction.thresholdRatio <N> --project`.
+ */
+function handleCompactThresholdCmd(cmd: string): SlashAction {
+  const rest = cmd.slice("/compact-threshold".length).trim();
+  if (rest.length === 0) {
+    const c = getConfig().compaction;
+    process.stderr.write(
+      `compaction: threshold=${c.thresholdRatio.toFixed(2)} target=${c.targetRatio.toFixed(2)}\n` +
+        dim(`(set with: /compact-threshold <0.05..0.99>; auto target = max(0.1, threshold - 0.2))\n`, "stderr"),
+    );
+    return { kind: "continue" };
+  }
+  const n = Number(rest);
+  if (!Number.isFinite(n) || n < 0.05 || n > 0.99) {
+    process.stderr.write(
+      red(`/compact-threshold: invalid value "${rest}" — must be a number in [0.05, 0.99]\n`, "stderr"),
+    );
+    return { kind: "continue" };
+  }
+  const override = buildCompactionOverride(n);
+  extendExplicitOverride({ compaction: override as HukoConfig["compaction"] });
+  const c = getConfig().compaction;
+  process.stderr.write(
+    green(
+      `compaction: threshold=${c.thresholdRatio.toFixed(2)} target=${c.targetRatio.toFixed(2)} (active for this chat process)`,
+      "stderr",
+    ) + "\n",
+  );
+  return { kind: "continue" };
+}
+
 // ─── Banner ──────────────────────────────────────────────────────────────────
 
 function printBanner(
@@ -423,11 +495,21 @@ function printBanner(
   model: NonNullable<typeof ctx.infra.currentModel>,
   sessionId: number,
 ): void {
+  const cfg = getConfig();
+  const c = cfg.compaction;
+  const skills = activeSkillNames(cfg.skills);
+  const skillsChip =
+    skills.length > 0
+      ? " · " + dim(`skills: ${skills.join(", ")}`, "stderr")
+      : "";
   process.stderr.write(
     bold("huko", "stderr") + " · " +
       dim(`model: ${model.providerName}/${model.modelId}`, "stderr") +
       " · " +
       dim(`session: ${sessionId}`, "stderr") +
+      " · " +
+      dim(`compact: ${c.thresholdRatio.toFixed(2)}/${c.targetRatio.toFixed(2)}`, "stderr") +
+      skillsChip +
       "\n",
   );
   process.stderr.write(

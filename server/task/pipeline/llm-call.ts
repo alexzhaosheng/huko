@@ -21,12 +21,27 @@ import type { LLMCallOptions, LLMTurnResult, PartialEvent } from "../../core/llm
 import type { TaskContext } from "../../engine/TaskContext.js";
 import { EntryKind } from "../../../shared/types.js";
 import { maybeBuildLanguageDriftReminder } from "../language-reminder.js";
+import { getConfig } from "../../config/index.js";
 
 // ─── Result type ──────────────────────────────────────────────────────────────
 
 export type LLMCallOutcome =
   | { kind: "ok"; entryId: number; result: LLMTurnResult }
-  | { kind: "aborted"; reason: "interjected" | "stopped" };
+  | {
+      kind: "aborted";
+      /**
+       * Why the call aborted:
+       *  - `interjected` — user typed a new message while this call was
+       *    in flight (chat REPL); the loop retries with fresh context.
+       *  - `stopped` — masterAbort fired (user Ctrl+C / orchestrator.stop);
+       *    the task ends with status `stopped`.
+       *  - `timeout` — no stream chunk arrived within
+       *    `config.task.llmIdleTimeoutMs`. The provider held the socket
+       *    but never sent data; we gave up. The task ends with status
+       *    `failed`.
+       */
+      reason: "interjected" | "stopped" | "timeout";
+    };
 
 // ─── Streaming throttle ───────────────────────────────────────────────────────
 
@@ -146,14 +161,43 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     }
   };
 
-  // ── 4b. Heartbeat timer ──────────────────────────────────────────────────
-  // Fires every HEARTBEAT_INTERVAL_MS; emits a tick ONLY if no chunk has
-  // arrived in that window. Streaming responses (chunks every few hundred
-  // ms) keep `lastChunkAt` fresh and produce zero ticks. Long silent
-  // pre-stream waits — common on thinking models — generate a tick every
-  // 10s so pipe consumers see we're alive.
+  // ── 4b. Heartbeat timer + idle-timeout watchdog ──────────────────────────
+  // The interval runs every HEARTBEAT_INTERVAL_MS and does TWO things:
+  //
+  //   (a) Emit `llm_progress_tick` when no chunk has arrived in the
+  //       window — streaming responses produce zero ticks, but a long
+  //       silent pre-stream wait (thinking models) sends a tick every
+  //       10s so pipe consumers (e.g. another huko's bash tool watching
+  //       for idle output) know we're alive.
+  //
+  //   (b) When idle exceeds `config.task.llmIdleTimeoutMs`, abort the
+  //       call. This catches the failure mode observed in hukoDev
+  //       session 4 task 28: the provider held the TCP socket open
+  //       without sending any data and `await invoke(...)` hung
+  //       indefinitely. Without this watchdog, the task spins forever
+  //       because nothing else triggers llmAbort.
+  //
+  // We flag `idleTimedOut` so the catch block below can distinguish
+  // "user stopped" / "interjected" from "we gave up". `AbortError` is
+  // identical in all three cases at the fetch layer.
+  const idleTimeoutMs = getConfig().task.llmIdleTimeoutMs;
+  let idleTimedOut = false;
+
   const heartbeatTimer = setInterval(() => {
-    if (Date.now() - lastChunkAt < HEARTBEAT_INTERVAL_MS) return;
+    const idle = Date.now() - lastChunkAt;
+
+    // (b) Idle timeout — only honoured when the operator has it enabled
+    // (config value > 0). Once fired, signal the abort and let the
+    // interval keep running until cleanup; the next tick will no-op
+    // because we'll be in the catch path.
+    if (idleTimeoutMs > 0 && idle >= idleTimeoutMs && !idleTimedOut) {
+      idleTimedOut = true;
+      llmAbort.abort();
+      return;
+    }
+
+    // (a) Heartbeat tick — only when no chunk arrived in the window.
+    if (idle < HEARTBEAT_INTERVAL_MS) return;
     sc.emit({
       type: "llm_progress_tick",
       entryId,
@@ -195,6 +239,12 @@ export async function callLLM(ctx: TaskContext): Promise<LLMCallOutcome> {
     }
 
     if (isAbort(err)) {
+      // Our own watchdog tripped — provider held the socket without
+      // sending data. Distinct from user-initiated stops so the loop
+      // can fail the task instead of looping or quietly ending.
+      if (idleTimedOut) {
+        return { kind: "aborted", reason: "timeout" };
+      }
       if (ctx.masterAbort.signal.aborted) {
         return { kind: "aborted", reason: "stopped" };
       }

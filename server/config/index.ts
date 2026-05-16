@@ -24,6 +24,7 @@ export {
   getConfig,
   getConfigLayers,
   loadConfig,
+  extendExplicitOverride,
   setConfigForTests,
   resetConfigForTests,
   type LoadConfigOptions,

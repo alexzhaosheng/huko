@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 220px;
+      padding: 14px 16px;
+      font-family: "SF Mono", "JetBrains Mono", "IBM Plex Mono", Consolas, monospace;
+      font-size: 13px;
+      background: #0a0d0b;
+      color: #edf6ee;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.connected { background: #9affbc; box-shadow: 0 0 6px #9affbc; }
+    .dot.reconnecting { background: #ffcc00; box-shadow: 0 0 6px #ffcc00; }
+    .dot.disconnected { background: #ff4d4d; }
+    .status-text { flex: 1; font-size: 12px; color: #95a99a; }
+    .divider { border-top: 1px solid rgba(154,255,188,0.12); margin: 10px 0 8px; }
+    .label { font-size: 11px; color: rgba(154,255,188,0.4); text-transform: uppercase; letter-spacing: 0.05em; }
+    .value { font-size: 12px; color: #95a99a; margin-bottom: 6px; }
+    .logo { font-size: 14px; font-weight: 700; color: #9affbc; letter-spacing: 0.04em; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <span class="logo">huko</span>
+  </div>
+  <div class="divider"></div>
+  <div class="row">
+    <div class="dot disconnected" id="dot"></div>
+    <span class="status-text" id="status">disconnected</span>
+  </div>
+  <div class="divider"></div>
+  <div class="label">ws port</div>
+  <div class="value">127.0.0.1:19222</div>
+  <div class="label">commands</div>
+  <div class="value">navigate, click, type, scroll, screenshot...</div>
+  <script src="popup.js"></script>
+</body>
+</html>

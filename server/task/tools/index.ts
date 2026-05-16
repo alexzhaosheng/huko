@@ -45,3 +45,4 @@ import "./server/edit-file.js";
 import "./server/delete-file.js";
 import "./server/move-file.js";
 import "./server/bash.js";
+import "./server/browser.js";

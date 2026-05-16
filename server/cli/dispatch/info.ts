@@ -13,7 +13,12 @@
  */
 
 import { infoCommand, type InfoScope, type OutputFormat } from "../commands/info.js";
-import { parseFormatFlags, usage } from "./shared.js";
+import { parseFormatFlags, usage as baseUsage } from "./shared.js";
+import { renderInfoHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderInfoHelp);
+}
 
 const SCOPES = ["global", "project"] as const;
 
@@ -22,6 +27,7 @@ export async function dispatchInfo(rest: string[]): Promise<number> {
     rest,
     ["text", "jsonl", "json"],
     "text",
+    renderInfoHelp,
   );
 
   let scope: InfoScope = "all";

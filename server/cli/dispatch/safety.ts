@@ -35,7 +35,12 @@ import {
   safetyUnsetCommand,
 } from "../commands/safety.js";
 import type { ConfigScope } from "../../config/index.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderSafetyHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderSafetyHelp);
+}
 
 const VERBS_HELP =
   "init | list | tool | check | enable | disable | deny | allow | require | unset";

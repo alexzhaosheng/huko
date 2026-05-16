@@ -13,7 +13,12 @@ import {
   debugLlmLogCommand,
   type DebugLlmLogArgs,
 } from "../commands/debug-llm-log.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderDebugHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderDebugHelp);
+}
 
 export async function dispatchDebug(rest: string[]): Promise<number> {
   const verb = rest[0];

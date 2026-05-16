@@ -20,7 +20,12 @@
  */
 
 import { dockerRunCommand, type DockerRunArgs } from "../commands/docker.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderDockerHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderDockerHelp);
+}
 
 export type DockerParseResult =
   | { kind: "ok"; args: DockerRunArgs }

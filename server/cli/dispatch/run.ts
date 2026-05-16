@@ -90,6 +90,9 @@ export function parseRunArgs(rest: string[]): ParseResult {
   let stdinPrompt = false;
   const enableFeatures: string[] = [];
   const disableFeatures: string[] = [];
+  const skills: string[] = [];
+  let noMarkdown = false;
+  let compactThreshold: number | undefined;
 
   // Phase 1: parse flags until first bare positional, `--` sentinel,
   // or `-` (stdin marker).
@@ -179,6 +182,11 @@ export function parseRunArgs(rest: string[]): ParseResult {
       i++;
       continue;
     }
+    if (arg === "--no-markdown" || arg === "--no-md") {
+      noMarkdown = true;
+      i++;
+      continue;
+    }
     if (arg.startsWith("--session=")) {
       const raw = arg.slice("--session=".length);
       const n = Number(raw);
@@ -223,6 +231,30 @@ export function parseRunArgs(rest: string[]): ParseResult {
         return { kind: "error", message: `huko: --disable= requires a feature name\n` };
       }
       disableFeatures.push(name);
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--skill=")) {
+      const name = arg.slice("--skill=".length).trim();
+      if (name.length === 0) {
+        return { kind: "error", message: `huko: --skill= requires a skill name\n` };
+      }
+      if (!skills.includes(name)) skills.push(name);
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--compact-threshold=")) {
+      const raw = arg.slice("--compact-threshold=".length);
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0.05 || n > 0.99) {
+        return {
+          kind: "error",
+          message:
+            `huko: invalid --compact-threshold value: ${raw}\n` +
+            `       expected a number in [0.05, 0.99]\n`,
+        };
+      }
+      compactThreshold = n;
       i++;
       continue;
     }
@@ -293,6 +325,9 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(stdinPrompt ? { stdinPrompt: true } : {}),
       ...(enableFeatures.length > 0 ? { enableFeatures } : {}),
       ...(disableFeatures.length > 0 ? { disableFeatures } : {}),
+      ...(noMarkdown ? { noMarkdown: true } : {}),
+      ...(compactThreshold !== undefined ? { compactThreshold } : {}),
+      ...(skills.length > 0 ? { skills } : {}),
     },
   };
 }

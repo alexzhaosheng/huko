@@ -23,6 +23,7 @@
 import type { Emitter } from "../../engine/SessionContext.js";
 import type { Formatter } from "./types.js";
 import { dim, magenta, red, yellow } from "../colors.js";
+import { renderMd } from "./markdown.js";
 
 const dimErr = (s: string) => dim(s, "stderr");
 const yellowErr = (s: string) => yellow(s, "stderr");
@@ -31,13 +32,24 @@ const redErr = (s: string) => red(s, "stderr");
 
 export type TextFormatterOptions = {
   verbose: boolean;
+  /** Render markdown to ANSI when stdout is a TTY. Default true. */
+  renderMarkdown: boolean;
 };
 
 const TOOL_CALL_ARGS_MAX = 80; // chars before collapsing in non-verbose
 const TOOL_RESULT_PREVIEW_MAX = 200; // chars when verbose
 
-export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false }): Formatter {
+export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false, renderMarkdown: true }): Formatter {
   const verbose = opts.verbose;
+  const renderMarkdown = opts.renderMarkdown;
+  // When rendering markdown for a TTY we can't run `marked` over each
+  // streamed delta — half-finished `**bold**` or open code fences would
+  // render wrong. Buffer the stream and parse the whole thing on
+  // `assistant_complete`. The raw-streaming path (no rendering, or
+  // piped stdout) is unchanged so pipe consumers still get tokens as
+  // they arrive.
+  const bufferStream = renderMarkdown && process.stdout.isTTY === true;
+  let streamBuffer = "";
   let assistantStreaming = false;
   let thinkingActive = false;
   const printedToolCallsFor = new Set<number>();
@@ -74,7 +86,11 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           // with a blank line before the answer starts on stdout.
           flushThinking();
           assistantStreaming = true;
-          process.stdout.write(event.delta);
+          if (bufferStream) {
+            streamBuffer += event.delta;
+          } else {
+            process.stdout.write(event.delta);
+          }
           break;
 
         case "assistant_thinking_delta":
@@ -99,7 +115,16 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
           // flush BEFORE the streaming-content newline check.
           flushThinking();
           if (assistantStreaming) {
-            process.stdout.write("\n");
+            if (streamBuffer.length > 0) {
+              // Buffered path — render the whole markdown blob now that
+              // the document is complete. renderMd is a no-op on non-TTY,
+              // so the gate `bufferStream` above is the only thing that
+              // determines whether we hit this branch.
+              process.stdout.write(renderMd(streamBuffer) + "\n");
+              streamBuffer = "";
+            } else {
+              process.stdout.write("\n");
+            }
             assistantStreaming = false;
           }
           if (event.toolCalls && event.toolCalls.length > 0 && !printedToolCallsFor.has(event.entryId)) {
@@ -110,7 +135,7 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false 
               // dump. result→stdout (the "answer"), info→stderr (mid-
               // task narration). The `← message: ok` ack is suppressed
               // in tool_result below since the user already saw the text.
-              if (c.name === "message" && renderMessageCall(c.arguments)) continue;
+              if (c.name === "message" && renderMessageCall(c.arguments, renderMarkdown)) continue;
 
               const argsStr = JSON.stringify(c.arguments);
               const collapsed =
@@ -287,7 +312,7 @@ function extractReminderReason(content: string): string | null {
  *   type=info   → stderr (mid-task narration)
  *   type=ask    → not handled here; ask_user event renders the prompt
  */
-function renderMessageCall(args: unknown): boolean {
+function renderMessageCall(args: unknown, renderMarkdown: boolean): boolean {
   if (args === null || typeof args !== "object") return false;
   const obj = args as { type?: unknown; text?: unknown };
   const text = typeof obj.text === "string" ? obj.text : null;
@@ -295,11 +320,14 @@ function renderMessageCall(args: unknown): boolean {
   if (text === null) return false;
 
   if (type === "result") {
-    process.stdout.write(text + "\n");
+    // Render markdown to ANSI when stdout is a TTY (terminal).
+    // Piped stdout stays raw — pipe consumers get plain markdown.
+    process.stdout.write((renderMarkdown ? renderMd(text) : text) + "\n");
     return true;
   }
   if (type === "info") {
-    process.stderr.write(text + "\n");
+    // Info messages may also contain light markdown (e.g. lists).
+    process.stderr.write((renderMarkdown ? renderMd(text, { target: "stderr" }) : text) + "\n");
     return true;
   }
   return false;

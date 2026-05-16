@@ -39,6 +39,8 @@ The CLI should support:
 
 stdout should carry the answer or structured output. stderr should carry diagnostics, progress that is not part of the answer, and actionable setup guidance.
 
+LLM output is rendered as terminal Markdown (tables get box-drawing characters, bold/italic get ANSI codes) when stdout is a TTY. `--no-markdown` (`--no-md`) skips rendering and passes the answer verbatim — useful when the LLM output contains literal `*` / `|` that marked would misinterpret.
+
 ## Active Session
 
 Each project directory can have an active session recorded in `<cwd>/.huko/state.json`. Running `huko -- "prompt"` continues that session unless the user requests a new or memory-only run.

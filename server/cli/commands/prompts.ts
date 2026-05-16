@@ -67,6 +67,12 @@ export type SelectOptions = {
 
 export type Prompter = {
   prompt(question: string, opts?: PromptOptions): Promise<string>;
+  /** Like prompt() but merges lines that arrive in rapid succession
+   *  (within 200ms) into a single multi-line string — turns a paste
+   *  of 5 lines into one \n-joined input instead of 5 separate turns.
+   *  Interactive single-line typing is unaffected: the 200ms window
+   *  after Enter is imperceptible but far shorter than human typing speed. */
+  collectMultiLine(question: string, opts?: PromptOptions): Promise<string>;
   confirm(question: string, defaultYes?: boolean): Promise<boolean>;
   select<T>(
     question: string,
@@ -86,10 +92,16 @@ export function openPrompter(): Prompter {
   // back-to-back can lose lines that were already buffered. The queue
   // pattern is rock solid: every line readline emits goes into the
   // queue, every prompt takes one from the queue (waiting if empty).
+  // terminal: false — never use readline's raw mode.
+  // On Windows, raw mode breaks IME composition (Chinese input characters
+  // get split and inserted at wrong positions). In cooked mode, the OS
+  // console host / terminal driver handles IME and basic line editing
+  // (backspace, Ctrl+W, Ctrl+U). Our queue-based approach doesn't need
+  // readline's keypress-level line editing — we just consume complete lines.
   let rl: ReadlineInterface | null = createInterface({
     input: process.stdin,
     output: process.stderr,
-    terminal: process.stdin.isTTY ? true : false,
+    terminal: false,
   });
 
   const lineQueue: string[] = [];
@@ -124,34 +136,83 @@ export function openPrompter(): Prompter {
     });
   }
 
+  /** Like takeLine(), but returns null if no line arrives within `timeoutMs`. */
+  function tryTakeLine(timeoutMs: number): Promise<string | null> {
+    if (lineQueue.length > 0) return Promise.resolve(lineQueue.shift()!);
+    if (closed) return Promise.reject(new PromptCancelled());
+    return new Promise<string | null>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = waiters.indexOf(onLine);
+        if (idx >= 0) waiters.splice(idx, 1);
+        resolve(null);
+      }, timeoutMs);
+      function onLine(line: string): void {
+        clearTimeout(timer);
+        resolve(line);
+      }
+      waiters.push(onLine);
+      const onClose = (): void => {
+        clearTimeout(timer);
+        const idx = waiters.indexOf(onLine);
+        if (idx >= 0) waiters.splice(idx, 1);
+        reject(new PromptCancelled());
+      };
+      closeWaiters.push(onClose);
+    });
+  }
+
   function writePrompt(s: string): void {
     process.stderr.write(s);
   }
 
-  return {
-    async prompt(question, opts = {}) {
-      while (true) {
-        const suffix =
-          opts.default !== undefined && opts.default !== ""
-            ? dim(` [${opts.default}]`, "stderr")
-            : "";
-        // Wizard convention is "Question: ". For non-wizard callers
-        // (e.g. the REPL prompt) passing an empty `question` skips the
-        // trailing `: ` entirely — they get to render the cursor as
-        // they like.
-        const trailer = question.length === 0 && suffix.length === 0 ? "" : ": ";
-        writePrompt(`${question}${suffix}${trailer}`);
-        const answer = await takeLine();
-        const trimmed = answer.trim();
-        const value =
-          trimmed === "" && opts.default !== undefined ? opts.default : trimmed;
-        const err = opts.validate?.(value);
-        if (err) {
-          process.stderr.write(red(`  ✗ ${err}`, "stderr") + "\n");
-          continue;
-        }
-        return value;
+  async function doPrompt(
+    question: string,
+    opts: PromptOptions = {},
+  ): Promise<string> {
+    while (true) {
+      const suffix =
+        opts.default !== undefined && opts.default !== ""
+          ? dim(` [${opts.default}]`, "stderr")
+          : "";
+      const trailer = question.length === 0 && suffix.length === 0 ? "" : ": ";
+      writePrompt(`${question}${suffix}${trailer}`);
+      const answer = await takeLine();
+      const trimmed = answer.trim();
+      const value =
+        trimmed === "" && opts.default !== undefined ? opts.default : trimmed;
+      const err = opts.validate?.(value);
+      if (err) {
+        process.stderr.write(red(`  ✗ ${err}`, "stderr") + "\n");
+        continue;
       }
+      return value;
+    }
+  }
+
+  return {
+    prompt: doPrompt,
+
+    async collectMultiLine(question, _opts = {}) {
+      // Render the prompt, then take the first line raw (no trim,
+      // no validation — this is REPL mode, exact content matters).
+      writePrompt(question.length === 0 ? "" : `${question}: `);
+      const first = await takeLine();
+      if (first === "") return "";
+      const lines: string[] = [first];
+
+      // Collect additional lines that arrived as part of a paste.
+      // A paste sends all lines to the queue within milliseconds;
+      // interactive typing takes seconds between Enter presses.
+      // 200ms is long enough to catch all pasted lines but short
+      // enough to be imperceptible for interactive typing.
+      const COLLECT_WINDOW_MS = 200;
+      while (true) {
+        const next = await tryTakeLine(COLLECT_WINDOW_MS);
+        if (next === null) break;
+        lines.push(next);
+      }
+
+      return lines.join("\n");
     },
 
     async confirm(question, defaultYes = true) {

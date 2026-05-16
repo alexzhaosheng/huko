@@ -43,13 +43,24 @@ import {
   type SessionPersistence,
 } from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
-import { getConfig, loadConfig, loadInfraConfig, type InfraConfig } from "../config/index.js";
+import {
+  getConfig,
+  loadConfig,
+  loadInfraConfig,
+  type HukoConfig,
+  type InfraConfig,
+} from "../config/index.js";
+import { loadSkill } from "../skills/index.js";
 import { listToolNames, setEnabledFeatures } from "../task/tools/registry.js";
 import {
   assertNoNameCollisionsWithTools,
   computeEnabledFeatures,
   type FeaturesConfig,
 } from "../services/features/index.js";
+
+// Side-effect import: triggers registration of all built-in features
+// (analogous to tools/index.ts for tool registration).
+import "../services/features/features.js";
 import type { Formatter } from "./formatters/index.js";
 
 export type SessionMode = "persistent" | "memory";
@@ -69,6 +80,20 @@ export type BootstrapOptions = {
    * win over project, project wins over user, user wins over default.
    */
   featureOverrides?: FeaturesConfig;
+  /**
+   * Per-call compaction overrides (`--compact-threshold=N`). Merged
+   * as the `explicit` layer for `config.compaction.*`. Partial so the
+   * caller can override just thresholdRatio/targetRatio while leaving
+   * charsPerToken to inherit from file/default layers.
+   */
+  compactionOverride?: Partial<HukoConfig["compaction"]>;
+  /**
+   * Per-call skill activations (`--skill=NAME`, repeatable). Each name
+   * is verified against the filesystem here (loud failure on typos)
+   * and rendered into the explicit config layer as `{enabled: true}`
+   * so it stacks additively with any config-file activations.
+   */
+  skillsExplicit?: string[];
 };
 
 export type CliBootstrap = {
@@ -88,11 +113,27 @@ export async function bootstrap(
   // self-loads on first access — but bootstrap is the canonical entry
   // and this lets us surface any malformed-config warnings up front
   // rather than at the first kernel read.
+  const explicit: Partial<HukoConfig> = {};
+  if (options.featureOverrides) explicit.features = options.featureOverrides;
+  if (options.compactionOverride) explicit.compaction = options.compactionOverride as HukoConfig["compaction"];
+
+  // Verify CLI-requested skills exist NOW, before any task runs. A
+  // typo in `--skill=deplyo` should abort immediately rather than
+  // surface as "skill enabled but not loadable" during the first
+  // system_prompt build. `loadSkill` throws with the searched path
+  // list — clear remediation.
+  if (options.skillsExplicit && options.skillsExplicit.length > 0) {
+    const skillsExplicit: Record<string, { enabled: boolean }> = {};
+    for (const name of options.skillsExplicit) {
+      await loadSkill(name, process.cwd());
+      skillsExplicit[name] = { enabled: true };
+    }
+    explicit.skills = skillsExplicit;
+  }
+
   loadConfig({
     cwd: process.cwd(),
-    ...(options.featureOverrides
-      ? { explicit: { features: options.featureOverrides } }
-      : {}),
+    ...(Object.keys(explicit).length > 0 ? { explicit } : {}),
   });
 
   // Feature gating: cross-check tool/feature name collision, resolve
