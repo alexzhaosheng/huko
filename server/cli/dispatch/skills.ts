@@ -7,7 +7,12 @@
  */
 
 import { skillsListCommand } from "../commands/skills.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderSkillsHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderSkillsHelp);
+}
 
 export async function dispatchSkills(rest: string[]): Promise<number> {
   const verb = rest[0];

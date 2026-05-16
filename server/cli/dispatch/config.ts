@@ -25,7 +25,12 @@ import {
   configUnsetCommand,
 } from "../commands/config.js";
 import { type ConfigScope } from "../../config/index.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderConfigHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderConfigHelp);
+}
 
 export async function dispatchConfig(rest: string[]): Promise<number> {
   const verb = rest[0];

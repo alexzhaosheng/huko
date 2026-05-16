@@ -42,6 +42,7 @@ import { dispatchSetup } from "./dispatch/setup.js";
 import { dispatchSafety } from "./dispatch/safety.js";
 import { dispatchVault } from "./dispatch/vault.js";
 import { CliExitError, usage } from "./dispatch/shared.js";
+import { renderFullHelp } from "./dispatch/help.js";
 import { isLikelyPowerShell, formatPowerShellSentinelHint } from "./env-hints.js";
 import { formatVersion } from "../version.js";
 
@@ -77,7 +78,13 @@ async function main(): Promise<number> {
     }
 
     const head = argv[0]!;
-    if (head === "-h" || head === "--help") usage(0);
+    if (head === "-h" || head === "--help") {
+      // `huko -h --all` (or `--full`) opts into the legacy everything-in-
+      // one-page dump; bare `-h` shows the new short overview.
+      const wantsAll = argv.slice(1).some((a) => a === "--all" || a === "--full");
+      if (wantsAll) usage(0, renderFullHelp);
+      usage(0);
+    }
     if (head === "-V" || head === "--version") {
       process.stdout.write(formatVersion() + "\n");
       return 0;

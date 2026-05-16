@@ -11,7 +11,12 @@ import {
   keysSetCommand,
   keysUnsetCommand,
 } from "../commands/keys.js";
-import { usage } from "./shared.js";
+import { usage as baseUsage } from "./shared.js";
+import { renderKeysHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderKeysHelp);
+}
 
 export async function dispatchKeys(rest: string[]): Promise<number> {
   const verb = rest[0];

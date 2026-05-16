@@ -22,7 +22,12 @@ import {
 } from "../commands/model.js";
 import type { OutputFormat } from "../commands/sessions.js";
 import type { ThinkLevel, ToolCallMode } from "../../core/llm/types.js";
-import { parseFormatFlags, usage } from "./shared.js";
+import { parseFormatFlags, usage as baseUsage } from "./shared.js";
+import { renderModelHelp } from "./help.js";
+
+function usage(code: number = 3): never {
+  return baseUsage(code, renderModelHelp);
+}
 
 export async function dispatchModel(rest: string[]): Promise<number> {
   const verb = rest[0];
@@ -40,6 +45,7 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       rest.slice(1),
       ["text", "jsonl", "json"],
       "text",
+      renderModelHelp,
     );
     if (positional.length > 0) {
       process.stderr.write(`huko model list: unexpected argument: ${positional[0]}\n`);
@@ -177,6 +183,7 @@ export async function dispatchModel(rest: string[]): Promise<number> {
       rest.slice(1),
       ["text", "jsonl", "json"],
       "text",
+      renderModelHelp,
     );
     if (positional.length !== 1) {
       process.stderr.write(
