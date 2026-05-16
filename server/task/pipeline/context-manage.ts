@@ -10,35 +10,47 @@
  * past user goal and every past tool action.
  *
  * ============================================================
- * !!!  THE TURN-ATOMIC INVARIANT — DO NOT VIOLATE             !!!
+ * !!!  THE PAIRING INVARIANT — DO NOT VIOLATE                 !!!
  * ============================================================
  *
- * A "turn" is a contiguous group of LLMMessages that MUST stay
- * together as a unit. Specifically:
+ * The actual hard constraint at the LLM-API layer is finer-grained
+ * than a "turn":
  *
- *     user(text) → assistant(content + maybe toolCalls)
- *                → tool(result for tc1)
- *                → tool(result for tc2)
- *                → ...
+ *     assistant(toolCalls=[a,b,c]) MUST be immediately followed by
+ *     tool(result for a), tool(result for b), tool(result for c)
  *
- * Splitting a turn — e.g. dropping `tool(result for tc2)` while
- * keeping `assistant(toolCalls=[tc1,tc2])` — produces an invalid
+ * Splitting THIS group — e.g. dropping `tool(result for c)` while
+ * keeping `assistant(toolCalls=[a,b,c])` — produces an invalid
  * conversation. The next API call FAILS:
  *
  *   - Anthropic returns 400 "tool_use ids in the assistant turn must
  *     each have a matching tool_result block in the next user turn"
  *   - OpenAI returns 400 "An assistant message with 'tool_calls' must
  *     be followed by tool messages responding to each 'tool_call_id'"
- *   - Gemini returns 400 with a similar pairing complaint (this is
- *     the bug WeavesAI hit — see their compaction.ts file header).
+ *   - Gemini / DeepSeek return 400 with a similar pairing complaint
+ *     (the bug WeavesAI hit — see their compaction.ts file header).
  *
- * Therefore: compaction operates on TURN BOUNDARIES, never on
- * individual messages. We group, we drop whole turns, we never split.
+ * Therefore: compaction operates on UNIT BOUNDARIES — each unit is a
+ * minimal safe-to-drop slice: either a single user-role message
+ * (user_message or system_reminder), or one assistant message plus all
+ * its trailing tool_results. Units are never split; whole units get
+ * dropped, never individual messages.
  *
- * Tail preservation rule: the most recent N turns stay verbatim. The
- * model needs continuity to make sense of "where was I?". Only OLD
- * turns get dropped; only the FIRST turn (the original user request)
- * is anchored as the long-tail keep.
+ * Why finer than "user-to-user turn" matters: a single chat task often
+ * has only ONE user_message followed by 30+ assistant ↔ tool_result
+ * iterations. Treating that as one indivisible "turn" meant compaction
+ * could never fire on browser-heavy single-prompt sessions (HukoTest
+ * session 2 grew to a 156k-token prompt with --compact-threshold=0.2
+ * because the turn count stayed at 2). Splitting on every assistant
+ * unblocks compaction for that case while still respecting the only
+ * invariant the API actually cares about (the tool_call ↔ tool_result
+ * pairing inside each assistant unit).
+ *
+ * Tail preservation rule: the FIRST unit (always the original user
+ * prompt, since the very next message is an assistant that flushes the
+ * boundary) is anchored, and the LAST K units stay verbatim — K is
+ * determined dynamically by the token budget walk. Only the middle
+ * gets dropped.
  *
  * Elision digest — the lossy mid-band: every dropped turn contributes
  * one or more entries to `<elided_summary>`:
@@ -112,10 +124,11 @@ export async function manageContext(ctx: TaskContext): Promise<void> {
 
   const turns = groupIntoTurns(messages, cfg.charsPerToken);
 
-  // Need at least three turns: [first][...middle...][last]. With ≤ 2
-  // turns there's nothing safe to drop (we'd risk dropping the only
-  // user request or an in-flight assistant→tool pair).
-  if (turns.length <= 2) return;
+  // Need at least three units: [first][...middle...][last]. With < 3
+  // units there's nothing in the middle to drop; the first unit is the
+  // original user prompt (always preserved) and the last is the most
+  // recent activity.
+  if (turns.length < 3) return;
 
   const plan = pickTurnsToKeep(turns, target);
   if (plan.dropped === 0) return;
@@ -274,15 +287,35 @@ export type Turn = {
 };
 
 /**
- * Group messages into turns. A turn STARTS at a `role: "user"` message
- * (real user message OR a system_reminder, both of which carry role
- * "user" in our schema). Following assistant + tool messages glue
- * onto that turn until the next `role: "user"`.
+ * Group messages into compaction units. A new unit STARTS at either:
  *
- * Edge case: leading non-user messages (shouldn't happen in normal
- * flow, but defensively handled) form a synthetic first turn.
+ *   - `role: "user"`       — real user message OR system_reminder
+ *                            (both carry role "user" in our schema)
+ *   - `role: "assistant"`  — every assistant message starts its own
+ *                            unit, so tool_results stay attached only
+ *                            to their producing assistant.
+ *
+ * Following `role: "tool"` messages glue onto the unit that started
+ * the current group. That keeps each assistant + its matching
+ * tool_results atomic (the pairing invariant — see file header).
+ *
+ * Why split on every assistant: see the file-header rationale. The
+ * coarse "user-to-user" turn boundary made compaction a no-op on
+ * heavy single-prompt sessions (one user message, 30+ assistant
+ * iterations = 1 turn = nothing to drop). Splitting on every
+ * assistant lets the middle assistant↔tool groups become droppable.
+ *
+ * Exported for tests so the unit-grouping logic can be exercised
+ * directly without spinning up a TaskContext.
+ *
+ * Edge case: leading non-user / non-assistant messages (shouldn't
+ * happen in normal flow, but defensively handled) form a synthetic
+ * first unit.
  */
-function groupIntoTurns(messages: LLMMessage[], charsPerToken: number): Turn[] {
+export function groupIntoTurns(
+  messages: LLMMessage[],
+  charsPerToken: number,
+): Turn[] {
   const turns: Turn[] = [];
   let current: LLMMessage[] = [];
 
@@ -296,10 +329,11 @@ function groupIntoTurns(messages: LLMMessage[], charsPerToken: number): Turn[] {
   };
 
   for (const m of messages) {
-    if (m.role === "user") {
+    if (m.role === "user" || m.role === "assistant") {
       flush();
       current = [m];
     } else {
+      // role: "tool" — glue onto the current (assistant-led) unit.
       current.push(m);
     }
   }
@@ -318,16 +352,19 @@ type CompactionPlan = {
 };
 
 /**
- * Decide which turns survive the compaction.
+ * Decide which units survive the compaction.
  *
  * Rules:
- *   1. ALWAYS keep the first turn — it's the original user request,
- *      losing it makes the rest of the conversation incoherent.
- *   2. Walk backwards from the end, pulling turns into the tail until
+ *   1. ALWAYS keep the first unit — under the new sub-turn grouping
+ *      this is the original user_message alone (since the next
+ *      message is an assistant that flushes the boundary). Losing it
+ *      makes the rest of the conversation incoherent.
+ *   2. Walk backwards from the end, pulling units into the tail until
  *      the budget runs out.
- *   3. Whatever's between the first turn and the tail gets dropped
- *      atomically (whole turns, never partial), and gets summarised
- *      into `<elided_summary>` by buildElidedDigest.
+ *   3. Whatever's between the first unit and the tail gets dropped
+ *      atomically (whole units, never partial — each assistant unit
+ *      keeps its tool_results), and gets summarised into
+ *      `<elided_summary>` by buildElidedDigest.
  *
  * No "pin latest user goal" special case — the digest preserves every
  * past user_message verbatim (truncated at 2k chars), so the model

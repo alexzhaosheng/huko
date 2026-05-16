@@ -24,7 +24,11 @@
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { buildElidedDigest, type Turn } from "../server/task/pipeline/context-manage.js";
+import {
+  buildElidedDigest,
+  groupIntoTurns,
+  type Turn,
+} from "../server/task/pipeline/context-manage.js";
 import { EntryKind } from "../shared/types.js";
 import type { LLMMessage } from "../server/core/llm/types.js";
 
@@ -342,5 +346,217 @@ describe("buildElidedDigest — interleaved sequence", () => {
     assert.ok(readIdx > evalIdx);
     assert.ok(optIdx > readIdx);
     assert.ok(grepIdx > optIdx);
+  });
+});
+
+// ─── groupIntoTurns — sub-turn unit boundaries ──────────────────────────────
+//
+// The boundary semantics changed when compaction moved from "user-message
+// turns" (too coarse — a single user prompt + 30 assistant iterations =
+// 1 turn = nothing droppable) to "assistant-bounded units". Each unit is
+// the smallest safe-to-drop slice that still respects the assistant ↔
+// tool_result pairing invariant the LLM APIs enforce.
+//
+// These tests pin the new boundary logic. If anyone reverts to user-only
+// boundaries (the old behaviour), compaction stops firing on single-prompt
+// heavy-iteration sessions and the regression should surface here.
+
+describe("groupIntoTurns — sub-turn unit boundaries", () => {
+  it("splits at every assistant message, not just user-role messages", () => {
+    const messages: LLMMessage[] = [
+      {
+        role: "user",
+        content: "go",
+        _entryId: 1,
+        _entryKind: EntryKind.UserMessage,
+      },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "f", arguments: {} }],
+        _entryId: 2,
+        _entryKind: EntryKind.AiMessage,
+      },
+      {
+        role: "tool",
+        content: "r1",
+        toolCallId: "c1",
+        _entryId: 3,
+        _entryKind: EntryKind.ToolResult,
+      },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c2", name: "g", arguments: {} }],
+        _entryId: 4,
+        _entryKind: EntryKind.AiMessage,
+      },
+      {
+        role: "tool",
+        content: "r2",
+        toolCallId: "c2",
+        _entryId: 5,
+        _entryKind: EntryKind.ToolResult,
+      },
+      {
+        role: "assistant",
+        content: "done",
+        _entryId: 6,
+        _entryKind: EntryKind.AiMessage,
+      },
+    ];
+    const units = groupIntoTurns(messages, 4);
+    // 4 units: [user], [asst+tool], [asst+tool], [asst_final]
+    // Under the OLD user-only boundary this was 1 unit (nothing droppable).
+    assert.equal(units.length, 4, "single-prompt with 3 assistants → 4 units");
+
+    // Unit 1 is the user_message alone (next msg is assistant, flushes).
+    assert.equal(units[0]!.messages.length, 1);
+    assert.equal(units[0]!.messages[0]!._entryKind, EntryKind.UserMessage);
+
+    // Units 2 and 3 each carry their assistant + paired tool_result.
+    assert.equal(units[1]!.messages.length, 2);
+    assert.equal(units[1]!.messages[0]!._entryKind, EntryKind.AiMessage);
+    assert.equal(units[1]!.messages[1]!._entryKind, EntryKind.ToolResult);
+    assert.equal(units[2]!.messages.length, 2);
+
+    // Unit 4 is the text-only final assistant — no trailing tools.
+    assert.equal(units[3]!.messages.length, 1);
+    assert.equal(units[3]!.messages[0]!._entryKind, EntryKind.AiMessage);
+  });
+
+  it("keeps assistant + ALL its parallel tool_results in the SAME unit", () => {
+    // The pairing invariant: assistant.toolCalls=[a,b,c] requires
+    // tool_results for a, b, AND c to immediately follow. They must
+    // never get split into different units, otherwise dropping one unit
+    // breaks the pairing.
+    const messages: LLMMessage[] = [
+      {
+        role: "user",
+        content: "x",
+        _entryId: 1,
+        _entryKind: EntryKind.UserMessage,
+      },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "a", name: "f", arguments: {} },
+          { id: "b", name: "g", arguments: {} },
+          { id: "c", name: "h", arguments: {} },
+        ],
+        _entryId: 2,
+        _entryKind: EntryKind.AiMessage,
+      },
+      {
+        role: "tool",
+        content: "a-result",
+        toolCallId: "a",
+        _entryId: 3,
+        _entryKind: EntryKind.ToolResult,
+      },
+      {
+        role: "tool",
+        content: "b-result",
+        toolCallId: "b",
+        _entryId: 4,
+        _entryKind: EntryKind.ToolResult,
+      },
+      {
+        role: "tool",
+        content: "c-result",
+        toolCallId: "c",
+        _entryId: 5,
+        _entryKind: EntryKind.ToolResult,
+      },
+    ];
+    const units = groupIntoTurns(messages, 4);
+    assert.equal(units.length, 2, "[user] + [asst+3 tools]");
+    const tail = units[1]!;
+    // Assistant + all 3 tool_results stayed in unit 2.
+    assert.equal(tail.messages.length, 4);
+    assert.equal(tail.messages[0]!._entryKind, EntryKind.AiMessage);
+    assert.equal(tail.messages[1]!._entryKind, EntryKind.ToolResult);
+    assert.equal(tail.messages[2]!._entryKind, EntryKind.ToolResult);
+    assert.equal(tail.messages[3]!._entryKind, EntryKind.ToolResult);
+  });
+
+  it("system_reminder (role=user) starts its own unit between assistants", () => {
+    const messages: LLMMessage[] = [
+      {
+        role: "user",
+        content: "go",
+        _entryId: 1,
+        _entryKind: EntryKind.UserMessage,
+      },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "f", arguments: {} }],
+        _entryId: 2,
+        _entryKind: EntryKind.AiMessage,
+      },
+      {
+        role: "tool",
+        content: "r1",
+        toolCallId: "c1",
+        _entryId: 3,
+        _entryKind: EntryKind.ToolResult,
+      },
+      {
+        role: "user",
+        content: "<system_reminder reason=\"behavior_guard\">…</system_reminder>",
+        _entryId: 4,
+        _entryKind: EntryKind.SystemReminder,
+      },
+      {
+        role: "assistant",
+        content: "ok",
+        _entryId: 5,
+        _entryKind: EntryKind.AiMessage,
+      },
+    ];
+    const units = groupIntoTurns(messages, 4);
+    // [user], [asst+tool], [system_reminder], [asst]
+    assert.equal(units.length, 4);
+    assert.equal(units[2]!.messages[0]!._entryKind, EntryKind.SystemReminder);
+    assert.equal(units[3]!.messages[0]!._entryKind, EntryKind.AiMessage);
+  });
+
+  it("a heavy single-prompt task has enough units for compaction to fire", () => {
+    // Reproduces HukoTest session 2's shape: 1 user_message followed by
+    // many assistant iterations. Under the OLD grouping this was 2
+    // turns (1 user + 1 system_reminder boundary), which tripped the
+    // `units.length < 3` early-return and made compaction a no-op even
+    // with --compact-threshold=0.2. The new grouping produces N+1 units
+    // for N assistant iterations, unblocking middle-drop.
+    const messages: LLMMessage[] = [
+      {
+        role: "user",
+        content: "do thing",
+        _entryId: allocId(),
+        _entryKind: EntryKind.UserMessage,
+      },
+    ];
+    for (let i = 0; i < 5; i++) {
+      messages.push({
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: `c${i}`, name: "browser", arguments: { action: "get_text" } }],
+        _entryId: allocId(),
+        _entryKind: EntryKind.AiMessage,
+      });
+      messages.push({
+        role: "tool",
+        content: `result ${i}`,
+        toolCallId: `c${i}`,
+        _entryId: allocId(),
+        _entryKind: EntryKind.ToolResult,
+      });
+    }
+    const units = groupIntoTurns(messages, 4);
+    // 1 (user) + 5 (assistant+tool) = 6 units → ≥ 3 → compaction unblocked.
+    assert.equal(units.length, 6);
+    assert.ok(units.length >= 3, "compaction's units.length<3 early-return is cleared");
   });
 });
