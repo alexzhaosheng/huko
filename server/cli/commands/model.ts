@@ -31,6 +31,7 @@ import {
   type ResolvedModel,
 } from "../../config/index.js";
 import { BUILTIN_MODELS } from "../../config/builtin-providers.js";
+import { estimateContextWindow } from "../../core/llm/model-context-window.js";
 import type { ThinkLevel, ToolCallMode } from "../../core/llm/types.js";
 import { bold, cyan, dim, padVisible, source } from "../colors.js";
 
@@ -65,6 +66,26 @@ export type ModelRemoveArgs = {
 export type ModelCurrentArgs = {
   modelId?: string;
   project?: boolean;
+};
+
+export type ModelShowArgs = {
+  ref: string;
+  format: OutputFormat;
+};
+
+/**
+ * Patch flags for `huko model update`. Every field is optional — only
+ * the ones passed on the CLI are touched. `--context-window=auto` lands
+ * here as `contextWindow: "auto"` so the writer can DELETE the field
+ * (revert to heuristic) instead of conflating with "leave unchanged".
+ */
+export type ModelUpdateArgs = {
+  ref: string;
+  project?: boolean;
+  displayName?: string;
+  thinkLevel?: ThinkLevel;
+  toolCallMode?: ToolCallMode;
+  contextWindow?: number | "auto";
 };
 
 // ─── list ────────────────────────────────────────────────────────────────────
@@ -317,6 +338,185 @@ export async function modelCurrentCommand(args: ModelCurrentArgs): Promise<numbe
   }
 }
 
+// ─── show ────────────────────────────────────────────────────────────────────
+
+export async function modelShowCommand(args: ModelShowArgs): Promise<number> {
+  try {
+    const parsed = parseRef(args.ref);
+    if (!parsed) {
+      process.stderr.write(
+        `huko: invalid model ref: ${args.ref}\n` +
+          `      expected <providerName>/<modelId>, e.g. anthropic/claude-sonnet-4-6\n`,
+      );
+      return 3;
+    }
+
+    const cfg = loadInfraConfig({ cwd: process.cwd() });
+    const model = cfg.models.find(
+      (m) => m.providerName === parsed.providerName && m.modelId === parsed.modelId,
+    );
+    if (!model) {
+      process.stderr.write(`huko: model "${args.ref}" not found\n`);
+      return 4;
+    }
+
+    const defaultRef = cfg.currentModel
+      ? `${cfg.currentModel.providerName}/${cfg.currentModel.modelId}`
+      : null;
+    const isCurrent = `${model.providerName}/${model.modelId}` === defaultRef;
+    const effectiveCtx = model.contextWindow ?? estimateContextWindow(model.modelId);
+    const ctxSource: "config" | "heuristic" =
+      model.contextWindow !== undefined ? "config" : "heuristic";
+
+    switch (args.format) {
+      case "json":
+        process.stdout.write(
+          JSON.stringify(showPayload(model, isCurrent, effectiveCtx, ctxSource), null, 2) + "\n",
+        );
+        break;
+      case "jsonl":
+        process.stdout.write(
+          JSON.stringify(showPayload(model, isCurrent, effectiveCtx, ctxSource)) + "\n",
+        );
+        break;
+      case "text":
+      default:
+        printShowCard(model, isCurrent, effectiveCtx, ctxSource);
+        break;
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`huko: model show failed: ${describe(err)}\n`);
+    return 1;
+  }
+}
+
+// ─── update ──────────────────────────────────────────────────────────────────
+
+export async function modelUpdateCommand(args: ModelUpdateArgs): Promise<number> {
+  try {
+    const cwd = process.cwd();
+    const parsed = parseRef(args.ref);
+    if (!parsed) {
+      process.stderr.write(
+        `huko: invalid model ref: ${args.ref}\n` +
+          `      expected <providerName>/<modelId>, e.g. anthropic/claude-sonnet-4-6\n`,
+      );
+      return 3;
+    }
+
+    // Nothing to patch? Tell the user instead of silently rewriting the
+    // file to an identical state.
+    if (
+      args.displayName === undefined &&
+      args.thinkLevel === undefined &&
+      args.toolCallMode === undefined &&
+      args.contextWindow === undefined
+    ) {
+      process.stderr.write(
+        `huko: model update: nothing to change — pass at least one of ` +
+          `--display-name / --think-level / --tool-call-mode / --context-window\n`,
+      );
+      return 3;
+    }
+
+    const cfg = loadInfraConfig({ cwd });
+    const existing = cfg.models.find(
+      (m) => m.providerName === parsed.providerName && m.modelId === parsed.modelId,
+    );
+    if (!existing) {
+      process.stderr.write(
+        `huko: model "${args.ref}" not found\n` +
+          `      run \`huko model list\` to see available models\n`,
+      );
+      return 4;
+    }
+
+    const layerName = args.project ? "project" : "global";
+    const file = args.project ? readProjectConfigFile(cwd) : readGlobalConfigFile();
+    const next: InfraConfigFile = { ...file };
+    next.models = [...(file.models ?? [])];
+
+    // Seed the layer entry from whatever's currently in effect (built-in
+    // / lower layer / same layer — all OK; we keep the existing fields
+    // and overlay the patches). This means `update` on a built-in
+    // creates an override in the chosen layer instead of erroring.
+    const idx = next.models.findIndex(
+      (m) => m.providerName === parsed.providerName && m.modelId === parsed.modelId,
+    );
+    const base: ModelConfig =
+      idx >= 0
+        ? next.models[idx]!
+        : {
+            providerName: existing.providerName,
+            modelId: existing.modelId,
+            displayName: existing.displayName,
+            ...(existing.defaultThinkLevel !== undefined
+              ? { defaultThinkLevel: existing.defaultThinkLevel }
+              : {}),
+            ...(existing.defaultToolCallMode !== undefined
+              ? { defaultToolCallMode: existing.defaultToolCallMode }
+              : {}),
+            ...(existing.contextWindow !== undefined
+              ? { contextWindow: existing.contextWindow }
+              : {}),
+          };
+
+    // Apply the patches. `undefined` means "leave alone"; the special
+    // "auto" sentinel on contextWindow means "remove the override".
+    const patched: ModelConfig = {
+      providerName: base.providerName,
+      modelId: base.modelId,
+      displayName: args.displayName ?? base.displayName,
+      ...(args.thinkLevel !== undefined
+        ? { defaultThinkLevel: args.thinkLevel }
+        : base.defaultThinkLevel !== undefined
+          ? { defaultThinkLevel: base.defaultThinkLevel }
+          : {}),
+      ...(args.toolCallMode !== undefined
+        ? { defaultToolCallMode: args.toolCallMode }
+        : base.defaultToolCallMode !== undefined
+          ? { defaultToolCallMode: base.defaultToolCallMode }
+          : {}),
+      ...(args.contextWindow === "auto"
+        ? {} // explicit unset
+        : args.contextWindow !== undefined
+          ? { contextWindow: args.contextWindow }
+          : base.contextWindow !== undefined
+            ? { contextWindow: base.contextWindow }
+            : {}),
+    };
+
+    if (idx >= 0) {
+      next.models[idx] = patched;
+    } else {
+      next.models.push(patched);
+    }
+
+    // If this model was previously vetoed in this layer (someone ran
+    // `huko model remove` against a built-in), re-enable it implicitly —
+    // updating a model = wanting to use it.
+    if (next.disabledModels) {
+      next.disabledModels = next.disabledModels.filter(
+        (m) => !(m.providerName === parsed.providerName && m.modelId === parsed.modelId),
+      );
+      if (next.disabledModels.length === 0) delete next.disabledModels;
+    }
+
+    if (args.project) writeProjectConfigFile(cwd, next);
+    else writeGlobalConfigFile(next);
+
+    const changed = describeUpdatePatch(args);
+    process.stderr.write(
+      `huko: updated model "${args.ref}" in ${layerName} config (${changed})\n`,
+    );
+    return 0;
+  } catch (err) {
+    process.stderr.write(`huko: model update failed: ${describe(err)}\n`);
+    return 1;
+  }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -378,6 +578,116 @@ function fmtCtx(n: number | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}m`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
   return String(n);
+}
+
+/**
+ * Machine-readable single-model payload — same fields as the table
+ * row plus the provider sub-record + the resolved context-window value
+ * and where it came from (config vs heuristic). Stable shape; safe for
+ * tooling to depend on.
+ */
+function showPayload(
+  m: ResolvedModel,
+  isCurrent: boolean,
+  effectiveCtx: number,
+  ctxSource: "config" | "heuristic",
+): {
+  ref: string;
+  providerName: string;
+  modelId: string;
+  displayName: string;
+  thinkLevel: string;
+  toolCallMode: string;
+  contextWindow: number;
+  contextWindowOverride: number | null;
+  contextWindowSource: "config" | "heuristic";
+  source: string;
+  isCurrent: boolean;
+  provider: {
+    name: string;
+    baseUrl: string;
+    protocol: string;
+    apiKeyRef: string;
+    source: string;
+  };
+} {
+  return {
+    ref: `${m.providerName}/${m.modelId}`,
+    providerName: m.providerName,
+    modelId: m.modelId,
+    displayName: m.displayName,
+    thinkLevel: m.defaultThinkLevel ?? "off",
+    toolCallMode: m.defaultToolCallMode ?? "native",
+    contextWindow: effectiveCtx,
+    contextWindowOverride: m.contextWindow ?? null,
+    contextWindowSource: ctxSource,
+    source: m.source,
+    isCurrent,
+    provider: {
+      name: m.provider.name,
+      baseUrl: m.provider.baseUrl,
+      protocol: m.provider.protocol,
+      apiKeyRef: m.provider.apiKeyRef,
+      source: m.provider.source,
+    },
+  };
+}
+
+function printShowCard(
+  m: ResolvedModel,
+  isCurrent: boolean,
+  effectiveCtx: number,
+  ctxSource: "config" | "heuristic",
+): void {
+  const ref = `${m.providerName}/${m.modelId}`;
+  const header =
+    bold(ref) + (isCurrent ? "  " + cyan("[current]") : "");
+  const ctxLine = `${fmtCtx(effectiveCtx)} (${effectiveCtx.toLocaleString("en-US")})` +
+    (ctxSource === "heuristic"
+      ? "  " + dim("(from heuristic — pin with `huko model update " + ref + " --context-window=<n>`)")
+      : "  " + dim("(pinned in " + m.source + " config)"));
+
+  const lines: string[] = [];
+  lines.push(header);
+  lines.push(kv("display name",   m.displayName));
+  lines.push(kv("source",         source(m.source, m.source)));
+  lines.push(kv("think level",    m.defaultThinkLevel ?? "off"));
+  lines.push(kv("tool call mode", m.defaultToolCallMode ?? "native"));
+  lines.push(kv("context window", ctxLine));
+  lines.push(dim("  provider"));
+  lines.push(kv("  name",         m.provider.name, /*indent*/ true));
+  lines.push(kv("  base url",     m.provider.baseUrl, true));
+  lines.push(kv("  protocol",     m.provider.protocol, true));
+  lines.push(kv("  api key ref",  m.provider.apiKeyRef, true));
+  lines.push(kv("  source",       source(m.provider.source, m.provider.source), true));
+  process.stdout.write(lines.join("\n") + "\n");
+}
+
+function kv(label: string, value: string, _indent = false): string {
+  // Two-column "  label    value" — keep widths consistent across rows.
+  // Width 18 fits all labels we emit (longest: "  tool call mode" = 16).
+  const padded = padVisible(label, 18);
+  return "  " + dim(padded) + value;
+}
+
+/**
+ * Human-readable diff summary for the success line of `model update`.
+ * Just the field names that changed, comma-separated; details would
+ * duplicate what the operator just typed.
+ */
+function describeUpdatePatch(args: ModelUpdateArgs): string {
+  const parts: string[] = [];
+  if (args.displayName !== undefined) parts.push(`displayName="${args.displayName}"`);
+  if (args.thinkLevel !== undefined) parts.push(`thinkLevel=${args.thinkLevel}`);
+  if (args.toolCallMode !== undefined) parts.push(`toolCallMode=${args.toolCallMode}`);
+  if (args.contextWindow !== undefined) {
+    parts.push(
+      args.contextWindow === "auto"
+        ? "contextWindow=auto (cleared)"
+        : `contextWindow=${args.contextWindow}`,
+    );
+  }
+  return parts.join(", ");
 }
 
 function printTable(rows: ResolvedModel[], defaultRef: string | null): void {

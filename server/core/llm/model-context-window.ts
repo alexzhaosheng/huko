@@ -86,9 +86,15 @@ const HEURISTIC_TABLE: ReadonlyArray<readonly [string, number]> = [
   ["deepseek-r1", 64_000],
   ["deepseek-v3", 64_000],
   ["deepseek-coder", 16_000],
-  // V4 family — 1M context window (verified: api-docs.deepseek.com)
-  ["deepseek-v4-pro", 1_000_000],
-  ["deepseek-v4-flash", 1_000_000],
+  // V4 family — conservative 256K default. V4 Pro / Flash advertise
+  // larger windows, but the effective limit varies by deployment /
+  // gateway and 1M was rarely the right number in practice (compaction
+  // never fired on bloated sessions). 256K is a safer floor that still
+  // lets compaction trigger late enough to avoid premature trimming on
+  // normal use. Pin a precise value per-model with
+  // `huko model update <ref> --context-window=N`.
+  ["deepseek-v4-pro", 256_000],
+  ["deepseek-v4-flash", 256_000],
   ["deepseek", 64_000],
   ["qwen-2.5", 128_000],
   ["qwen-2", 32_000],
