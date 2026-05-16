@@ -90,14 +90,27 @@ huko 的开发环境是 Windows + WSL Linux sandbox 混合。Edit / Write 工具
 
 ```bash
 npx tsc --noEmit       # 严格类型检查
-# 没有自动测试套件——靠类型 + script demo + 手动验
+npm test               # tests/ 下整套 node --test 套件
 ```
 
 商业常识：类型不过不交、`exit=0` 才算 done。
 
 ---
 
-## 五、领域速查（更新时记得同步 architecture.md）
+## 五、git 分支约定
+
+- **永远从 `develop` 开新分支**，不从 `main`、不在 `develop` 上直接堆 commit
+  （除非是 trivial 的 doc / config 小动作）
+- **命名**：
+  - 修 bug → `bugfix/<短描述-kebab-case>`，例如 `bugfix/markdown-streaming-render`
+  - 加 feature / 重构 / 新能力 → `feature/<短描述-kebab-case>`，例如
+    `feature/browser-control`
+- 不确定是 bug 还是 feature 时优先选 `bugfix/`（"它本来应该 work 但没有"）
+- PR 目标分支是 `develop`，不是 `main`
+
+---
+
+## 六、领域速查（更新时记得同步 architecture.md）
 
 - **kernel 边界**：`server/engine/` + `server/task/` + `server/services/` + `server/core/llm/`
   这些目录**不**直接 import HTTP / Socket.IO / drizzle / better-sqlite3 / DOM
@@ -115,6 +128,6 @@ npx tsc --noEmit       # 严格类型检查
 
 ---
 
-## 六、如果你不确定
+## 七、如果你不确定
 
 宁可问、不要猜。huko 还在早期，宁可挪一刀大重构，也不要堆补丁让架构腐化。
