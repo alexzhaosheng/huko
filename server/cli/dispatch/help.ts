@@ -105,6 +105,7 @@ export function renderHelpText(stream: ColorStream): string {
     row("--chat, -c", "Interactive REPL — keep talking until /exit or Ctrl+D"),
     row("--enable=<feature>", "Force-enable a feature (repeatable)"),
     row("--disable=<feature>", "Force-disable a feature (repeatable)"),
+    row("--compact-threshold=<n>", "Context-compaction trigger ratio (0.05..0.99; target auto-derived)"),
     "",
     h("Features (opt-in; enable with --enable=<name>):"),
     d("  browser-control   Operate the user's real Chrome via an extension."),

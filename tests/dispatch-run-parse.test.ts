@@ -416,6 +416,34 @@ describe("parseRunArgs — flag-level error cases", () => {
     if (r.kind !== "error") return;
     assert.match(r.message, /mutually exclusive/);
   });
+
+  it("accepts --compact-threshold within range", () => {
+    const r = parseRunArgs(["--compact-threshold=0.3", "--", "hi"]);
+    assert.equal(r.kind, "ok");
+    if (r.kind !== "ok") return;
+    assert.equal(r.args.compactThreshold, 0.3);
+  });
+
+  it("rejects --compact-threshold below 0.05", () => {
+    const r = parseRunArgs(["--compact-threshold=0.01", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /invalid --compact-threshold value: 0\.01/);
+  });
+
+  it("rejects --compact-threshold above 0.99", () => {
+    const r = parseRunArgs(["--compact-threshold=1.5", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /invalid --compact-threshold/);
+  });
+
+  it("rejects --compact-threshold with non-numeric value", () => {
+    const r = parseRunArgs(["--compact-threshold=high", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /invalid --compact-threshold value: high/);
+  });
 });
 
 // ─── help short-circuit ─────────────────────────────────────────────────────

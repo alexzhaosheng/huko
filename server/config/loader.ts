@@ -38,6 +38,14 @@ let resolvedLayers: ConfigSourceLayer[] = [
 ];
 let loaded = false;
 
+// Accumulated programmatic overrides applied at every load. Populated
+// by `extendExplicitOverride` so multiple subsystems (CLI flags at
+// startup + slash commands mid-chat) can stack their own slices
+// without clobbering each other. `loadConfig({explicit:X})` REPLACES
+// this; `extendExplicitOverride(X)` MERGES into it.
+let runtimeOverride: Partial<HukoConfig> = {};
+let lastCwd: string = process.cwd();
+
 /**
  * Get the current resolved config. Auto-loads from `process.cwd()` on
  * first access — callers do NOT have to call `loadConfig()` first.
@@ -81,6 +89,13 @@ export type LoadConfigOptions = {
 
 export function loadConfig(options: LoadConfigOptions = {}): HukoConfig {
   const cwd = options.cwd ?? process.cwd();
+  lastCwd = cwd;
+  // `explicit` REPLACES the runtime overlay — keeps backward compat
+  // with tests that pass a fully-formed override and expect no leftovers.
+  // To MERGE additively (mid-chat slash commands), use extendExplicitOverride.
+  if (options.explicit !== undefined) {
+    runtimeOverride = options.explicit;
+  }
   const layers: ConfigSourceLayer[] = [
     { source: "default", raw: DEFAULT_CONFIG },
   ];
@@ -102,9 +117,9 @@ export function loadConfig(options: LoadConfigOptions = {}): HukoConfig {
     if (envRaw) layers.push({ source: "env", path: envPath, raw: envRaw });
   }
 
-  // 4. Explicit programmatic override
-  if (options.explicit) {
-    layers.push({ source: "explicit", raw: options.explicit });
+  // 4. Explicit programmatic override (accumulated across calls)
+  if (Object.keys(runtimeOverride).length > 0) {
+    layers.push({ source: "explicit", raw: runtimeOverride });
   }
 
   // Merge in priority order (each subsequent overlays previous).
@@ -193,6 +208,7 @@ function applyToolRulesUnion(merged: HukoConfig, layers: ConfigSourceLayer[]): H
 export function setConfigForTests(c: HukoConfig): void {
   resolvedConfig = c;
   resolvedLayers = [{ source: "explicit", raw: c }];
+  runtimeOverride = {};
   loaded = true;
 }
 
@@ -202,7 +218,23 @@ export function setConfigForTests(c: HukoConfig): void {
 export function resetConfigForTests(): void {
   resolvedConfig = DEFAULT_CONFIG;
   resolvedLayers = [{ source: "default", raw: DEFAULT_CONFIG }];
+  runtimeOverride = {};
   loaded = false;
+}
+
+/**
+ * Deep-merge `partial` into the accumulated runtime override and
+ * re-resolve. Use this when one subsystem needs to add to the explicit
+ * layer without wiping another subsystem's overrides — e.g. bootstrap
+ * sets `{features}`, then a chat slash command sets `{compaction}` and
+ * the merged explicit becomes `{features, compaction}`.
+ *
+ * Distinct from `loadConfig({explicit:X})`, which REPLACES the runtime
+ * override wholesale (kept for test backward-compat).
+ */
+export function extendExplicitOverride(partial: Partial<HukoConfig>): HukoConfig {
+  runtimeOverride = deepMerge(runtimeOverride, partial) as Partial<HukoConfig>;
+  return loadConfig({ cwd: lastCwd });
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────

@@ -43,7 +43,13 @@ import {
   type SessionPersistence,
 } from "../persistence/index.js";
 import { TaskOrchestrator } from "../services/index.js";
-import { getConfig, loadConfig, loadInfraConfig, type InfraConfig } from "../config/index.js";
+import {
+  getConfig,
+  loadConfig,
+  loadInfraConfig,
+  type HukoConfig,
+  type InfraConfig,
+} from "../config/index.js";
 import { listToolNames, setEnabledFeatures } from "../task/tools/registry.js";
 import {
   assertNoNameCollisionsWithTools,
@@ -73,6 +79,13 @@ export type BootstrapOptions = {
    * win over project, project wins over user, user wins over default.
    */
   featureOverrides?: FeaturesConfig;
+  /**
+   * Per-call compaction overrides (`--compact-threshold=N`). Merged
+   * as the `explicit` layer for `config.compaction.*`. Partial so the
+   * caller can override just thresholdRatio/targetRatio while leaving
+   * charsPerToken to inherit from file/default layers.
+   */
+  compactionOverride?: Partial<HukoConfig["compaction"]>;
 };
 
 export type CliBootstrap = {
@@ -92,11 +105,12 @@ export async function bootstrap(
   // self-loads on first access — but bootstrap is the canonical entry
   // and this lets us surface any malformed-config warnings up front
   // rather than at the first kernel read.
+  const explicit: Partial<HukoConfig> = {};
+  if (options.featureOverrides) explicit.features = options.featureOverrides;
+  if (options.compactionOverride) explicit.compaction = options.compactionOverride as HukoConfig["compaction"];
   loadConfig({
     cwd: process.cwd(),
-    ...(options.featureOverrides
-      ? { explicit: { features: options.featureOverrides } }
-      : {}),
+    ...(Object.keys(explicit).length > 0 ? { explicit } : {}),
   });
 
   // Feature gating: cross-check tool/feature name collision, resolve

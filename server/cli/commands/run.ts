@@ -120,6 +120,18 @@ export type RunArgs = {
   /** Skip markdown→ANSI rendering even when stdout is a TTY.
    *  CLI: `--no-markdown` / `--no-md`. Defaults to false. */
   noMarkdown?: boolean;
+  /**
+   * Per-call override for `config.compaction.thresholdRatio` — the
+   * fraction of the model's context window above which compaction
+   * triggers. Lower values compact sooner and save tokens on linear
+   * tasks at the cost of dropping more tool_result history.
+   *
+   * CLI: `--compact-threshold=<0.05..0.99>`. Parser validates the
+   * range. Slash command `/compact-threshold N` lets chat sessions
+   * adjust mid-run. `targetRatio` is auto-derived (see
+   * buildCompactionOverride).
+   */
+  compactThreshold?: number;
 };
 
 /**
@@ -192,6 +204,26 @@ export function buildFeatureOverrides(args: RunArgs): FeaturesConfig | undefined
   for (const n of dis) out[n] = { enabled: false };
   for (const n of en) out[n] = { enabled: true };
   return out;
+}
+
+/**
+ * Derive `{thresholdRatio, targetRatio}` from a single CLI/slash knob.
+ *
+ * targetRatio = max(0.1, thresholdRatio - 0.2) — preserves the 20% gap
+ * from the default 0.7/0.5 pair so the user only has to think about one
+ * value. If we let targetRatio stay at its file/default 0.5 when the
+ * user lowers threshold to e.g. 0.3, compaction silently no-ops:
+ * trigger fires at 30% but the 50% budget swallows everything, so
+ * `dropped === 0`. That confused-no-op is worse than coupling the two.
+ *
+ * Caller is responsible for validating the input range
+ * (dispatch/run.ts rejects out-of-band values at argv parse).
+ */
+export function buildCompactionOverride(
+  thresholdRatio: number,
+): { thresholdRatio: number; targetRatio: number } {
+  const targetRatio = Math.max(0.1, thresholdRatio - 0.2);
+  return { thresholdRatio, targetRatio };
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
@@ -349,10 +381,15 @@ export async function runCommand(args: RunArgs): Promise<number> {
   let decisionHandle: { close(): void } | null = null;
 
   const featureOverrides = buildFeatureOverrides(args);
+  const compactionOverride =
+    args.compactThreshold !== undefined
+      ? buildCompactionOverride(args.compactThreshold)
+      : undefined;
   try {
     ctx = await bootstrap(formatter, {
       mode: args.ephemeral ? "memory" : "persistent",
       ...(featureOverrides ? { featureOverrides } : {}),
+      ...(compactionOverride ? { compactionOverride } : {}),
     });
 
     const handlerFormat: "text" | "json" | "jsonl" =
