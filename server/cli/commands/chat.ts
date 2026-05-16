@@ -399,10 +399,29 @@ async function handleSlashCommand(
           dim("  /exit, /quit               leave the REPL\n", "stderr") +
           dim("  /new                       start a new chat session (switches active)\n", "stderr") +
           dim("  /session                   show current session id + title\n", "stderr") +
+          dim("  /skills                    show skills active for this chat (read-only)\n", "stderr") +
           dim("  /compact-threshold [N]     show or set context-compaction trigger (0.05..0.99)\n", "stderr") +
           dim("  /help                      this list\n", "stderr"),
       );
       return { kind: "continue" };
+
+    case "/skills": {
+      const active = activeSkillNames(getConfig().skills);
+      if (active.length === 0) {
+        process.stderr.write(
+          dim(
+            "(no skills active — enable with `huko config set skills.<name>.enabled true` or restart with `--skill=<name>`)\n",
+            "stderr",
+          ),
+        );
+      } else {
+        process.stderr.write(`skills active: ${cyan(active.join(", "), "stderr")}\n`);
+      }
+      process.stderr.write(
+        dim("(see `huko skills list` for all discoverable skills)\n", "stderr"),
+      );
+      return { kind: "continue" };
+    }
 
     case "/session": {
       const row = await ctx.session.sessions.get(currentSessionId);
