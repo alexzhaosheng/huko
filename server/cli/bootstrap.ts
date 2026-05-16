@@ -50,6 +50,7 @@ import {
   type HukoConfig,
   type InfraConfig,
 } from "../config/index.js";
+import { loadSkill } from "../skills/index.js";
 import { listToolNames, setEnabledFeatures } from "../task/tools/registry.js";
 import {
   assertNoNameCollisionsWithTools,
@@ -86,6 +87,13 @@ export type BootstrapOptions = {
    * charsPerToken to inherit from file/default layers.
    */
   compactionOverride?: Partial<HukoConfig["compaction"]>;
+  /**
+   * Per-call skill activations (`--skill=NAME`, repeatable). Each name
+   * is verified against the filesystem here (loud failure on typos)
+   * and rendered into the explicit config layer as `{enabled: true}`
+   * so it stacks additively with any config-file activations.
+   */
+  skillsExplicit?: string[];
 };
 
 export type CliBootstrap = {
@@ -108,6 +116,21 @@ export async function bootstrap(
   const explicit: Partial<HukoConfig> = {};
   if (options.featureOverrides) explicit.features = options.featureOverrides;
   if (options.compactionOverride) explicit.compaction = options.compactionOverride as HukoConfig["compaction"];
+
+  // Verify CLI-requested skills exist NOW, before any task runs. A
+  // typo in `--skill=deplyo` should abort immediately rather than
+  // surface as "skill enabled but not loadable" during the first
+  // system_prompt build. `loadSkill` throws with the searched path
+  // list — clear remediation.
+  if (options.skillsExplicit && options.skillsExplicit.length > 0) {
+    const skillsExplicit: Record<string, { enabled: boolean }> = {};
+    for (const name of options.skillsExplicit) {
+      await loadSkill(name, process.cwd());
+      skillsExplicit[name] = { enabled: true };
+    }
+    explicit.skills = skillsExplicit;
+  }
+
   loadConfig({
     cwd: process.cwd(),
     ...(Object.keys(explicit).length > 0 ? { explicit } : {}),

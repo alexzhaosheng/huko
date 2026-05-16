@@ -60,6 +60,7 @@ import { bold, cyan, dim, green, red, yellow } from "../colors.js";
 import { buildCompactionOverride, buildFeatureOverrides, formatTokenBreakdown } from "./run.js";
 import type { RunArgs } from "./run.js";
 import { extendExplicitOverride, type HukoConfig } from "../../config/index.js";
+import { activeSkillNames } from "../../skills/index.js";
 
 // ─── Public entry ────────────────────────────────────────────────────────────
 
@@ -145,6 +146,7 @@ export async function chatCommand(args: RunArgs): Promise<number> {
       mode: args.ephemeral ? "memory" : "persistent",
       ...(featureOverrides ? { featureOverrides } : {}),
       ...(compactionOverride ? { compactionOverride } : {}),
+      ...(args.skills && args.skills.length > 0 ? { skillsExplicit: args.skills } : {}),
     });
 
     // Open the REPL's Prompter FIRST so we can share it with the ask
@@ -474,7 +476,13 @@ function printBanner(
   model: NonNullable<typeof ctx.infra.currentModel>,
   sessionId: number,
 ): void {
-  const c = getConfig().compaction;
+  const cfg = getConfig();
+  const c = cfg.compaction;
+  const skills = activeSkillNames(cfg.skills);
+  const skillsChip =
+    skills.length > 0
+      ? " · " + dim(`skills: ${skills.join(", ")}`, "stderr")
+      : "";
   process.stderr.write(
     bold("huko", "stderr") + " · " +
       dim(`model: ${model.providerName}/${model.modelId}`, "stderr") +
@@ -482,6 +490,7 @@ function printBanner(
       dim(`session: ${sessionId}`, "stderr") +
       " · " +
       dim(`compact: ${c.thresholdRatio.toFixed(2)}/${c.targetRatio.toFixed(2)}`, "stderr") +
+      skillsChip +
       "\n",
   );
   process.stderr.write(

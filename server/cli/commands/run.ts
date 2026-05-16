@@ -47,6 +47,7 @@ import {
   setActiveSessionId,
 } from "../state.js";
 import { getConfig } from "../../config/index.js";
+import { activeSkillNames } from "../../skills/index.js";
 
 export type RunArgs = {
   prompt: string;
@@ -132,6 +133,12 @@ export type RunArgs = {
    * buildCompactionOverride).
    */
   compactThreshold?: number;
+  /**
+   * Skill names from `--skill=NAME` (repeatable). Each is verified to
+   * exist at bootstrap (loud failure on typos) and force-enabled for
+   * this run on top of any config-file activations.
+   */
+  skills?: string[];
 };
 
 /**
@@ -390,6 +397,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
       mode: args.ephemeral ? "memory" : "persistent",
       ...(featureOverrides ? { featureOverrides } : {}),
       ...(compactionOverride ? { compactionOverride } : {}),
+      ...(args.skills && args.skills.length > 0 ? { skillsExplicit: args.skills } : {}),
     });
 
     const handlerFormat: "text" | "json" | "jsonl" =
@@ -480,6 +488,16 @@ export async function runCommand(args: RunArgs): Promise<number> {
     // HukoConfig (layered default → global → project → env → explicit).
     const effectiveMode: "lean" | "full" = args.mode ?? getConfig().mode;
     const lean = effectiveMode === "lean";
+
+    // Surface active skills before the LLM call so operators can spot
+    // surprise activations (e.g. a stale config.skills entry) without
+    // grepping the system prompt.
+    const activeSkills = activeSkillNames(getConfig().skills);
+    if (activeSkills.length > 0 && !lean) {
+      process.stderr.write(
+        `huko: skills active — ${activeSkills.join(", ")}\n`,
+      );
+    }
 
     const result = await ctx.orchestrator.sendUserMessage({
       chatSessionId,

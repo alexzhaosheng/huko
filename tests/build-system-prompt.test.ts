@@ -278,6 +278,71 @@ describe("buildSystemPrompt — project context (AGENTS.md / CLAUDE.md / HUKO.md
   });
 });
 
+// ─── Skills block ───────────────────────────────────────────────────────────
+
+describe("buildSystemPrompt — <skills> block", () => {
+  it("omits the <skills> block entirely when no skill is active", async () => {
+    const { resetConfigForTests } = await import("../server/config/loader.js");
+    resetConfigForTests();
+    try {
+      const prompt = await buildWith({});
+      assert.doesNotMatch(prompt, /<skills>/);
+    } finally {
+      resetConfigForTests();
+    }
+  });
+
+  it("injects a <skill> entry with description + body when one is enabled", async () => {
+    const { mkdirSync } = await import("node:fs");
+    const { resetConfigForTests, setConfigForTests } = await import(
+      "../server/config/loader.js"
+    );
+    const { DEFAULT_CONFIG } = await import("../server/config/types.js");
+
+    const tmp = mkdtempSync(join(tmpdir(), "huko-skills-prompt-"));
+    const savedHome = process.env["HOME"];
+    const altHome = mkdtempSync(join(tmpdir(), "huko-skills-prompt-home-"));
+    process.env["HOME"] = altHome;
+    process.env["USERPROFILE"] = altHome;
+    try {
+      const dir = join(tmp, ".huko", "skills");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, "deploy.md"),
+        `---
+description: pre-deploy checklist
+---
+
+Run tests before shipping.`,
+        "utf8",
+      );
+
+      setConfigForTests({
+        ...DEFAULT_CONFIG,
+        skills: { deploy: { enabled: true } },
+      });
+
+      const prompt = await buildWith({ cwd: tmp });
+      assert.match(prompt, /<skills>/);
+      assert.match(prompt, /<skill name="deploy">/);
+      assert.match(prompt, /pre-deploy checklist/);
+      assert.match(prompt, /Run tests before shipping\./);
+
+      // Slot order: <skills> sits before <project_context> (which may be
+      // absent here) AND before the cache boundary.
+      const skillsIdx = prompt.indexOf("<skills>");
+      const boundaryIdx = prompt.indexOf(SYSTEM_PROMPT_CACHE_BOUNDARY);
+      assert.ok(skillsIdx > 0 && skillsIdx < boundaryIdx);
+    } finally {
+      resetConfigForTests();
+      if (savedHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = savedHome;
+      rmSync(tmp, { recursive: true, force: true });
+      rmSync(altHome, { recursive: true, force: true });
+    }
+  });
+});
+
 // ─── OpenAI adapter strip ───────────────────────────────────────────────────
 
 describe("openai adapter strips cache boundary marker", () => {

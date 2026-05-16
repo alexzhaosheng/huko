@@ -191,6 +191,19 @@ export type HukoConfig = {
    * lifecycle is chat-only — see server/cli/commands/chat.ts.
    */
   features: Record<string, { enabled?: boolean }>;
+
+  /**
+   * Operator-authored skills (markdown files under ~/.huko/skills/ or
+   * <cwd>/.huko/skills/). Each key is a skill name (filename or
+   * folder name); `enabled: true` injects the skill body into the
+   * system prompt for the session. Defaults to OFF — skill files in
+   * the directory have no effect until explicitly toggled on here or
+   * via `--skill=NAME`.
+   *
+   * Distinct from `features` (tool bundles) and from `roles` (planner-
+   * dispatched expertise overlays). See `server/skills/index.ts`.
+   */
+  skills: Record<string, { enabled?: boolean }>;
 };
 
 // ─── Built-in defaults ───────────────────────────────────────────────────────
@@ -237,6 +250,7 @@ export const DEFAULT_CONFIG: HukoConfig = {
     host: "127.0.0.1",
   },
   features: {},
+  skills: {},
   safety: {
     // Safety is OPT-IN. Zero-config huko behaves identically to pre-
     // safety-layer huko: every tool just runs. Users who want safety
