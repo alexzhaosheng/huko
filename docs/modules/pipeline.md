@@ -40,7 +40,7 @@ Responsibilities:
 Responsibilities:
 
 - Decide when compaction is needed.
-- Preserve turn-atomic pairing constraints.
+- Preserve assistant ↔ tool_result pairing within each compaction unit (a unit is one user-role message OR one assistant message plus its trailing tool_results — finer than the old "user-to-user turn" so single-prompt heavy-iteration tasks can still compact).
 - Inject summaries or elided markers where needed.
 - Keep the LLM context under the selected model's context window.
 
