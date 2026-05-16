@@ -118,6 +118,10 @@ huko --jsonl -- "..."   # streaming events line-delimited
 ```bash
 huko provider list
 huko model list
+huko model show deepseek/deepseek-v4-pro     # full record + effective context window + source
+huko model update deepseek/deepseek-v4-pro --context-window=128000
+                                             # pin the budget when your gateway's real limit
+                                             # differs from the heuristic
 huko keys list                               # shows source layer per ref
 huko keys set deepseek                       # hidden prompt → writes <cwd>/.huko/keys.json (chmod 600)
 huko model current anthropic/claude-sonnet-4-6
