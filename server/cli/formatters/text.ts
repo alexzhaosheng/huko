@@ -42,6 +42,14 @@ const TOOL_RESULT_PREVIEW_MAX = 200; // chars when verbose
 export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false, renderMarkdown: true }): Formatter {
   const verbose = opts.verbose;
   const renderMarkdown = opts.renderMarkdown;
+  // When rendering markdown for a TTY we can't run `marked` over each
+  // streamed delta — half-finished `**bold**` or open code fences would
+  // render wrong. Buffer the stream and parse the whole thing on
+  // `assistant_complete`. The raw-streaming path (no rendering, or
+  // piped stdout) is unchanged so pipe consumers still get tokens as
+  // they arrive.
+  const bufferStream = renderMarkdown && process.stdout.isTTY === true;
+  let streamBuffer = "";
   let assistantStreaming = false;
   let thinkingActive = false;
   const printedToolCallsFor = new Set<number>();
@@ -78,7 +86,11 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false,
           // with a blank line before the answer starts on stdout.
           flushThinking();
           assistantStreaming = true;
-          process.stdout.write(event.delta);
+          if (bufferStream) {
+            streamBuffer += event.delta;
+          } else {
+            process.stdout.write(event.delta);
+          }
           break;
 
         case "assistant_thinking_delta":
@@ -103,7 +115,16 @@ export function makeTextFormatter(opts: TextFormatterOptions = { verbose: false,
           // flush BEFORE the streaming-content newline check.
           flushThinking();
           if (assistantStreaming) {
-            process.stdout.write("\n");
+            if (streamBuffer.length > 0) {
+              // Buffered path — render the whole markdown blob now that
+              // the document is complete. renderMd is a no-op on non-TTY,
+              // so the gate `bufferStream` above is the only thing that
+              // determines whether we hit this branch.
+              process.stdout.write(renderMd(streamBuffer) + "\n");
+              streamBuffer = "";
+            } else {
+              process.stdout.write("\n");
+            }
             assistantStreaming = false;
           }
           if (event.toolCalls && event.toolCalls.length > 0 && !printedToolCallsFor.has(event.entryId)) {
