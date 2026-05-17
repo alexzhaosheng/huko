@@ -32,6 +32,7 @@ huko docker run -- "audit dependencies for unmaintained packages and known CVEs"
 - **Three-layer redaction.** Built-in regex scrubs OpenAI / Anthropic / GitHub / AWS / PEM / JWT shapes from every outbound message; a global vault registers exact strings (`huko vault add github-token`) that never leave the machine; auto-allocated placeholders work BOTH ways — the LLM uses `[REDACTED:foo]` symbolically in tool calls and we expand to the real value before execution.
 - **Explicit configuration.** Layered: built-in → `~/.huko/` → `<cwd>/.huko/`. Every value `huko config show` reports its layer of origin.
 - **Two modes.** `full` for production-grade agent work (planning, ~13 tools, project context). `lean` for one-shot questions (~85% smaller per-call overhead — the loop still runs, just with one tool and a minimal system prompt).
+- **Compaction levels.** Five presets (`concise` / `standard` / `extended` / `large` / `max`) pick how much conversation huko keeps before it summarises and drops the older turns. Same level → same conversation budget across models (target tokens are absolute, clamped to 95% of the model window). One-shot `huko --compact=extended -- "..."`; persist with `huko config set compaction.level extended`.
 - **Pipes work, when you want them.** `cat data | huko -- "..."` combines: stdin is data, argv is the instruction. Good for ad-hoc workflows where the agent should ingest pipe content as its starting input — but pipe-friendliness is a convenience here, not the product.
 
 ---
@@ -126,6 +127,7 @@ huko keys list                               # shows source layer per ref
 huko keys set deepseek                       # hidden prompt → writes <cwd>/.huko/keys.json (chmod 600)
 huko model current anthropic/claude-sonnet-4-6
 huko --lean -- "single-shot, minimal overhead"
+huko --compact=extended -- "big refactor — keep more history before compacting"
 ```
 
 ### Docker (sandboxed runs)
