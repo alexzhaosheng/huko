@@ -48,6 +48,7 @@ import {
   type ResolvedProvider,
 } from "../../config/index.js";
 import { estimateContextWindow } from "../../core/llm/model-context-window.js";
+import { getConfig, resolveCompaction } from "../../config/index.js";
 import { getHukoVersion, getBuildInfo } from "../../version.js";
 import {
   describeKeySource,
@@ -394,6 +395,34 @@ function printText(eff: Effective, cwd: string, scope: InfoScope): void {
         yellow(`(not set in ${scope})`) +
         "\n\n",
     );
+  }
+
+  // Compaction (always shown — it's a key knob and the resolved
+  // numbers depend on the active model's context window, which info
+  // already prints below). Picks up `--compact=` / `--compact-threshold=`
+  // explicit overrides too.
+  {
+    const modelWindow =
+      eff.currentModel?.contextWindow ??
+      (eff.currentModel
+        ? estimateContextWindow(eff.currentModel.modelId)
+        : 200_000);
+    const resolved = resolveCompaction(getConfig().compaction, modelWindow);
+    const ratios = `threshold ${(resolved.thresholdRatio * 100).toFixed(0)}% / target ${(resolved.targetRatio * 100).toFixed(0)}%`;
+    out.write(
+      bold("Compaction:      ") +
+        ` ${emphasis(resolved.display)}   ${dim(`(${ratios})`)}\n`,
+    );
+    if (eff.currentModel) {
+      const tokenBudget = Math.round(modelWindow * resolved.thresholdRatio);
+      out.write(
+        dim(
+          `                  ~${tokenBudget.toLocaleString()} tokens before compaction triggers ` +
+            `(of ${modelWindow.toLocaleString()} window)`,
+        ) + "\n",
+      );
+    }
+    out.write("\n");
   }
 
   // Other runtime overrides (always shown if any exist; section omitted

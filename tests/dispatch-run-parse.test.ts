@@ -465,6 +465,29 @@ describe("parseRunArgs — flag-level error cases", () => {
     if (r.kind !== "error") return;
     assert.match(r.message, /--skill= requires a skill name/);
   });
+
+  it("accepts --compact=<level> for valid preset names", () => {
+    for (const name of ["concise", "standard", "extended", "large", "max"]) {
+      const r = parseRunArgs([`--compact=${name}`, "--", "hi"]);
+      assert.equal(r.kind, "ok", `failed for ${name}`);
+      if (r.kind !== "ok") continue;
+      assert.equal(r.args.compactLevel, name);
+    }
+  });
+
+  it("rejects --compact= with an unknown level name", () => {
+    const r = parseRunArgs(["--compact=tiny", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /invalid --compact value: tiny/);
+  });
+
+  it("rejects --compact= combined with --compact-threshold= (mutually exclusive)", () => {
+    const r = parseRunArgs(["--compact=extended", "--compact-threshold=0.4", "--", "hi"]);
+    assert.equal(r.kind, "error");
+    if (r.kind !== "error") return;
+    assert.match(r.message, /mutually exclusive/);
+  });
 });
 
 // ─── help short-circuit ─────────────────────────────────────────────────────

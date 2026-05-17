@@ -237,6 +237,22 @@ export function extendExplicitOverride(partial: Partial<HukoConfig>): HukoConfig
   return loadConfig({ cwd: lastCwd });
 }
 
+/**
+ * Replace a single top-level subtree in the runtime override and
+ * re-resolve. Unlike `extendExplicitOverride`, the new value REPLACES
+ * any prior content at that key — so a chat slash command flipping
+ * `compaction` from `{thresholdRatio: 0.4}` (custom) to `{level: "extended"}`
+ * doesn't leave the stale `thresholdRatio` behind and accidentally stay
+ * in custom mode.
+ */
+export function replaceExplicitOverrideKey<K extends keyof HukoConfig>(
+  key: K,
+  value: HukoConfig[K],
+): HukoConfig {
+  runtimeOverride = { ...runtimeOverride, [key]: value };
+  return loadConfig({ cwd: lastCwd });
+}
+
 // ─── Internals ───────────────────────────────────────────────────────────────
 
 function tryReadJson(p: string): Partial<HukoConfig> | null {

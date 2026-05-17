@@ -25,6 +25,7 @@ export {
   getConfigLayers,
   loadConfig,
   extendExplicitOverride,
+  replaceExplicitOverrideKey,
   setConfigForTests,
   resetConfigForTests,
   type LoadConfigOptions,
@@ -32,11 +33,20 @@ export {
 
 export {
   DEFAULT_CONFIG,
+  COMPACTION_LEVELS,
+  COMPACTION_LEVEL_TARGETS,
   type HukoConfig,
   type ConfigSourceLayer,
+  type CompactionLevel,
   type SafetyAction,
   type ToolSafetyRules,
 } from "./types.js";
+
+export {
+  resolveCompaction,
+  ratioForLevel,
+  type ResolvedCompaction,
+} from "./compaction.js";
 
 // ── Writers (path-based set/get/unset) ──────────────────────────────────────
 //

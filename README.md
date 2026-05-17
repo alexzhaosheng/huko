@@ -301,6 +301,40 @@ When any skill is active, the chat banner ends with `skills: deploy, triage`, an
 
 ---
 
+## Compaction levels
+
+When the conversation grows past a budget, huko summarises the older turns into a compact digest and drops the original bulk — this is pure algorithmic compression, no LLM call, no extra tokens spent on summarisation (see [`docs/architecture.md`](docs/architecture.md) for the digest format).
+
+The trigger budget is exposed as **five presets** plus a literal `max`, all targeting absolute token counts so a level means the same conversation length regardless of which model is running:
+
+| Level | Target tokens | Behaviour |
+|---|---|---|
+| `concise` | 32k | Aggressive — quick tasks, small context |
+| `standard` *(default)* | 64k | Sensible middle ground |
+| `extended` | 128k | Bigger tasks, more recall |
+| `large` | 256k | Long sessions; clamps to 95% on smaller-window models |
+| `max` | 95% of model window | Use everything the model offers |
+
+```bash
+# Persistent
+huko config set compaction.level extended --project       # this project
+huko config set compaction.level standard                  # globally
+
+# One-shot
+huko --compact=large -- "refactor the whole module"
+huko --chat --compact=max
+```
+
+For the rare case where a preset doesn't fit, the raw ratio escape hatch still works:
+
+```bash
+huko --compact-threshold=0.4 -- ...      # custom: triggers at 40% of window
+```
+
+Setting `--compact-threshold` (or `config.compaction.thresholdRatio`) overrides any preset and the effective display flips to `custom`. Inspect the live setting with `huko info` (under `Compaction:`) — it shows the active level, the resolved threshold/target percentages, and the absolute token budget on the current model.
+
+---
+
 ## Configuration
 
 Layered, just like `git config`:

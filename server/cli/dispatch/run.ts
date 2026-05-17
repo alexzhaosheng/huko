@@ -57,6 +57,7 @@
  */
 
 import { runCommand, type RunArgs } from "../commands/run.js";
+import { COMPACTION_LEVELS, type CompactionLevel } from "../../config/index.js";
 import type { FormatName } from "../formatters/index.js";
 import { usage } from "./shared.js";
 import { isLikelyPowerShell, formatPowerShellSentinelHint } from "../env-hints.js";
@@ -93,6 +94,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
   const skills: string[] = [];
   let noMarkdown = false;
   let compactThreshold: number | undefined;
+  let compactLevel: CompactionLevel | undefined;
 
   // Phase 1: parse flags until first bare positional, `--` sentinel,
   // or `-` (stdin marker).
@@ -258,6 +260,20 @@ export function parseRunArgs(rest: string[]): ParseResult {
       i++;
       continue;
     }
+    if (arg.startsWith("--compact=")) {
+      const raw = arg.slice("--compact=".length);
+      if (!(COMPACTION_LEVELS as readonly string[]).includes(raw)) {
+        return {
+          kind: "error",
+          message:
+            `huko: invalid --compact value: ${raw}\n` +
+            `       expected one of: ${COMPACTION_LEVELS.join(", ")}\n`,
+        };
+      }
+      compactLevel = raw as CompactionLevel;
+      i++;
+      continue;
+    }
 
     // Unknown flag. Note that things like `-3` (numbers) end up here
     // because they start with `-` and don't match any known flag.
@@ -280,6 +296,14 @@ export function parseRunArgs(rest: string[]): ParseResult {
   // Mutual exclusion checks.
   if (newSession && sessionId !== undefined) {
     return { kind: "error", message: "huko: --new and --session=<id> are mutually exclusive\n" };
+  }
+  if (compactLevel !== undefined && compactThreshold !== undefined) {
+    return {
+      kind: "error",
+      message:
+        "huko: --compact=<level> and --compact-threshold=<n> are mutually exclusive\n" +
+        "       Pick one: the preset (`--compact=extended`) or the raw ratio (`--compact-threshold=0.4`).\n",
+    };
   }
   // Same feature name in both --enable and --disable is a typo / mistake
   // rather than a sane request. Fail loud rather than picking a winner.
@@ -327,6 +351,7 @@ export function parseRunArgs(rest: string[]): ParseResult {
       ...(disableFeatures.length > 0 ? { disableFeatures } : {}),
       ...(noMarkdown ? { noMarkdown: true } : {}),
       ...(compactThreshold !== undefined ? { compactThreshold } : {}),
+      ...(compactLevel !== undefined ? { compactLevel } : {}),
       ...(skills.length > 0 ? { skills } : {}),
     },
   };

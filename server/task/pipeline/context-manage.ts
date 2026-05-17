@@ -81,7 +81,7 @@
 import type { LLMMessage } from "../../core/llm/types.js";
 import type { TaskContext } from "../../engine/TaskContext.js";
 import { EntryKind } from "../../../shared/types.js";
-import { getConfig } from "../../config/index.js";
+import { getConfig, resolveCompaction } from "../../config/index.js";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 //
@@ -116,9 +116,12 @@ export async function manageContext(ctx: TaskContext): Promise<void> {
   const messages = sc.getMessages();
   const totalTokens = approxTokensOfMessages(messages, cfg.charsPerToken);
 
-  // Scale thresholds to this model's context window.
-  const threshold = Math.ceil(ctx.contextWindow * cfg.thresholdRatio);
-  const target = Math.ceil(ctx.contextWindow * cfg.targetRatio);
+  // Resolve presets ("standard", "extended", …) against this model's
+  // context window. A raw `thresholdRatio` in any layer flips display
+  // to "custom" and bypasses the preset math.
+  const resolved = resolveCompaction(cfg, ctx.contextWindow);
+  const threshold = Math.ceil(ctx.contextWindow * resolved.thresholdRatio);
+  const target = Math.ceil(ctx.contextWindow * resolved.targetRatio);
 
   if (totalTokens < threshold) return;
 
