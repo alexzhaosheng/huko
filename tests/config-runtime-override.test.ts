@@ -93,7 +93,9 @@ describe("loader — runtime override accumulator", () => {
     assert.equal(getConfig().compaction.thresholdRatio, 0.3);
     resetConfigForTests();
     loadConfig({ cwd });
-    // After reset, the default 0.7 is back.
-    assert.equal(getConfig().compaction.thresholdRatio, 0.7);
+    // After reset, no thresholdRatio is set — the level preset
+    // ("standard") takes over and the raw ratio is undefined.
+    assert.equal(getConfig().compaction.thresholdRatio, undefined);
+    assert.equal(getConfig().compaction.level, "standard");
   });
 });

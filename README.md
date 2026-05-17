@@ -32,6 +32,7 @@ huko docker run -- "audit dependencies for unmaintained packages and known CVEs"
 - **Three-layer redaction.** Built-in regex scrubs OpenAI / Anthropic / GitHub / AWS / PEM / JWT shapes from every outbound message; a global vault registers exact strings (`huko vault add github-token`) that never leave the machine; auto-allocated placeholders work BOTH ways — the LLM uses `[REDACTED:foo]` symbolically in tool calls and we expand to the real value before execution.
 - **Explicit configuration.** Layered: built-in → `~/.huko/` → `<cwd>/.huko/`. Every value `huko config show` reports its layer of origin.
 - **Two modes.** `full` for production-grade agent work (planning, ~13 tools, project context). `lean` for one-shot questions (~85% smaller per-call overhead — the loop still runs, just with one tool and a minimal system prompt).
+- **Compaction levels.** Five presets (`concise` / `standard` / `extended` / `large` / `max`) pick how much conversation huko keeps before it summarises and drops the older turns. Same level → same conversation budget across models (target tokens are absolute, clamped to 95% of the model window). One-shot `huko --compact=extended -- "..."`; persist with `huko config set compaction.level extended`.
 - **Pipes work, when you want them.** `cat data | huko -- "..."` combines: stdin is data, argv is the instruction. Good for ad-hoc workflows where the agent should ingest pipe content as its starting input — but pipe-friendliness is a convenience here, not the product.
 
 ---
@@ -126,6 +127,7 @@ huko keys list                               # shows source layer per ref
 huko keys set deepseek                       # hidden prompt → writes <cwd>/.huko/keys.json (chmod 600)
 huko model current anthropic/claude-sonnet-4-6
 huko --lean -- "single-shot, minimal overhead"
+huko --compact=extended -- "big refactor — keep more history before compacting"
 ```
 
 ### Docker (sandboxed runs)
@@ -298,6 +300,40 @@ huko skills list
 Project files shadow global files of the same name (matches the rest of the layered-config story).
 
 When any skill is active, the chat banner ends with `skills: deploy, triage`, and one-shot runs print `huko: skills active — deploy, triage` to stderr before the LLM call. No surprise activations.
+
+---
+
+## Compaction levels
+
+When the conversation grows past a budget, huko summarises the older turns into a compact digest and drops the original bulk — this is pure algorithmic compression, no LLM call, no extra tokens spent on summarisation (see [`docs/architecture.md`](docs/architecture.md) for the digest format).
+
+The trigger budget is exposed as **five presets** plus a literal `max`, all targeting absolute token counts so a level means the same conversation length regardless of which model is running:
+
+| Level | Target tokens | Behaviour |
+|---|---|---|
+| `concise` | 32k | Aggressive — quick tasks, small context |
+| `standard` *(default)* | 64k | Sensible middle ground |
+| `extended` | 128k | Bigger tasks, more recall |
+| `large` | 256k | Long sessions; clamps to 95% on smaller-window models |
+| `max` | 95% of model window | Use everything the model offers |
+
+```bash
+# Persistent
+huko config set compaction.level extended --project       # this project
+huko config set compaction.level standard                  # globally
+
+# One-shot
+huko --compact=large -- "refactor the whole module"
+huko --chat --compact=max
+```
+
+For the rare case where a preset doesn't fit, the raw ratio escape hatch still works:
+
+```bash
+huko --compact-threshold=0.4 -- ...      # custom: triggers at 40% of window
+```
+
+Setting `--compact-threshold` (or `config.compaction.thresholdRatio`) overrides any preset and the effective display flips to `custom`. Inspect the live setting with `huko info` (under `Compaction:`) — it shows the active level, the resolved threshold/target percentages, and the absolute token budget on the current model.
 
 ---
 

@@ -57,9 +57,23 @@ import {
   stopAllSidecars,
 } from "../../services/features/index.js";
 import { bold, cyan, dim, green, red, yellow } from "../colors.js";
-import { buildCompactionOverride, buildFeatureOverrides, formatTokenBreakdown } from "./run.js";
+import {
+  buildCompactionFromArgs,
+  buildCompactionOverride,
+  buildFeatureOverrides,
+  formatTokenBreakdown,
+} from "./run.js";
 import type { RunArgs } from "./run.js";
-import { extendExplicitOverride, type HukoConfig } from "../../config/index.js";
+import {
+  COMPACTION_LEVELS,
+  extendExplicitOverride,
+  replaceExplicitOverrideKey,
+  resolveCompaction,
+  type CompactionLevel,
+  type HukoConfig,
+  type ResolvedCompaction,
+} from "../../config/index.js";
+import { estimateContextWindow } from "../../core/llm/model-context-window.js";
 import { activeSkillNames } from "../../skills/index.js";
 
 // ─── Public entry ────────────────────────────────────────────────────────────
@@ -137,10 +151,7 @@ export async function chatCommand(args: RunArgs): Promise<number> {
   let exitCode = 0;
 
   const featureOverrides = buildFeatureOverrides(args);
-  const compactionOverride =
-    args.compactThreshold !== undefined
-      ? buildCompactionOverride(args.compactThreshold)
-      : undefined;
+  const compactionOverride = buildCompactionFromArgs(args);
   try {
     ctx = await bootstrap(formatter, {
       mode: args.ephemeral ? "memory" : "persistent",
@@ -384,8 +395,8 @@ async function handleSlashCommand(
   const cmd = line.trim();
 
   // Arg-bearing commands: match by prefix before the exact-match switch.
-  if (cmd === "/compact-threshold" || cmd.startsWith("/compact-threshold ")) {
-    return handleCompactThresholdCmd(cmd);
+  if (cmd === "/compact" || cmd.startsWith("/compact ")) {
+    return handleCompactCmd(cmd, ctx);
   }
 
   switch (cmd) {
@@ -400,7 +411,7 @@ async function handleSlashCommand(
           dim("  /new                       start a new chat session (switches active)\n", "stderr") +
           dim("  /session                   show current session id + title\n", "stderr") +
           dim("  /skills                    show skills active for this chat (read-only)\n", "stderr") +
-          dim("  /compact-threshold [N]     show or set context-compaction trigger (0.05..0.99)\n", "stderr") +
+          dim("  /compact [name|N]          show or set compaction level (concise|standard|extended|large|max) or custom ratio\n", "stderr") +
           dim("  /help                      this list\n", "stderr"),
       );
       return { kind: "continue" };
@@ -454,38 +465,79 @@ async function handleSlashCommand(
 }
 
 /**
- * `/compact-threshold` — show or update the compaction trigger ratio
- * for the running chat process. Mutation is in-memory (via the loader's
- * runtime override accumulator); persistence requires
- * `huko config set compaction.thresholdRatio <N> --project`.
+ * `/compact` — read or write the compaction setting in one command.
+ *
+ *   /compact                      — show effective level + ratios
+ *   /compact <name>               — switch to a preset (concise..max)
+ *   /compact <N>                  — switch to a custom ratio (0.05..0.99)
+ *
+ * Mutation is in-memory via the loader's runtime override; persistence
+ * requires `huko config set compaction.level <name>` (or .thresholdRatio).
+ * Setting a preset REPLACES any prior `thresholdRatio` override (via
+ * `replaceExplicitOverrideKey`) so the resolver actually picks the
+ * preset rather than staying stuck in custom mode.
  */
-function handleCompactThresholdCmd(cmd: string): SlashAction {
-  const rest = cmd.slice("/compact-threshold".length).trim();
+function handleCompactCmd(cmd: string, ctx: BootstrapCtx): SlashAction {
+  const rest = cmd.slice("/compact".length).trim();
+  const modelWindow = activeModelWindow(ctx);
+
   if (rest.length === 0) {
-    const c = getConfig().compaction;
+    const resolved = resolveCompaction(getConfig().compaction, modelWindow);
+    process.stderr.write(formatCompactionStatus(resolved) + "\n");
+    return { kind: "continue" };
+  }
+
+  // Try preset name first.
+  if ((COMPACTION_LEVELS as readonly string[]).includes(rest)) {
+    const level = rest as CompactionLevel;
+    replaceExplicitOverrideKey("compaction", {
+      level,
+      charsPerToken: getConfig().compaction.charsPerToken,
+    });
+    const resolved = resolveCompaction(getConfig().compaction, modelWindow);
     process.stderr.write(
-      `compaction: threshold=${c.thresholdRatio.toFixed(2)} target=${c.targetRatio.toFixed(2)}\n` +
-        dim(`(set with: /compact-threshold <0.05..0.99>; auto target = max(0.1, threshold - 0.2))\n`, "stderr"),
+      green(formatCompactionStatus(resolved, "active for this chat process"), "stderr") + "\n",
     );
     return { kind: "continue" };
   }
+
+  // Fall back to numeric custom path.
   const n = Number(rest);
-  if (!Number.isFinite(n) || n < 0.05 || n > 0.99) {
+  if (Number.isFinite(n) && n >= 0.05 && n <= 0.99) {
+    const override = buildCompactionOverride(n);
+    replaceExplicitOverrideKey("compaction", {
+      ...override,
+      level: getConfig().compaction.level,
+      charsPerToken: getConfig().compaction.charsPerToken,
+    } as HukoConfig["compaction"]);
+    const resolved = resolveCompaction(getConfig().compaction, modelWindow);
     process.stderr.write(
-      red(`/compact-threshold: invalid value "${rest}" — must be a number in [0.05, 0.99]\n`, "stderr"),
+      green(formatCompactionStatus(resolved, "active for this chat process"), "stderr") + "\n",
     );
     return { kind: "continue" };
   }
-  const override = buildCompactionOverride(n);
-  extendExplicitOverride({ compaction: override as HukoConfig["compaction"] });
-  const c = getConfig().compaction;
+
   process.stderr.write(
-    green(
-      `compaction: threshold=${c.thresholdRatio.toFixed(2)} target=${c.targetRatio.toFixed(2)} (active for this chat process)`,
+    red(
+      `/compact: invalid value "${rest}" — expected one of: ${COMPACTION_LEVELS.join(", ")}, or a number in [0.05, 0.99]\n`,
       "stderr",
-    ) + "\n",
+    ),
   );
   return { kind: "continue" };
+}
+
+function activeModelWindow(ctx: BootstrapCtx): number {
+  const model = ctx.infra.currentModel;
+  if (!model) return 200_000; // fallback when no model selected yet — defensive
+  return model.contextWindow ?? estimateContextWindow(model.modelId);
+}
+
+function formatCompactionStatus(resolved: ResolvedCompaction, suffix?: string): string {
+  const tag = resolved.display;
+  const t = (resolved.thresholdRatio * 100).toFixed(0);
+  const tgt = (resolved.targetRatio * 100).toFixed(0);
+  const tail = suffix ? ` (${suffix})` : "";
+  return `compaction: ${tag} — threshold ${t}% / target ${tgt}%${tail}`;
 }
 
 // ─── Banner ──────────────────────────────────────────────────────────────────
@@ -496,7 +548,8 @@ function printBanner(
   sessionId: number,
 ): void {
   const cfg = getConfig();
-  const c = cfg.compaction;
+  const modelWindow = model.contextWindow ?? estimateContextWindow(model.modelId);
+  const resolved = resolveCompaction(cfg.compaction, modelWindow);
   const skills = activeSkillNames(cfg.skills);
   const skillsChip =
     skills.length > 0
@@ -508,7 +561,10 @@ function printBanner(
       " · " +
       dim(`session: ${sessionId}`, "stderr") +
       " · " +
-      dim(`compact: ${c.thresholdRatio.toFixed(2)}/${c.targetRatio.toFixed(2)}`, "stderr") +
+      dim(
+        `compact: ${resolved.display} (${(resolved.thresholdRatio * 100).toFixed(0)}%)`,
+        "stderr",
+      ) +
       skillsChip +
       "\n",
   );

@@ -81,10 +81,13 @@ export type BootstrapOptions = {
    */
   featureOverrides?: FeaturesConfig;
   /**
-   * Per-call compaction overrides (`--compact-threshold=N`). Merged
-   * as the `explicit` layer for `config.compaction.*`. Partial so the
-   * caller can override just thresholdRatio/targetRatio while leaving
-   * charsPerToken to inherit from file/default layers.
+   * Per-call compaction overrides — either the preset path
+   * (`--compact=<level>` → `{level: <level>}`) or the raw-ratio path
+   * (`--compact-threshold=N` → `{thresholdRatio, targetRatio}`).
+   * Merged as the `explicit` layer for `config.compaction.*`. Partial
+   * so the caller can override one knob while leaving the rest to
+   * inherit from file/default layers; the resolver treats a raw
+   * thresholdRatio as a switch to "custom" mode regardless of level.
    */
   compactionOverride?: Partial<HukoConfig["compaction"]>;
   /**

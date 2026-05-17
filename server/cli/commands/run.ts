@@ -46,7 +46,7 @@ import {
   getActiveSessionId,
   setActiveSessionId,
 } from "../state.js";
-import { getConfig } from "../../config/index.js";
+import { getConfig, type CompactionLevel } from "../../config/index.js";
 import { activeSkillNames } from "../../skills/index.js";
 
 export type RunArgs = {
@@ -128,11 +128,17 @@ export type RunArgs = {
    * tasks at the cost of dropping more tool_result history.
    *
    * CLI: `--compact-threshold=<0.05..0.99>`. Parser validates the
-   * range. Slash command `/compact-threshold N` lets chat sessions
-   * adjust mid-run. `targetRatio` is auto-derived (see
-   * buildCompactionOverride).
+   * range. Slash command `/compact <N>` lets chat sessions adjust
+   * mid-run. `targetRatio` is auto-derived (see buildCompactionOverride).
    */
   compactThreshold?: number;
+  /**
+   * Per-call override for `config.compaction.level` — one of the five
+   * presets (concise|standard|extended|large|max). Mutually exclusive
+   * with `compactThreshold`; the parser rejects both at once. Slash
+   * command `/compact <name>` mirrors this knob inside chat.
+   */
+  compactLevel?: CompactionLevel;
   /**
    * Skill names from `--skill=NAME` (repeatable). Each is verified to
    * exist at bootstrap (loud failure on typos) and force-enabled for
@@ -231,6 +237,30 @@ export function buildCompactionOverride(
 ): { thresholdRatio: number; targetRatio: number } {
   const targetRatio = Math.max(0.1, thresholdRatio - 0.2);
   return { thresholdRatio, targetRatio };
+}
+
+/**
+ * Build the bootstrap-shaped compaction override from RunArgs.
+ *
+ *   --compact=<level>          → `{level}`           preset path
+ *   --compact-threshold=<n>    → `{thresholdRatio,   custom path
+ *                                  targetRatio}`
+ *   (neither)                  → undefined
+ *
+ * The CLI parser already enforces mutual exclusion; this just shapes
+ * whichever was set. Returning `undefined` when neither was set keeps
+ * bootstrap's explicit layer clean.
+ */
+export function buildCompactionFromArgs(
+  args: RunArgs,
+): Partial<{
+  level: CompactionLevel;
+  thresholdRatio: number;
+  targetRatio: number;
+}> | undefined {
+  if (args.compactLevel !== undefined) return { level: args.compactLevel };
+  if (args.compactThreshold !== undefined) return buildCompactionOverride(args.compactThreshold);
+  return undefined;
 }
 
 export async function runCommand(args: RunArgs): Promise<number> {
@@ -388,10 +418,7 @@ export async function runCommand(args: RunArgs): Promise<number> {
   let decisionHandle: { close(): void } | null = null;
 
   const featureOverrides = buildFeatureOverrides(args);
-  const compactionOverride =
-    args.compactThreshold !== undefined
-      ? buildCompactionOverride(args.compactThreshold)
-      : undefined;
+  const compactionOverride = buildCompactionFromArgs(args);
   try {
     ctx = await bootstrap(formatter, {
       mode: args.ephemeral ? "memory" : "persistent",

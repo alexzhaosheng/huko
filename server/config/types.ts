@@ -4,6 +4,31 @@
  * The single typed schema for huko's configuration.
  */
 
+// ─── Compaction tuning primitives ───────────────────────────────────────────
+
+/**
+ * Five presets + "max" mapping to absolute target-token counts the
+ * compactor aims for. Resolver in `server/config/compaction.ts` clamps
+ * the preset's absolute target against the active model's context
+ * window so small windows degrade to "as much as fits".
+ */
+export type CompactionLevel = "concise" | "standard" | "extended" | "large" | "max";
+
+export const COMPACTION_LEVEL_TARGETS: Record<Exclude<CompactionLevel, "max">, number> = {
+  concise: 32_000,
+  standard: 64_000,
+  extended: 128_000,
+  large: 256_000,
+};
+
+export const COMPACTION_LEVELS: readonly CompactionLevel[] = [
+  "concise",
+  "standard",
+  "extended",
+  "large",
+  "max",
+] as const;
+
 // ─── Safety policy primitives ───────────────────────────────────────────────
 
 export type SafetyAction = "auto" | "prompt" | "deny";
@@ -68,9 +93,30 @@ export type HukoConfig = {
     llmIdleTimeoutMs: number;
   };
 
+  /**
+   * Context-compaction tuning.
+   *
+   * `level` is the operator-facing knob (5 presets + a literal "max"):
+   *   - concise   →  ~32k tokens of conversation before compaction
+   *   - standard  →  ~64k tokens (default)
+   *   - extended  →  ~128k tokens
+   *   - large     →  ~256k tokens
+   *   - max       →  95% of the active model's context window
+   *
+   * Lower presets clamp against `min(level_target, modelWindow * 0.95)`,
+   * so an absurd level on a small-window model degrades gracefully to
+   * "as much as this model can hold".
+   *
+   * `thresholdRatio` / `targetRatio` are the raw escape hatch — when
+   * present in any config layer (or set via `--compact-threshold=`),
+   * they override the level and the effective display flips to "custom".
+   * Both are absent in DEFAULT_CONFIG so "not set" can be distinguished
+   * from "set to the default 0.7".
+   */
   compaction: {
-    thresholdRatio: number;
-    targetRatio: number;
+    level: CompactionLevel;
+    thresholdRatio?: number;
+    targetRatio?: number;
     charsPerToken: number;
   };
 
@@ -221,8 +267,7 @@ export const DEFAULT_CONFIG: HukoConfig = {
     llmIdleTimeoutMs: 120_000,
   },
   compaction: {
-    thresholdRatio: 0.7,
-    targetRatio: 0.5,
+    level: "standard",
     charsPerToken: 4,
   },
   tools: {
