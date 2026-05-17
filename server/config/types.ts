@@ -264,7 +264,7 @@ export const DEFAULT_CONFIG: HukoConfig = {
     // thinking models, short enough that a hung provider doesn't leave
     // the task spinning forever. Bug: hukoDev session 4 task 28 hung
     // indefinitely with this set to (effectively) Infinity.
-    llmIdleTimeoutMs: 120_000,
+    llmIdleTimeoutMs: 300_000,
   },
   compaction: {
     level: "standard",
